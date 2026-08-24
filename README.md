@@ -6,13 +6,21 @@ Whisperの高速化調査から出発し、実測比較の結果、CPUリアル�
 Parakeet（NVIDIA, TDT/CTC系）への乗り換えが唯一の現実解と判断（実測40〜65倍差）。
 Whisper large-v3-turbo は精度基準（リファレンス）として保持する。
 
-## 構成
+## 構成（5層モデルカタログ + 二段パス）
 
-- **多言語認識**: Parakeet TDT 0.6B v3 INT8（欧州25言語） — CPU RTF 0.062
-- **日本語認識**: Parakeet tdt_ctc 0.6B ja INT8（ReazonSpeech学習） — CPU RTF 0.048
-- **言語ルーティング**: whisper-tiny によるSpoken Language ID → ja / v3 に振り分け
-- **VAD**: Silero VAD（発話区間のみデコード）
-- ランタイム: sherpa-onnx (ONNX Runtime, CPU INT8)
+| ルート | モデル | 根拠（実音声CER/WER） |
+|---|---|---|
+| 日本語 | ReazonSpeech k2 Zipformer INT8 | CER 8.6%（whisper-turbo 13.8%を上回る）RTF 0.02 |
+| 中国語 | Paraformer-zh INT8 | CER 5.6% |
+| 韓国語・広東語 | SenseVoice small INT8 | ko 9.3% / yue 6.0% |
+| 英語+欧州24言語 | Parakeet TDT 0.6B v3 INT8 | en WER 2.5%（大文字小文字・句読点付き） |
+| その他 約1600言語 | Meta Omnilingual ASR 300M CTC INT8 | フォールバック、RTF 0.086 |
+
+- **パイプライン**: Silero VAD（0.35s終端検出+0.8sプリロール）→ 発話中に早期言語判定+モデル先読み → 確定デコード
+- **速報字幕**: 発話中0.5秒ごとにドラフト表示、発話終了から約0.1秒で確定（日本語は句読点BERT付き）
+- **二段パス**: 2秒の無音で発話群を一括再デコードし高精度版を出力（実放送jaでCER 15.5%→12.0%）
+- **メモリ**: LRUアンロールで約2GB以内。モデルは遅延ロード
+- ランタイム: sherpa-onnx (ONNX Runtime, CPU INT8) のみ。GPU・PyTorch不要
 
 ## ディレクトリ
 
@@ -48,5 +56,9 @@ python -m venv .venv
 .venv/Scripts/python scripts/realtime_transcribe.py --wav testdata/ja_test.wav
 
 # OBS字幕オーバーレイ付き（OBSのブラウザソースに http://localhost:8765 を追加）
+# トランスクリプト一覧は http://localhost:8765/transcript
 .venv/Scripts/python scripts/realtime_transcribe.py --serve
+
+# 高精度トランスクリプトをファイルに保存
+.venv/Scripts/python scripts/realtime_transcribe.py --transcript out.txt
 ```
