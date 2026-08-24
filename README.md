@@ -67,4 +67,7 @@ python -m venv .venv
 
 # 固有名詞対策: ホットワード / 置換辞書（誤=正 形式）
 .venv/Scripts/python scripts/realtime_transcribe.py --hotwords words.txt --replace dict.txt
+
+# 話者ラベル付き (S1, S2, ... コラボ・会議向け)
+.venv/Scripts/python scripts/realtime_transcribe.py --speakers
 ```
