@@ -295,19 +295,7 @@ class TranslationWorker:
                     print(f"[→{lang}] {out}")
 
 
-def script_corrected_lang(tagged: str, text: str) -> str:
-    """Correct an LID tag that contradicts the script of the decoded text."""
-    letters = [c for c in text if c.isalpha()]
-    if not letters:
-        return tagged
-    cjk = sum(1 for c in letters if "぀" <= c <= "ヿ" or "一" <= c <= "鿿")
-    frac = cjk / len(letters)
-    if frac > 0.3 and tagged not in ("ja", "zh", "yue", "ko"):
-        return "ja"
-    if frac < 0.05 and tagged == "ja" and len(letters) >= 8:
-        return "en"
-    return tagged
-
+from asr_engine import script_corrected_lang  # shared with the engine's live correction
 
 GROUP_GAP_S = 2.0   # this much true silence closes an utterance group
 GROUP_MAX_S = 25.0  # refine early rather than outgrow the audio history

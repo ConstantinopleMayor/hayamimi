@@ -120,6 +120,20 @@ def _build_lid(threads: int):
     return sherpa_onnx.SpokenLanguageIdentification(cfg)
 
 
+def script_corrected_lang(tagged: str, text: str) -> str:
+    """Correct an LID tag that contradicts the script of the decoded text."""
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return tagged
+    cjk = sum(1 for c in letters if "぀" <= c <= "ヿ" or "一" <= c <= "鿿")
+    frac = cjk / len(letters)
+    if frac > 0.3 and tagged not in ("ja", "zh", "yue", "ko"):
+        return "ja"
+    if frac < 0.05 and tagged == "ja" and len(letters) >= 8:
+        return "en"
+    return tagged
+
+
 def _load_replacements(path: str) -> list[tuple[str, str]]:
     """User dictionary: one "wrong=right" (or tab/arrow-separated) pair per line."""
     if not path:
@@ -383,6 +397,16 @@ class RoutedASR:
             # the 1600-language generalist gets the last word.
             text = self._decode(self._get("omni"), samples, sample_rate)
             tier = "omni"
+        corrected = script_corrected_lang(lang, text)
+        if live and text.strip() and corrected != lang:
+            # the decoded script contradicts the LID tag (romaji-mangled
+            # English under a ja tag, kanji under an en tag): one re-decode
+            # with the right model fixes the final before anyone sees it
+            rec2, tier2 = self._route(corrected)
+            text2 = self._decode(rec2, samples, sample_rate)
+            if text2.strip():
+                lang, tier, text = corrected, tier2, text2
+
         text = self._replace(text)
         if lang == "ko" and text.strip() and self.ko_spacer is not None:
             try:
