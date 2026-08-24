@@ -220,14 +220,19 @@ class RoutedASR:
         return self.lid.compute(stream)
 
     @staticmethod
-    def _decode(rec, samples: np.ndarray, sample_rate: int) -> str:
+    def _decode_full(rec, samples: np.ndarray, sample_rate: int) -> tuple[str, str]:
         stream = rec.create_stream()
         stream.accept_waveform(sample_rate, samples)
         rec.decode_stream(stream)
         text = stream.result.text
         # ReazonSpeech models emit TV-subtitle annotation brackets around
         # boundary words; they carry no speech content.
-        return text.replace("［", "").replace("］", "")
+        text = text.replace("［", "").replace("］", "")
+        return text, getattr(stream.result, "lang", "") or ""
+
+    @classmethod
+    def _decode(cls, rec, samples: np.ndarray, sample_rate: int) -> str:
+        return cls._decode_full(rec, samples, sample_rate)[0]
 
     def _route(self, lang: str) -> tuple[object, str]:
         if lang in RZ_LANGS:
@@ -272,9 +277,20 @@ class RoutedASR:
             lang = self._identify_lang(samples, sample_rate)
             lid_ms = (time.perf_counter() - t0) * 1000
 
-        rec, tier = self._route(lang)
         t0 = time.perf_counter()
-        text = self._decode(rec, samples, sample_rate)
+        if lang == "zh":
+            # whisper-tiny LID labels Cantonese as "zh" (measured 0/12 correct
+            # on FLEURS yue), so let SenseVoice's internal LID arbitrate: keep
+            # its transcript for yue, re-decode with Paraformer for true zh.
+            text, sv_lang = self._decode_full(self._get("sv"), samples, sample_rate)
+            if "yue" in sv_lang:
+                lang, tier = "yue", "sv"
+            else:
+                text = self._decode(self._get("pz"), samples, sample_rate)
+                tier = "pz"
+        else:
+            rec, tier = self._route(lang)
+            text = self._decode(rec, samples, sample_rate)
         if not text.strip() and tier != "omni":
             # safety net: the specialist came back empty (likely LID mistake);
             # the 1600-language generalist gets the last word.
