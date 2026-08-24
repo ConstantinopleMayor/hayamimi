@@ -125,3 +125,21 @@ tier1 SenseVoice (ja/zh/ko/yue/en) / tier2 Parakeet v3 (欧州25言語) / tier3 
 - メモリ実測 (psutil RSS): tier1+VAD+LID のみ **0.48GB**、全3層ロード後 **1.50GB** → GOALS目標 (<2GB) 達成。
 - 既知課題（未着手）: SenseVoiceの韓国語出力にトークン間の過剰スペース（正しい分かち書きには韓国語の単語分割器が必要）。
   実音声データセット（Common Voice等）での精度検証も未実施。
+
+## 2026-08-24: 実音声評価 (docs/EVAL_REAL.md) — 重大な発見と対策 (改善イテレーション#4-5)
+
+ReazonSpeech test（実TV放送日本語）15クリップ + LibriSpeech dev-clean（実英語朗読）15クリップで4+2システムを評価。
+
+| system | WER-en | CER-ja (実音声) | mean RTF | 備考 |
+|---|---|---|---|---|
+| Parakeet | 2.52% | 24.40% | 0.063 | |
+| SenseVoice | 2.88% | 33.68% | 0.028 | TTSでは8.3%だった |
+| Omnilingual | 3.60% | 51.20% | 0.086 | 日本語特化なしの限界 |
+| Whisper-turbo | 2.16% | 13.75% | 1.388 | 実時間未達 |
+| kotoba-whisper v2 INT8 | - | 24.05% | 1.092 | 短尺では30秒パディングが支配的で蒸留の恩恵消失 |
+| **ReazonSpeech k2 zipformer (ja-en)** | **1.61%** | **8.59%** | **0.021** | **全システム中、精度・速度とも最良** |
+
+- **TTS評価は実音声の序列を全く予測できなかった**（SenseVoiceはTTSで最良→実音声で3位）。実音声評価の常設が必須。
+- 対策としてエンジンに tier0 (ja/en → ReazonSpeech zipformer) を追加。これで日本語は「Whisper turboより高精度かつ66倍速い」構成になった。
+- VADプリロール（最大0.8秒、前セグメント食い込みガード付き）で発話冒頭の欠落を軽減。ReazonSpeechモデルの「［］」ゴミトークンは除去。
+- 既知の癖: edge-tts合成音声の柔らかい語頭（「明日の」等）をrzが落とすことがある。実音声では未観測（15クリップで冒頭欠落なし）。
