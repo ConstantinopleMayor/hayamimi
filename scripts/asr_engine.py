@@ -12,6 +12,7 @@ languages actually spoken in the session.
 """
 import glob
 import os
+import threading
 import time
 
 import numpy as np
@@ -81,37 +82,52 @@ def _build_lid(threads: int):
 class RoutedASR:
     """Lazily loads catalog models and routes each segment by detected language."""
 
-    def __init__(self, threads: int = 4, warmup: bool = True):
+    def __init__(self, threads: int = 4, warmup: bool = True, preload: bool = True):
         self._threads = threads
         self._sv = None
         self._v3 = None
         self._omni = None
+        self._load_lock = threading.Lock()
         self.last_lang = None  # sticky language from the most recent final
         self.lid = _build_lid(threads)
         if warmup:
             # LID + tier-1 model pay their one-time kernel/allocation costs here
-            # so the first real segment isn't penalized. Other tiers warm up on
-            # their own first use.
+            # so the first real segment isn't penalized.
             silence = np.zeros(16000, dtype=np.float32)
             self._identify_lang(silence, 16000)
             self._decode(self.sense_voice, silence, 16000)
+        if preload:
+            # pull tier-2/3 in on a daemon thread so the first non-tier-1
+            # utterance doesn't pay the ~2s model-load cost.
+            threading.Thread(target=self._preload_rest, daemon=True).start()
+
+    def _preload_rest(self):
+        silence = np.zeros(16000, dtype=np.float32)
+        for rec in (self.v3, self.omni):
+            self._decode(rec, silence, 16000)
 
     @property
     def sense_voice(self):
         if self._sv is None:
-            self._sv = _build_sense_voice(self._threads)
+            with self._load_lock:
+                if self._sv is None:
+                    self._sv = _build_sense_voice(self._threads)
         return self._sv
 
     @property
     def v3(self):
         if self._v3 is None:
-            self._v3 = _build_v3_recognizer(self._threads)
+            with self._load_lock:
+                if self._v3 is None:
+                    self._v3 = _build_v3_recognizer(self._threads)
         return self._v3
 
     @property
     def omni(self):
         if self._omni is None:
-            self._omni = _build_omnilingual(self._threads)
+            with self._load_lock:
+                if self._omni is None:
+                    self._omni = _build_omnilingual(self._threads)
         return self._omni
 
     def _identify_lang(self, samples: np.ndarray, sample_rate: int) -> str:
