@@ -167,6 +167,8 @@ class RoutedASR:
         self._max_resident = max_resident
         self._punctuate = punctuate
         self._punct = None
+        self._ko_spacer = None
+        self._ko_spacer_ok = True
         self._hotwords_file = hotwords_file
         self._replacements = _load_replacements(replace_file)
         self._load_lock = threading.Lock()  # punct + registry bookkeeping
@@ -187,6 +189,7 @@ class RoutedASR:
     def _preload_rest(self):
         if self._punctuate:
             self.punct  # first: ja finals need this almost immediately
+        self.ko_spacer  # cheap (~1s); fixes SenseVoice's over-split Korean
         silence = np.zeros(16000, dtype=np.float32)
         budget = None if self._max_resident is None else self._max_resident
         for name in _PRELOAD_ORDER:
@@ -209,6 +212,22 @@ class RoutedASR:
                     except Exception:
                         self._punctuate = False  # missing model/deps: degrade quietly
         return self._punct
+
+    @property
+    def ko_spacer(self):
+        """Kiwi morphological analyzer used to re-space Korean output."""
+        if self._ko_spacer is None and self._ko_spacer_ok:
+            with self._load_lock:
+                if self._ko_spacer is None and self._ko_spacer_ok:
+                    try:
+                        from kiwipiepy import Kiwi
+
+                        spacer = Kiwi()
+                        spacer.space("한 국", reset_whitespace=True)  # warmup
+                        self._ko_spacer = spacer
+                    except Exception:
+                        self._ko_spacer_ok = False  # missing dep: degrade quietly
+        return self._ko_spacer
 
     def _get(self, name: str):
         rec = self._models.get(name)
@@ -333,6 +352,13 @@ class RoutedASR:
             text = self._decode(self._get("omni"), samples, sample_rate)
             tier = "omni"
         text = self._replace(text)
+        if lang == "ko" and text.strip() and self.ko_spacer is not None:
+            try:
+                # SenseVoice emits a space between every token; Kiwi restores
+                # real Korean word spacing (docs/BENCHMARKS.md iteration 20)
+                text = self.ko_spacer.space(text, reset_whitespace=True)
+            except Exception:
+                pass
         if lang == "ja" and text.strip() and self.punct is not None:
             try:
                 text = self.punct.restore(text)
