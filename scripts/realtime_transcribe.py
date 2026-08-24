@@ -141,7 +141,7 @@ class SessionStats:
                 f"mean_latency={mean:.0f}ms max_latency={max(self.latencies_ms):.0f}ms")
 
 
-PREROLL_S = 0.8  # audio to prepend before the VAD's detected speech onset
+PREROLL_S = 1.0  # audio to prepend before the VAD's detected speech onset
 
 
 class AudioHistory:
@@ -317,6 +317,10 @@ def main():
                     help="disable the second-pass re-decode of utterance groups")
     ap.add_argument("--transcript", metavar="PATH",
                     help="append refined transcript lines to this file")
+    ap.add_argument("--hotwords", metavar="PATH", default="",
+                    help="hotword list (one per line) to bias Japanese decoding")
+    ap.add_argument("--replace", metavar="PATH", default="",
+                    help="user dictionary: 'wrong=right' per line, applied to all output")
     args = ap.parse_args()
 
     server = None
@@ -329,7 +333,8 @@ def main():
 
     print("loading models...", file=sys.stderr)
     asr = RoutedASR(threads=args.threads,
-                    max_resident=args.max_resident if args.max_resident > 0 else None)
+                    max_resident=args.max_resident if args.max_resident > 0 else None,
+                    hotwords_file=args.hotwords, replace_file=args.replace)
     vad = build_vad(args.min_silence)
     stats = SessionStats()
     printer = PartialPrinter(enabled=not args.no_partial, server=server)
