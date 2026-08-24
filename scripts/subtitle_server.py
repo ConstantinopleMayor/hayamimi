@@ -42,18 +42,48 @@ OVERLAY_HTML = """<!doctype html>
 """
 
 
+TRANSCRIPT_HTML = """<!doctype html>
+<meta charset="utf-8">
+<title>Transcript</title>
+<style>
+  body { margin: 0; padding: 2rem; background: #111; color: #eee;
+         font-family: "Yu Gothic UI", "Meiryo", sans-serif; font-size: 1.1rem; line-height: 1.8; }
+  #lines p { margin: 0.2rem 0; }
+  .lang { color: #888; font-size: 0.8em; margin-right: 0.6em; }
+</style>
+<div id="lines"></div>
+<script>
+  const box = document.getElementById("lines");
+  const es = new EventSource("/events");
+  es.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    if (ev.type !== "refine") return;
+    const p = document.createElement("p");
+    p.innerHTML = '<span class="lang">[' + (ev.lang || "?") + ']</span>';
+    p.appendChild(document.createTextNode(ev.text));
+    box.appendChild(p);
+    window.scrollTo(0, document.body.scrollHeight);
+  };
+</script>
+"""
+
+
 class SubtitleServer:
     """Fan-out of subtitle events to any number of SSE clients."""
 
     def __init__(self, port: int = 8765):
         self.port = port
         self._clients: list[queue.Queue] = []
+        self._refines: list[str] = []  # recent refine events, replayed to new clients
         self._lock = threading.Lock()
         self._httpd = None
 
     def publish(self, event: dict):
         data = json.dumps(event, ensure_ascii=False)
         with self._lock:
+            if event.get("type") == "refine":
+                self._refines.append(data)
+                del self._refines[:-200]
             for q in self._clients:
                 q.put(data)
 
@@ -79,6 +109,8 @@ class SubtitleServer:
                     self.end_headers()
                     q: queue.Queue = queue.Queue()
                     with server._lock:
+                        for past in server._refines:  # replay history to newcomers
+                            q.put(past)
                         server._clients.append(q)
                     try:
                         while True:
@@ -91,6 +123,13 @@ class SubtitleServer:
                         with server._lock:
                             if q in server._clients:
                                 server._clients.remove(q)
+                elif self.path == "/transcript":
+                    body = TRANSCRIPT_HTML.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
                 else:
                     body = OVERLAY_HTML.encode("utf-8")
                     self.send_response(200)

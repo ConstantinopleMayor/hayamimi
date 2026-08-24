@@ -3,10 +3,10 @@
 Piper-style tiered catalog: a whisper-tiny spoken-language identifier routes
 each audio segment to the best model for that language.
 
-  tier 0  ja/en                -> ReazonSpeech k2 zipformer (best real-speech ja, fastest)
+  tier 0  ja                   -> ReazonSpeech k2 zipformer (best real-speech ja, fastest)
   tier 1  zh                   -> Paraformer-zh (best real-speech zh)
   tier 1  ko/yue               -> SenseVoice small
-  tier 2  25 European langs    -> Parakeet TDT v3 (transducer)
+  tier 2  en + 24 EU langs     -> Parakeet TDT v3 (casing + punctuation)
   tier 3  everything else      -> Omnilingual ASR 300M CTC (1600+ languages)
 
 Models are loaded lazily on first use and, when `max_resident` is set, the
@@ -31,7 +31,9 @@ PARA_ZH_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-paraformer-zh-int8-2025-10-0
 
 # ReazonSpeech ja-en zipformer: on real broadcast Japanese it beats even
 # whisper-turbo (CER 8.6% vs 13.8%) at RTF 0.02. See docs/EVAL_REAL.md.
-RZ_LANGS = {"ja", "en"}
+# English goes to v3 instead: rz outputs unpunctuated ALL-CAPS English
+# (WER 1.6% vs v3's 2.5%, but v3's casing/punctuation reads far better).
+RZ_LANGS = {"ja"}
 
 # Paraformer-zh beats SenseVoice on real Chinese (CER 5.6% vs 7.5%); the
 # dedicated Korean zipformer is worse (30%), so ko stays on SenseVoice.
@@ -43,7 +45,7 @@ SV_LANGS = {"ko", "yue"}
 
 # Languages covered by the Parakeet-TDT-0.6B-v3 multilingual model.
 V3_LANGS = {
-    "bg", "hr", "cs", "da", "nl", "et", "fi", "fr", "de", "el", "hu",
+    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu",
     "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
 }
 
