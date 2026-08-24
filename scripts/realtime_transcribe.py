@@ -220,11 +220,28 @@ def translate_by_sentence(translator, text: str) -> str:
     return " ".join(out)
 
 
-class TranslationWorker:
-    """Async ja->en translation of finalized lines (console + transcript only)."""
+def build_translators(langs: str) -> dict:
+    """"en,zh,ko" -> {lang: translator}. en uses FuguMT; zh/ko use M2M-100."""
+    out = {}
+    for lang in [x.strip() for x in langs.split(",") if x.strip()]:
+        if lang == "en":
+            from translate_ja_en import TranslatorJaEn
 
-    def __init__(self, translator):
-        self._translator = translator
+            out["en"] = TranslatorJaEn()
+        elif lang in ("zh", "ko"):
+            from translate_m2m import TranslatorM2M
+
+            out[lang] = TranslatorM2M(lang)
+        else:
+            print(f"unsupported translation target: {lang}", file=sys.stderr)
+    return out
+
+
+class TranslationWorker:
+    """Async ja->target translation of finalized lines (console display)."""
+
+    def __init__(self, translators: dict):
+        self._translators = translators
         self._q: "queue.Queue[str]" = queue.Queue()
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -234,9 +251,10 @@ class TranslationWorker:
     def _run(self):
         while True:
             text = self._q.get()
-            en = self._translator.translate(text)
-            if en != text:  # fallback returns the source: nothing worth showing
-                print(f"[→en] {en}")
+            for lang, tr in self._translators.items():
+                out = tr.translate(text)
+                if out != text:  # fallback returns the source: nothing worth showing
+                    print(f"[→{lang}] {out}")
 
 
 GROUP_GAP_S = 2.0   # this much true silence closes an utterance group
@@ -253,12 +271,12 @@ class Refiner:
 
     def __init__(self, asr: RoutedASR, history: AudioHistory, sample_rate: int,
                  printer: PartialPrinter, transcript_path: str | None = None,
-                 translator=None):
+                 translators: dict | None = None):
         self.asr = asr
         self.history = history
         self.sr = sample_rate
         self.printer = printer
-        self.translator = translator  # ja->en, applied synchronously per refine
+        self.translators = translators or {}  # ja->target, synchronous per refine
         self.spans: list[tuple[int, int, str, str]] = []
         self._transcript = open(transcript_path, "a", encoding="utf-8") if transcript_path else None
         self._worker_lock = threading.Lock()  # serialize refine decodes off the hot path
@@ -297,21 +315,21 @@ class Refiner:
                 print(f"[refine/{lang}] {text}")
                 if self.printer.server is not None:
                     self.printer.server.publish({"type": "refine", "text": text, "lang": lang})
-                en = None
-                if self.translator is not None and lang == "ja":
+                outs = []
+                if self.translators and lang == "ja":
                     # synchronous here (we're already off the hot path) so the
-                    # transcript keeps source and translation adjacent, in order.
-                    # FuguMT degrades on multi-sentence input (rambling
-                    # continuations), so translate sentence by sentence.
-                    en = translate_by_sentence(self.translator, text)
-                    if en and en != text:
-                        print(f"[refine→en] {en}")
-                    else:
-                        en = None
+                    # transcript keeps source and translations adjacent, in
+                    # order. The MT models degrade on multi-sentence input,
+                    # so translate sentence by sentence.
+                    for tlang, tr in self.translators.items():
+                        out = translate_by_sentence(tr, text)
+                        if out and out != text:
+                            print(f"[refine→{tlang}] {out}")
+                            outs.append((tlang, out))
                 if self._transcript is not None:
                     self._transcript.write(text + "\n")
-                    if en:
-                        self._transcript.write(f"  → {en}\n")
+                    for tlang, out in outs:
+                        self._transcript.write(f"  →{tlang} {out}\n")
                     self._transcript.flush()
 
         if force:
@@ -373,8 +391,9 @@ def main():
                     help="hotword list (one per line) to bias Japanese decoding")
     ap.add_argument("--replace", metavar="PATH", default="",
                     help="user dictionary: 'wrong=right' per line, applied to all output")
-    ap.add_argument("--translate", action="store_true",
-                    help="translate Japanese lines to English (console/transcript)")
+    ap.add_argument("--translate", nargs="?", const="en", default=None, metavar="LANGS",
+                    help="translate Japanese lines to these languages, comma-separated "
+                         "(en/zh/ko; default en). en=FuguMT, zh/ko=M2M-100")
     args = ap.parse_args()
 
     server = None
@@ -393,19 +412,18 @@ def main():
     stats = SessionStats()
     printer = PartialPrinter(enabled=not args.no_partial, server=server)
 
-    translator = None
+    translators = {}
     translator_worker = None
     if args.translate:
-        from translate_ja_en import TranslatorJaEn
-
-        print("loading ja->en translator...", file=sys.stderr)
-        translator = TranslatorJaEn()
-        translator_worker = TranslationWorker(translator)
+        print(f"loading translators ({args.translate})...", file=sys.stderr)
+        translators = build_translators(args.translate)
+        if translators:
+            translator_worker = TranslationWorker(translators)
 
     history = AudioHistory(SAMPLE_RATE)
     refiner = None if args.no_refine else Refiner(asr, history, SAMPLE_RATE, printer,
                                                   transcript_path=args.transcript,
-                                                  translator=translator)
+                                                  translators=translators)
 
     def finish(sr):
         vad.flush()
