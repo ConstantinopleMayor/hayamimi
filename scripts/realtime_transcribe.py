@@ -208,7 +208,8 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         if translator_worker is not None and result["lang"] == "ja" and result["text"].strip():
             translator_worker.submit(result["text"])
         if spans_out is not None:
-            spans_out.append((seg_start, seg_end, result["lang"], result["text"]))
+            spans_out.append((seg_start, seg_end, result["lang"], result["text"],
+                              speaker.rstrip("|")))
     return drained
 
 
@@ -305,7 +306,7 @@ class Refiner:
         self.sr = sample_rate
         self.printer = printer
         self.translators = translators or {}  # ja->target, synchronous per refine
-        self.spans: list[tuple[int, int, str, str]] = []
+        self.spans: list[tuple[int, int, str, str, str]] = []
         self._transcript = open(transcript_path, "a", encoding="utf-8") if transcript_path else None
         self._worker_lock = threading.Lock()  # serialize refine decodes off the hot path
 
@@ -321,9 +322,11 @@ class Refiner:
             return
         lo = max(first_start - int(PREROLL_S * self.sr), self.history.offset)
         buf = self.history.buf[lo - self.history.offset:last_end - self.history.offset].copy()
-        langs = [lang for _, _, lang, _ in self.spans]
+        langs = [lang for _, _, lang, _, _ in self.spans]
         lang = max(set(langs), key=langs.count)
-        fast_joined = " ".join(t for _, _, _, t in self.spans if t.strip())
+        speakers = [sp for _, _, _, _, sp in self.spans if sp]
+        speaker = max(set(speakers), key=speakers.count) if speakers else ""
+        fast_joined = " ".join(t for _, _, _, t, _ in self.spans if t.strip())
         self.spans = []
         if len(buf) < self.sr // 2:
             return
@@ -340,7 +343,8 @@ class Refiner:
                     text = fast_joined
                 if not text.strip():
                     return
-                print(f"[refine/{lang}] {text}")
+                tag = f"{speaker}|{lang}" if speaker else lang
+                print(f"[refine/{tag}] {text}")
                 if self.printer.server is not None:
                     self.printer.server.publish({"type": "refine", "text": text, "lang": lang})
                 outs = []
@@ -355,7 +359,8 @@ class Refiner:
                             print(f"[refine→{tlang}] {out}")
                             outs.append((tlang, out))
                 if self._transcript is not None:
-                    self._transcript.write(text + "\n")
+                    prefix = f"{speaker}: " if speaker else ""
+                    self._transcript.write(prefix + text + "\n")
                     for tlang, out in outs:
                         self._transcript.write(f"  →{tlang} {out}\n")
                     self._transcript.flush()

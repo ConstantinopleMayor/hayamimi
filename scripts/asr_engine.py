@@ -257,7 +257,8 @@ class RoutedASR:
         text = stream.result.text
         # ReazonSpeech models emit TV-subtitle annotation brackets around
         # boundary words; they carry no speech content.
-        text = text.replace("［", "").replace("］", "")
+        for junk in ("［", "］", "〈", "〉"):
+            text = text.replace(junk, "")
         return text, getattr(stream.result, "lang", "") or ""
 
     @classmethod
