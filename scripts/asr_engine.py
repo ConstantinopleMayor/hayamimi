@@ -323,14 +323,26 @@ class RoutedASR:
         threading.Thread(target=self._route, args=(lang,), daemon=True).start()
         return lang
 
+    min_switch_s = 2.0  # a shorter utterance can't establish a new language
+
     def transcribe(self, samples: np.ndarray, sample_rate: int,
-                   known_lang: str | None = None) -> dict:
+                   known_lang: str | None = None, speech_s: float | None = None) -> dict:
         if known_lang is not None:
             lang, lid_ms = known_lang, 0.0
         else:
             t0 = time.perf_counter()
             lang = self._identify_lang(samples, sample_rate)
             lid_ms = (time.perf_counter() - t0) * 1000
+
+        suppress_fallback = False
+        if (speech_s is not None and speech_s < self.min_switch_s
+                and self.last_lang is not None and lang != self.last_lang):
+            # A sub-2s utterance in a brand-new language is almost always a
+            # jingle/SFX misdetection (docs/VIDEO_TEST.md), not code-switching.
+            # Decode with the session language instead; if that comes back
+            # empty it was non-speech and the omni fallback must not resurrect it.
+            lang = self.last_lang
+            suppress_fallback = True
 
         t0 = time.perf_counter()
         if lang == "zh":
@@ -346,7 +358,7 @@ class RoutedASR:
         else:
             rec, tier = self._route(lang)
             text = self._decode(rec, samples, sample_rate)
-        if not text.strip() and tier != "omni":
+        if not text.strip() and tier != "omni" and not suppress_fallback:
             # safety net: the specialist came back empty (likely LID mistake);
             # the 1600-language generalist gets the last word.
             text = self._decode(self._get("omni"), samples, sample_rate)
@@ -366,5 +378,6 @@ class RoutedASR:
                 pass  # a punctuation failure must never lose the transcription
         decode_ms = (time.perf_counter() - t0) * 1000
 
-        self.last_lang = lang
+        if text.strip():  # an empty result must not poison the sticky language
+            self.last_lang = lang
         return {"text": text, "lang": lang, "tier": tier, "lid_ms": lid_ms, "decode_ms": decode_ms}

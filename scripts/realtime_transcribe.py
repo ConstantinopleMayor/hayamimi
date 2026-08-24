@@ -187,11 +187,16 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         drained += 1
 
         seg_s = len(samples) / sample_rate
+        raw_speech_s = (seg_end - seg_start) / sample_rate  # without preroll
         # the early LID belongs to the utterance in progress; only the first
         # drained segment can safely claim it
         result = asr.transcribe(samples, sample_rate,
-                                known_lang=known_lang if drained == 1 else None)
+                                known_lang=known_lang if drained == 1 else None,
+                                speech_s=raw_speech_s)
         latency_ms = (time.perf_counter() - seg_end_time) * 1000
+
+        if not result["text"].strip():
+            continue  # non-speech (jingle/SFX): no line, no speaker, no span
 
         speaker = ""
         if speaker_labeler is not None:
@@ -426,6 +431,9 @@ def main():
                     help="hotword list (one per line) to bias Japanese decoding")
     ap.add_argument("--replace", metavar="PATH", default="",
                     help="user dictionary: 'wrong=right' per line, applied to all output")
+    ap.add_argument("--lang-switch-guard", type=float, default=2.0, metavar="SEC",
+                    help="treat a new-language detection shorter than SEC as noise and keep "
+                         "the session language (0 disables; raise for single-language streams)")
     ap.add_argument("--speakers", action="store_true",
                     help="label utterances with speaker ids (S1, S2, ...)")
     ap.add_argument("--translate", nargs="?", const="en", default=None, metavar="LANGS",
@@ -445,6 +453,7 @@ def main():
     asr = RoutedASR(threads=args.threads,
                     max_resident=args.max_resident if args.max_resident > 0 else None,
                     hotwords_file=args.hotwords, replace_file=args.replace)
+    asr.min_switch_s = max(args.lang_switch_guard, 0.0)
     vad = build_vad(args.min_silence)
     stats = SessionStats()
     printer = PartialPrinter(enabled=not args.no_partial, server=server)
