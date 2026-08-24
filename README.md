@@ -46,4 +46,7 @@ python -m venv .venv
 
 # リアルタイム（wavシミュレーション）
 .venv/Scripts/python scripts/realtime_transcribe.py --wav testdata/ja_test.wav
+
+# OBS字幕オーバーレイ付き（OBSのブラウザソースに http://localhost:8765 を追加）
+.venv/Scripts/python scripts/realtime_transcribe.py --serve
 ```
