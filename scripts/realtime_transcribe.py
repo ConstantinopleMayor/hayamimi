@@ -172,7 +172,8 @@ class AudioHistory:
 
 def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
                    printer: PartialPrinter, history: AudioHistory | None = None,
-                   known_lang: str | None = None, spans_out: list | None = None) -> int:
+                   known_lang: str | None = None, spans_out: list | None = None,
+                   translator_worker: "TranslationWorker | None" = None) -> int:
     drained = 0
     while not vad.empty():
         segment = vad.front
@@ -199,9 +200,43 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         print(f"[{result['lang']}/{result.get('tier', '?')}] {result['text']}  "
               f"(seg={seg_s:.1f}s, lid={result['lid_ms']:.0f}ms, "
               f"decode={result['decode_ms']:.0f}ms, latency={latency_ms:.0f}ms)")
+        if translator_worker is not None and result["lang"] == "ja" and result["text"].strip():
+            translator_worker.submit(result["text"])
         if spans_out is not None:
             spans_out.append((seg_start, seg_end, result["lang"], result["text"]))
     return drained
+
+
+def translate_by_sentence(translator, text: str) -> str:
+    """FuguMT is trained on single sentences; feed it one at a time."""
+    import re
+
+    sentences = [s for s in re.split(r"(?<=[。！？!?])\s*", text) if s.strip()]
+    out = []
+    for s in sentences:
+        en = translator.translate(s)
+        if en != s:
+            out.append(en)
+    return " ".join(out)
+
+
+class TranslationWorker:
+    """Async ja->en translation of finalized lines (console + transcript only)."""
+
+    def __init__(self, translator):
+        self._translator = translator
+        self._q: "queue.Queue[str]" = queue.Queue()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def submit(self, text: str):
+        self._q.put(text)
+
+    def _run(self):
+        while True:
+            text = self._q.get()
+            en = self._translator.translate(text)
+            if en != text:  # fallback returns the source: nothing worth showing
+                print(f"[→en] {en}")
 
 
 GROUP_GAP_S = 2.0   # this much true silence closes an utterance group
@@ -217,11 +252,13 @@ class Refiner:
     """
 
     def __init__(self, asr: RoutedASR, history: AudioHistory, sample_rate: int,
-                 printer: PartialPrinter, transcript_path: str | None = None):
+                 printer: PartialPrinter, transcript_path: str | None = None,
+                 translator=None):
         self.asr = asr
         self.history = history
         self.sr = sample_rate
         self.printer = printer
+        self.translator = translator  # ja->en, applied synchronously per refine
         self.spans: list[tuple[int, int, str, str]] = []
         self._transcript = open(transcript_path, "a", encoding="utf-8") if transcript_path else None
         self._worker_lock = threading.Lock()  # serialize refine decodes off the hot path
@@ -260,8 +297,21 @@ class Refiner:
                 print(f"[refine/{lang}] {text}")
                 if self.printer.server is not None:
                     self.printer.server.publish({"type": "refine", "text": text, "lang": lang})
+                en = None
+                if self.translator is not None and lang == "ja":
+                    # synchronous here (we're already off the hot path) so the
+                    # transcript keeps source and translation adjacent, in order.
+                    # FuguMT degrades on multi-sentence input (rambling
+                    # continuations), so translate sentence by sentence.
+                    en = translate_by_sentence(self.translator, text)
+                    if en and en != text:
+                        print(f"[refine→en] {en}")
+                    else:
+                        en = None
                 if self._transcript is not None:
                     self._transcript.write(text + "\n")
+                    if en:
+                        self._transcript.write(f"  → {en}\n")
                     self._transcript.flush()
 
         if force:
@@ -272,7 +322,8 @@ class Refiner:
 
 def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
                printer: PartialPrinter, refiner: "Refiner | None" = None,
-               history: AudioHistory | None = None):
+               history: AudioHistory | None = None,
+               translator_worker: "TranslationWorker | None" = None):
     audio_pos = 0.0
     last_partial = 0.0
     early_lang = None  # LID result computed mid-utterance so finals skip it
@@ -295,7 +346,8 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
                 printer.show(asr.partial(cur, sample_rate))
 
         if drain_segments(vad, sample_rate, asr, stats, printer, history, early_lang,
-                          spans_out=refiner.spans if refiner else None):
+                          spans_out=refiner.spans if refiner else None,
+                          translator_worker=translator_worker):
             early_lang = None
         if refiner is not None and not vad.is_speech_detected():
             refiner.maybe_refine(int(audio_pos * sample_rate))
@@ -321,6 +373,8 @@ def main():
                     help="hotword list (one per line) to bias Japanese decoding")
     ap.add_argument("--replace", metavar="PATH", default="",
                     help="user dictionary: 'wrong=right' per line, applied to all output")
+    ap.add_argument("--translate", action="store_true",
+                    help="translate Japanese lines to English (console/transcript)")
     args = ap.parse_args()
 
     server = None
@@ -339,14 +393,25 @@ def main():
     stats = SessionStats()
     printer = PartialPrinter(enabled=not args.no_partial, server=server)
 
+    translator = None
+    translator_worker = None
+    if args.translate:
+        from translate_ja_en import TranslatorJaEn
+
+        print("loading ja->en translator...", file=sys.stderr)
+        translator = TranslatorJaEn()
+        translator_worker = TranslationWorker(translator)
+
     history = AudioHistory(SAMPLE_RATE)
     refiner = None if args.no_refine else Refiner(asr, history, SAMPLE_RATE, printer,
-                                                  transcript_path=args.transcript)
+                                                  transcript_path=args.transcript,
+                                                  translator=translator)
 
     def finish(sr):
         vad.flush()
         drain_segments(vad, sr, asr, stats, printer, history,
-                       spans_out=refiner.spans if refiner else None)
+                       spans_out=refiner.spans if refiner else None,
+                       translator_worker=translator_worker)
         if refiner is not None:
             refiner.maybe_refine(0, force=True)
 
@@ -354,10 +419,11 @@ def main():
         if args.wav:
             samples, sr = read_wave(args.wav)  # resampled to SAMPLE_RATE if needed
             run_stream(wav_chunks(samples, sr, realtime=not args.no_realtime),
-                       vad, sr, asr, stats, printer, refiner, history)
+                       vad, sr, asr, stats, printer, refiner, history, translator_worker)
             finish(sr)
         else:
-            run_stream(mic_chunks(), vad, SAMPLE_RATE, asr, stats, printer, refiner, history)
+            run_stream(mic_chunks(), vad, SAMPLE_RATE, asr, stats, printer, refiner, history,
+                       translator_worker)
     except KeyboardInterrupt:
         finish(SAMPLE_RATE)
     finally:
