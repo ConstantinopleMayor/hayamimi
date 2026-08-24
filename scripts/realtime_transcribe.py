@@ -100,14 +100,17 @@ PARTIAL_WINDOW_S = 8.0  # cap draft decoding to the last N seconds of the uttera
 class PartialPrinter:
     """Shows in-progress drafts; overwrites in place on a tty, one line otherwise."""
 
-    def __init__(self, enabled: bool):
+    def __init__(self, enabled: bool, server=None):
         self.enabled = enabled
+        self.server = server
         self._tty = sys.stdout.isatty()
         self._last_len = 0
 
     def show(self, text: str):
         if not self.enabled or not text:
             return
+        if self.server is not None:
+            self.server.partial(text)
         if self._tty:
             pad = max(self._last_len - len(text), 0)
             print("\r~ " + text + " " * pad, end="", flush=True)
@@ -181,6 +184,8 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         stats.segments += 1
         stats.latencies_ms.append(latency_ms)
         printer.clear()
+        if printer.server is not None:
+            printer.server.final(result["text"], result["lang"])
         print(f"[{result['lang']}/{result.get('tier', '?')}] {result['text']}  "
               f"(seg={seg_s:.1f}s, lid={result['lid_ms']:.0f}ms, "
               f"decode={result['decode_ms']:.0f}ms, latency={latency_ms:.0f}ms)")
@@ -214,13 +219,23 @@ def main():
     ap.add_argument("--no-realtime", action="store_true", help="don't sleep between chunks in --wav mode")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--no-partial", action="store_true", help="disable in-progress draft subtitles")
+    ap.add_argument("--serve", type=int, nargs="?", const=8765, default=None, metavar="PORT",
+                    help="serve an OBS browser-source overlay at http://localhost:PORT (default 8765)")
     args = ap.parse_args()
+
+    server = None
+    if args.serve:
+        from subtitle_server import SubtitleServer
+
+        server = SubtitleServer(port=args.serve).start()
+        print(f"subtitle overlay: http://localhost:{args.serve}/  (OBS browser source)",
+              file=sys.stderr)
 
     print("loading models...", file=sys.stderr)
     asr = RoutedASR(threads=args.threads)
     vad = build_vad()
     stats = SessionStats()
-    printer = PartialPrinter(enabled=not args.no_partial)
+    printer = PartialPrinter(enabled=not args.no_partial, server=server)
 
     try:
         if args.wav:
