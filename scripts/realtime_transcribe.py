@@ -53,15 +53,19 @@ def read_wave(path: str, target_rate: int = SAMPLE_RATE):
     return samples, sample_rate
 
 
-def build_vad(min_silence: float = 0.35) -> sherpa_onnx.VoiceActivityDetector:
+def build_vad(min_silence: float = 0.35,
+              max_speech: float = 12.0) -> sherpa_onnx.VoiceActivityDetector:
     # 0.35s endpointing measured CER-neutral vs 0.5s on real broadcast ja
-    # (docs/BENCHMARKS.md iteration 9) and finalizes 150ms sooner.
+    # (docs/BENCHMARKS.md iteration 9) and finalizes 150ms sooner. max_speech
+    # force-splits breathless monologues (radio/game commentary hit 21s
+    # segments) so finals stay timely; the refine pass re-merges the group.
     cfg = sherpa_onnx.VadModelConfig(
         silero_vad=sherpa_onnx.SileroVadModelConfig(
             model=VAD_MODEL,
             min_silence_duration=min_silence,
             min_speech_duration=0.25,
             window_size=WINDOW_SIZE,
+            max_speech_duration=max_speech,
         ),
         sample_rate=SAMPLE_RATE,
         num_threads=1,
@@ -419,6 +423,8 @@ def main():
     ap.add_argument("--no-partial", action="store_true", help="disable in-progress draft subtitles")
     ap.add_argument("--min-silence", type=float, default=0.35,
                     help="silence (s) that ends an utterance; lower = snappier finals, more splits")
+    ap.add_argument("--max-speech", type=float, default=12.0,
+                    help="force-finalize an utterance after this many seconds of continuous speech")
     ap.add_argument("--max-resident", type=int, default=3,
                     help="max non-tier0 models kept in memory (LRU eviction); 0 or less = unlimited")
     ap.add_argument("--serve", type=int, nargs="?", const=8765, default=None, metavar="PORT",
@@ -454,7 +460,7 @@ def main():
                     max_resident=args.max_resident if args.max_resident > 0 else None,
                     hotwords_file=args.hotwords, replace_file=args.replace)
     asr.min_switch_s = max(args.lang_switch_guard, 0.0)
-    vad = build_vad(args.min_silence)
+    vad = build_vad(args.min_silence, args.max_speech)
     stats = SessionStats()
     printer = PartialPrinter(enabled=not args.no_partial, server=server)
 
