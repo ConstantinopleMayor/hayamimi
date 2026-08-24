@@ -140,7 +140,8 @@ class RoutedASR:
         self._max_resident = max_resident
         self._punctuate = punctuate
         self._punct = None
-        self._load_lock = threading.Lock()
+        self._load_lock = threading.Lock()  # punct + registry bookkeeping
+        self._model_locks = {name: threading.Lock() for name in _BUILDERS}
         self.last_lang = None  # sticky language from the most recent final
         self.lid = _build_lid(threads)
         if warmup:
@@ -183,12 +184,14 @@ class RoutedASR:
     def _get(self, name: str):
         rec = self._models.get(name)
         if rec is None:
-            with self._load_lock:
+            # per-model lock: loading v3 must not block a prefetch of omni
+            with self._model_locks[name]:
                 rec = self._models.get(name)
                 if rec is None:
-                    self._evict_if_needed(incoming=name)
                     rec = _BUILDERS[name](self._threads)
-                    self._models[name] = rec
+                    with self._load_lock:
+                        self._evict_if_needed(incoming=name)
+                        self._models[name] = rec
         self._last_used[name] = time.monotonic()
         return rec
 
@@ -248,10 +251,24 @@ class RoutedASR:
             rec = self._get("rz")
         return self._decode(rec, samples, sample_rate)
 
-    def transcribe(self, samples: np.ndarray, sample_rate: int) -> dict:
-        t0 = time.perf_counter()
+    def identify(self, samples: np.ndarray, sample_rate: int) -> str:
+        """Public LID hook so callers can identify the language mid-utterance.
+
+        Also kicks off a background prefetch of that language's model, so by
+        the time the utterance finalizes the recognizer is already resident.
+        """
         lang = self._identify_lang(samples, sample_rate)
-        lid_ms = (time.perf_counter() - t0) * 1000
+        threading.Thread(target=self._route, args=(lang,), daemon=True).start()
+        return lang
+
+    def transcribe(self, samples: np.ndarray, sample_rate: int,
+                   known_lang: str | None = None) -> dict:
+        if known_lang is not None:
+            lang, lid_ms = known_lang, 0.0
+        else:
+            t0 = time.perf_counter()
+            lang = self._identify_lang(samples, sample_rate)
+            lid_ms = (time.perf_counter() - t0) * 1000
 
         rec, tier = self._route(lang)
         t0 = time.perf_counter()

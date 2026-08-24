@@ -168,7 +168,9 @@ class AudioHistory:
 
 
 def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
-                   printer: PartialPrinter, history: AudioHistory | None = None):
+                   printer: PartialPrinter, history: AudioHistory | None = None,
+                   known_lang: str | None = None) -> int:
+    drained = 0
     while not vad.empty():
         segment = vad.front
         seg_end_time = time.perf_counter()  # segment-end reference point for latency
@@ -176,9 +178,13 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         if history is not None:
             samples = history.with_preroll(segment.start, samples)
         vad.pop()
+        drained += 1
 
         seg_s = len(samples) / sample_rate
-        result = asr.transcribe(samples, sample_rate)
+        # the early LID belongs to the utterance in progress; only the first
+        # drained segment can safely claim it
+        result = asr.transcribe(samples, sample_rate,
+                                known_lang=known_lang if drained == 1 else None)
         latency_ms = (time.perf_counter() - seg_end_time) * 1000
 
         stats.segments += 1
@@ -189,12 +195,14 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         print(f"[{result['lang']}/{result.get('tier', '?')}] {result['text']}  "
               f"(seg={seg_s:.1f}s, lid={result['lid_ms']:.0f}ms, "
               f"decode={result['decode_ms']:.0f}ms, latency={latency_ms:.0f}ms)")
+    return drained
 
 
 def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
                printer: PartialPrinter):
     audio_pos = 0.0
     last_partial = 0.0
+    early_lang = None  # LID result computed mid-utterance so finals skip it
     history = AudioHistory(sample_rate)
     for chunk in chunks:
         vad.accept_waveform(chunk)
@@ -202,15 +210,18 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
         audio_pos += len(chunk) / sample_rate
         stats.total_audio_s += len(chunk) / sample_rate
 
-        if printer.enabled and vad.is_speech_detected() and audio_pos - last_partial >= PARTIAL_EVERY_S:
+        if vad.is_speech_detected() and audio_pos - last_partial >= PARTIAL_EVERY_S:
             last_partial = audio_pos
             cur = np.asarray(vad.current_segment.samples, dtype=np.float32)
             if len(cur) > int(PARTIAL_WINDOW_S * sample_rate):
                 cur = cur[-int(PARTIAL_WINDOW_S * sample_rate):]
-            if len(cur) >= sample_rate // 2:  # need ~0.5s before a draft is useful
+            if early_lang is None and len(cur) >= int(1.0 * sample_rate):
+                early_lang = asr.identify(cur, sample_rate)
+            if printer.enabled and len(cur) >= sample_rate // 2:
                 printer.show(asr.partial(cur, sample_rate))
 
-        drain_segments(vad, sample_rate, asr, stats, printer, history)
+        if drain_segments(vad, sample_rate, asr, stats, printer, history, early_lang):
+            early_lang = None
 
 
 def main():
