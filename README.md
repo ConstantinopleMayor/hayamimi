@@ -61,4 +61,10 @@ python -m venv .venv
 
 # 高精度トランスクリプトをファイルに保存
 .venv/Scripts/python scripts/realtime_transcribe.py --transcript out.txt
+
+# 日本語→英語の翻訳字幕付き (FuguMT, CC BY-SA 4.0)
+.venv/Scripts/python scripts/realtime_transcribe.py --translate
+
+# 固有名詞対策: ホットワード / 置換辞書（誤=正 形式）
+.venv/Scripts/python scripts/realtime_transcribe.py --hotwords words.txt --replace dict.txt
 ```
