@@ -52,11 +52,13 @@ def read_wave(path: str, target_rate: int = SAMPLE_RATE):
     return samples, sample_rate
 
 
-def build_vad() -> sherpa_onnx.VoiceActivityDetector:
+def build_vad(min_silence: float = 0.35) -> sherpa_onnx.VoiceActivityDetector:
+    # 0.35s endpointing measured CER-neutral vs 0.5s on real broadcast ja
+    # (docs/BENCHMARKS.md iteration 9) and finalizes 150ms sooner.
     cfg = sherpa_onnx.VadModelConfig(
         silero_vad=sherpa_onnx.SileroVadModelConfig(
             model=VAD_MODEL,
-            min_silence_duration=0.5,
+            min_silence_duration=min_silence,
             min_speech_duration=0.25,
             window_size=WINDOW_SIZE,
         ),
@@ -230,6 +232,8 @@ def main():
     ap.add_argument("--no-realtime", action="store_true", help="don't sleep between chunks in --wav mode")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--no-partial", action="store_true", help="disable in-progress draft subtitles")
+    ap.add_argument("--min-silence", type=float, default=0.35,
+                    help="silence (s) that ends an utterance; lower = snappier finals, more splits")
     ap.add_argument("--max-resident", type=int, default=3,
                     help="max non-tier0 models kept in memory (LRU eviction); 0 or less = unlimited")
     ap.add_argument("--serve", type=int, nargs="?", const=8765, default=None, metavar="PORT",
@@ -247,7 +251,7 @@ def main():
     print("loading models...", file=sys.stderr)
     asr = RoutedASR(threads=args.threads,
                     max_resident=args.max_resident if args.max_resident > 0 else None)
-    vad = build_vad()
+    vad = build_vad(args.min_silence)
     stats = SessionStats()
     printer = PartialPrinter(enabled=not args.no_partial, server=server)
 
