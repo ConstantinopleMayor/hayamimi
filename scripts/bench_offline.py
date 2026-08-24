@@ -55,7 +55,14 @@ def build_recognizer(model_dir: str, threads: int, language: str = ""):
 
     single = find("model*.onnx")
     assert single, f"no onnx model found in {model_dir}"
-    if "sense-voice" in os.path.basename(os.path.normpath(model_dir)):
+    base = os.path.basename(os.path.normpath(model_dir))
+    if "omnilingual" in base:
+        return sherpa_onnx.OfflineRecognizer.from_omnilingual_asr_ctc(
+            model=single,
+            tokens=tokens,
+            num_threads=threads,
+        )
+    if "sense-voice" in base:
         return sherpa_onnx.OfflineRecognizer.from_sense_voice(
             model=single,
             tokens=tokens,

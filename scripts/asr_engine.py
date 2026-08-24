@@ -1,25 +1,34 @@
 """Routed multilingual ASR engine on top of sherpa-onnx.
 
-Loads a Japanese NeMo CTC model and a multilingual (25 European langs) NeMo
-transducer model (Parakeet TDT v3), plus a whisper-tiny based spoken language
-identifier used to route each audio segment to the right recognizer.
+Piper-style tiered catalog: a whisper-tiny spoken-language identifier routes
+each audio segment to the best model for that language.
+
+  tier 1  ja/zh/ko/yue/en      -> SenseVoice small (fastest, most accurate CJK)
+  tier 2  25 European langs    -> Parakeet TDT v3 (transducer)
+  tier 3  everything else      -> Omnilingual ASR 300M CTC (1600+ languages)
+
+Models are loaded lazily on first use, so memory stays proportional to the
+languages actually spoken in the session.
 """
 import glob
 import os
 import time
-from dataclasses import dataclass
 
 import numpy as np
 import sherpa_onnx
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 V3_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8")
-JA_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8")
+SV_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")
+OMNI_MODEL_DIR = os.path.join(MODELS_DIR, "omnilingual-300m-ctc-int8")
 WHISPER_TINY_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-whisper-tiny")
+
+# SenseVoice small coverage (built-in ITN and punctuation).
+SV_LANGS = {"ja", "zh", "ko", "yue", "en"}
 
 # Languages covered by the Parakeet-TDT-0.6B-v3 multilingual model.
 V3_LANGS = {
-    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu",
+    "bg", "hr", "cs", "da", "nl", "et", "fi", "fr", "de", "el", "hu",
     "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
 }
 
@@ -29,6 +38,16 @@ LID_MAX_SECONDS = 4.0  # only feed the first N seconds of a segment to the LID m
 def _find(model_dir: str, pattern: str) -> str:
     hits = glob.glob(os.path.join(model_dir, pattern))
     return hits[0] if hits else ""
+
+
+def _build_sense_voice(threads: int):
+    return sherpa_onnx.OfflineRecognizer.from_sense_voice(
+        model=_find(SV_MODEL_DIR, "model*.onnx"),
+        tokens=os.path.join(SV_MODEL_DIR, "tokens.txt"),
+        num_threads=threads,
+        use_itn=True,
+        language="",  # auto: SenseVoice has its own internal LID for its 5 langs
+    )
 
 
 def _build_v3_recognizer(threads: int):
@@ -42,10 +61,10 @@ def _build_v3_recognizer(threads: int):
     )
 
 
-def _build_ja_recognizer(threads: int):
-    return sherpa_onnx.OfflineRecognizer.from_nemo_ctc(
-        model=_find(JA_MODEL_DIR, "model*.onnx"),
-        tokens=os.path.join(JA_MODEL_DIR, "tokens.txt"),
+def _build_omnilingual(threads: int):
+    return sherpa_onnx.OfflineRecognizer.from_omnilingual_asr_ctc(
+        model=_find(OMNI_MODEL_DIR, "model*.onnx"),
+        tokens=os.path.join(OMNI_MODEL_DIR, "tokens.txt"),
         num_threads=threads,
     )
 
@@ -60,19 +79,39 @@ def _build_lid(threads: int):
 
 
 class RoutedASR:
-    """Loads all models once and routes each segment to the right recognizer."""
+    """Lazily loads catalog models and routes each segment by detected language."""
 
     def __init__(self, threads: int = 4, warmup: bool = True):
-        self.v3 = _build_v3_recognizer(threads)
-        self.ja = _build_ja_recognizer(threads)
+        self._threads = threads
+        self._sv = None
+        self._v3 = None
+        self._omni = None
         self.lid = _build_lid(threads)
         if warmup:
-            # first inference pays one-time kernel/allocation costs; pay it here
-            # with 1s of silence so the first real segment isn't penalized.
+            # LID + tier-1 model pay their one-time kernel/allocation costs here
+            # so the first real segment isn't penalized. Other tiers warm up on
+            # their own first use.
             silence = np.zeros(16000, dtype=np.float32)
             self._identify_lang(silence, 16000)
-            self._decode(self.v3, silence, 16000)
-            self._decode(self.ja, silence, 16000)
+            self._decode(self.sense_voice, silence, 16000)
+
+    @property
+    def sense_voice(self):
+        if self._sv is None:
+            self._sv = _build_sense_voice(self._threads)
+        return self._sv
+
+    @property
+    def v3(self):
+        if self._v3 is None:
+            self._v3 = _build_v3_recognizer(self._threads)
+        return self._v3
+
+    @property
+    def omni(self):
+        if self._omni is None:
+            self._omni = _build_omnilingual(self._threads)
+        return self._omni
 
     def _identify_lang(self, samples: np.ndarray, sample_rate: int) -> str:
         clip = samples
@@ -90,21 +129,26 @@ class RoutedASR:
         rec.decode_stream(stream)
         return stream.result.text
 
+    def _route(self, lang: str):
+        if lang in SV_LANGS:
+            return self.sense_voice, "sv"
+        if lang in V3_LANGS:
+            return self.v3, "v3"
+        return self.omni, "omni"
+
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> dict:
         t0 = time.perf_counter()
         lang = self._identify_lang(samples, sample_rate)
         lid_ms = (time.perf_counter() - t0) * 1000
 
+        rec, tier = self._route(lang)
         t0 = time.perf_counter()
-        if lang == "ja":
-            text = self._decode(self.ja, samples, sample_rate)
-        else:
-            text = self._decode(self.v3, samples, sample_rate)
-            if not text.strip() and lang not in V3_LANGS:
-                # cheap safety net: v3 came back empty and LID guessed something
-                # it doesn't cover (often CJK misdetection) -> retry with ja model.
-                text = self._decode(self.ja, samples, sample_rate)
-                lang = "ja"
+        text = self._decode(rec, samples, sample_rate)
+        if not text.strip() and tier != "omni":
+            # safety net: the specialist came back empty (likely LID mistake);
+            # the 1600-language generalist gets the last word.
+            text = self._decode(self.omni, samples, sample_rate)
+            tier = "omni"
         decode_ms = (time.perf_counter() - t0) * 1000
 
-        return {"text": text, "lang": lang, "lid_ms": lid_ms, "decode_ms": decode_ms}
+        return {"text": text, "lang": lang, "tier": tier, "lid_ms": lid_ms, "decode_ms": decode_ms}

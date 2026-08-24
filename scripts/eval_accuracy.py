@@ -153,6 +153,41 @@ class SenseVoiceSystem:
         return stream.result.text, dt
 
 
+MODEL_OMNI_DIR = os.path.join(ROOT, "models", "omnilingual-300m-ctc-int8")
+
+
+class OmnilingualSystem:
+    """Meta Omnilingual ASR 300M CTC INT8 — one model, 1600+ languages, no lang hint."""
+
+    name = "Omnilingual"
+
+    def __init__(self):
+        self._rec = None
+
+    def _get(self):
+        if self._rec is None:
+            import sherpa_onnx
+
+            self._rec = sherpa_onnx.OfflineRecognizer.from_omnilingual_asr_ctc(
+                model=_find(MODEL_OMNI_DIR, "model*.onnx"),
+                tokens=os.path.join(MODEL_OMNI_DIR, "tokens.txt"),
+                num_threads=THREADS,
+            )
+        return self._rec
+
+    def transcribe(self, wav_path, lang):
+        samples, sr = sf.read(wav_path, dtype="float32", always_2d=False)
+        if samples.ndim > 1:
+            samples = samples.mean(axis=1)
+        rec = self._get()
+        stream = rec.create_stream()
+        stream.accept_waveform(sr, samples)
+        t0 = time.perf_counter()
+        rec.decode_stream(stream)
+        dt = time.perf_counter() - t0
+        return stream.result.text, dt
+
+
 class WhisperSystem:
     """Wraps faster-whisper large-v3-turbo, INT8, CPU. Loaded once, lazily."""
 
@@ -246,7 +281,7 @@ def main():
     with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    systems = [ParakeetSystem(), SenseVoiceSystem(), WhisperSystem()]
+    systems = [ParakeetSystem(), SenseVoiceSystem(), OmnilingualSystem(), WhisperSystem()]
 
     results = []  # list of dicts, one per (file, system)
     for entry in manifest:

@@ -120,7 +120,7 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats):
 
         stats.segments += 1
         stats.latencies_ms.append(latency_ms)
-        print(f"[{result['lang']}] {result['text']}  "
+        print(f"[{result['lang']}/{result.get('tier', '?')}] {result['text']}  "
               f"(seg={seg_s:.1f}s, lid={result['lid_ms']:.0f}ms, "
               f"decode={result['decode_ms']:.0f}ms, latency={latency_ms:.0f}ms)")
 
