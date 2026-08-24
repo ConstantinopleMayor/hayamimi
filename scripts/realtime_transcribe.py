@@ -345,7 +345,7 @@ class Refiner:
             # not delay the next utterance's instant final (soak test showed
             # 2.6s latency spikes when run inline)
             with self._worker_lock:
-                text = self.asr.transcribe(buf, self.sr, known_lang=lang)["text"]
+                text = self.asr.transcribe(buf, self.sr, known_lang=lang, live=False)["text"]
                 # a merged re-decode must never LOSE content; if it comes back
                 # much shorter than the fast finals combined, trust those
                 if len(text.strip()) < 0.7 * len(fast_joined):

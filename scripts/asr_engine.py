@@ -174,6 +174,8 @@ class RoutedASR:
         self._load_lock = threading.Lock()  # punct + registry bookkeeping
         self._model_locks = {name: threading.Lock() for name in _BUILDERS}
         self.last_lang = None  # sticky language from the most recent final
+        self._pending_lang = None   # candidate language seen on short utterances
+        self._pending_count = 0
         self.lid = _build_lid(threads)
         if warmup:
             # LID + tier-0 pay their one-time kernel/allocation costs here
@@ -326,7 +328,10 @@ class RoutedASR:
     min_switch_s = 2.0  # a shorter utterance can't establish a new language
 
     def transcribe(self, samples: np.ndarray, sample_rate: int,
-                   known_lang: str | None = None, speech_s: float | None = None) -> dict:
+                   known_lang: str | None = None, speech_s: float | None = None,
+                   live: bool = True) -> dict:
+        """live=False (e.g. the refine pass re-decoding past audio) must not
+        touch the sticky/pending language state of the live stream."""
         if known_lang is not None:
             lang, lid_ms = known_lang, 0.0
         else:
@@ -335,14 +340,29 @@ class RoutedASR:
             lid_ms = (time.perf_counter() - t0) * 1000
 
         suppress_fallback = False
-        if (speech_s is not None and speech_s < self.min_switch_s
+        if not live:
+            pass  # out-of-band decode: leave the live language state alone
+        elif (speech_s is not None and speech_s < self.min_switch_s
                 and self.last_lang is not None and lang != self.last_lang):
-            # A sub-2s utterance in a brand-new language is almost always a
-            # jingle/SFX misdetection (docs/VIDEO_TEST.md), not code-switching.
-            # Decode with the session language instead; if that comes back
-            # empty it was non-speech and the omni fallback must not resurrect it.
-            lang = self.last_lang
-            suppress_fallback = True
+            # A sub-2s utterance in a brand-new language is usually a
+            # jingle/SFX misdetection (docs/VIDEO_TEST.md) -- but a speaker
+            # genuinely switching in short phrases repeats the SAME language,
+            # while noise lands on random ones. Accept the switch on the
+            # second consecutive detection of one language.
+            if lang == self._pending_lang:
+                self._pending_count += 1
+            else:
+                self._pending_lang, self._pending_count = lang, 1
+            if self._pending_count < 2:
+                # first sighting: hold the session language; if that decode
+                # comes back empty it was non-speech and the omni fallback
+                # must not resurrect it.
+                lang = self.last_lang
+                suppress_fallback = True
+            else:
+                self._pending_lang, self._pending_count = None, 0
+        else:
+            self._pending_lang, self._pending_count = None, 0
 
         t0 = time.perf_counter()
         if lang == "zh":
@@ -378,6 +398,6 @@ class RoutedASR:
                 pass  # a punctuation failure must never lose the transcription
         decode_ms = (time.perf_counter() - t0) * 1000
 
-        if text.strip():  # an empty result must not poison the sticky language
+        if live and text.strip():  # empty results must not poison the sticky language
             self.last_lang = lang
         return {"text": text, "lang": lang, "tier": tier, "lid_ms": lid_ms, "decode_ms": decode_ms}
