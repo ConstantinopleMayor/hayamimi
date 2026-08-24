@@ -4,7 +4,8 @@ Piper-style tiered catalog: a whisper-tiny spoken-language identifier routes
 each audio segment to the best model for that language.
 
   tier 0  ja/en                -> ReazonSpeech k2 zipformer (best real-speech ja, fastest)
-  tier 1  zh/ko/yue            -> SenseVoice small
+  tier 1  zh                   -> Paraformer-zh (best real-speech zh)
+  tier 1  ko/yue               -> SenseVoice small
   tier 2  25 European langs    -> Parakeet TDT v3 (transducer)
   tier 3  everything else      -> Omnilingual ASR 300M CTC (1600+ languages)
 
@@ -25,13 +26,19 @@ SV_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-sense-voice-zh-en-ja-ko-yue
 OMNI_MODEL_DIR = os.path.join(MODELS_DIR, "omnilingual-300m-ctc-int8")
 WHISPER_TINY_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-whisper-tiny")
 RZ_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-zipformer-ja-en-reazonspeech-2025-01-17")
+PARA_ZH_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-paraformer-zh-int8-2025-10-07")
 
 # ReazonSpeech ja-en zipformer: on real broadcast Japanese it beats even
 # whisper-turbo (CER 8.6% vs 13.8%) at RTF 0.02. See docs/EVAL_REAL.md.
 RZ_LANGS = {"ja", "en"}
 
+# Paraformer-zh beats SenseVoice on real Chinese (CER 5.6% vs 7.5%); the
+# dedicated Korean zipformer is worse (30%), so ko stays on SenseVoice.
+# See docs/EVAL_REAL_ZHKO.md.
+PARA_LANGS = {"zh"}
+
 # SenseVoice small coverage (built-in ITN and punctuation).
-SV_LANGS = {"zh", "ko", "yue"}
+SV_LANGS = {"ko", "yue"}
 
 # Languages covered by the Parakeet-TDT-0.6B-v3 multilingual model.
 V3_LANGS = {
@@ -87,6 +94,14 @@ def _build_omnilingual(threads: int):
     )
 
 
+def _build_paraformer_zh(threads: int):
+    return sherpa_onnx.OfflineRecognizer.from_paraformer(
+        paraformer=_find(PARA_ZH_DIR, "model*.onnx"),
+        tokens=os.path.join(PARA_ZH_DIR, "tokens.txt"),
+        num_threads=threads,
+    )
+
+
 def _build_lid(threads: int):
     whisper_cfg = sherpa_onnx.SpokenLanguageIdentificationWhisperConfig(
         encoder=_find(WHISPER_TINY_DIR, "tiny-encoder.int8.onnx"),
@@ -102,6 +117,7 @@ class RoutedASR:
     def __init__(self, threads: int = 4, warmup: bool = True, preload: bool = True):
         self._threads = threads
         self._rz = None
+        self._pz = None
         self._sv = None
         self._v3 = None
         self._omni = None
@@ -121,7 +137,7 @@ class RoutedASR:
 
     def _preload_rest(self):
         silence = np.zeros(16000, dtype=np.float32)
-        for rec in (self.sense_voice, self.v3, self.omni):
+        for rec in (self.paraformer_zh, self.sense_voice, self.v3, self.omni):
             self._decode(rec, silence, 16000)
 
     @property
@@ -131,6 +147,14 @@ class RoutedASR:
                 if self._rz is None:
                     self._rz = _build_reazon(self._threads)
         return self._rz
+
+    @property
+    def paraformer_zh(self):
+        if self._pz is None:
+            with self._load_lock:
+                if self._pz is None:
+                    self._pz = _build_paraformer_zh(self._threads)
+        return self._pz
 
     @property
     def sense_voice(self):
@@ -178,6 +202,8 @@ class RoutedASR:
     def _route(self, lang: str):
         if lang in RZ_LANGS:
             return self.reazon, "rz"
+        if lang in PARA_LANGS:
+            return self.paraformer_zh, "pz"
         if lang in SV_LANGS:
             return self.sense_voice, "sv"
         if lang in V3_LANGS:
