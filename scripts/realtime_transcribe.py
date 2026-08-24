@@ -93,6 +93,34 @@ def mic_chunks():
             yield q.get()
 
 
+PARTIAL_EVERY_S = 0.5   # decode a draft this often (in audio time) during speech
+PARTIAL_WINDOW_S = 8.0  # cap draft decoding to the last N seconds of the utterance
+
+
+class PartialPrinter:
+    """Shows in-progress drafts; overwrites in place on a tty, one line otherwise."""
+
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        self._tty = sys.stdout.isatty()
+        self._last_len = 0
+
+    def show(self, text: str):
+        if not self.enabled or not text:
+            return
+        if self._tty:
+            pad = max(self._last_len - len(text), 0)
+            print("\r~ " + text + " " * pad, end="", flush=True)
+            self._last_len = len(text)
+        else:
+            print(f"~ {text}")
+
+    def clear(self):
+        if self.enabled and self._tty and self._last_len:
+            print("\r" + " " * (self._last_len + 2) + "\r", end="", flush=True)
+            self._last_len = 0
+
+
 class SessionStats:
     def __init__(self):
         self.total_audio_s = 0.0
@@ -107,7 +135,8 @@ class SessionStats:
                 f"mean_latency={mean:.0f}ms max_latency={max(self.latencies_ms):.0f}ms")
 
 
-def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats):
+def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
+                   printer: PartialPrinter):
     while not vad.empty():
         segment = vad.front
         seg_end_time = time.perf_counter()  # segment-end reference point for latency
@@ -120,9 +149,30 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats):
 
         stats.segments += 1
         stats.latencies_ms.append(latency_ms)
+        printer.clear()
         print(f"[{result['lang']}/{result.get('tier', '?')}] {result['text']}  "
               f"(seg={seg_s:.1f}s, lid={result['lid_ms']:.0f}ms, "
               f"decode={result['decode_ms']:.0f}ms, latency={latency_ms:.0f}ms)")
+
+
+def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
+               printer: PartialPrinter):
+    audio_pos = 0.0
+    last_partial = 0.0
+    for chunk in chunks:
+        vad.accept_waveform(chunk)
+        audio_pos += len(chunk) / sample_rate
+        stats.total_audio_s += len(chunk) / sample_rate
+
+        if printer.enabled and vad.is_speech_detected() and audio_pos - last_partial >= PARTIAL_EVERY_S:
+            last_partial = audio_pos
+            cur = np.asarray(vad.current_segment.samples, dtype=np.float32)
+            if len(cur) > int(PARTIAL_WINDOW_S * sample_rate):
+                cur = cur[-int(PARTIAL_WINDOW_S * sample_rate):]
+            if len(cur) >= sample_rate // 2:  # need ~0.5s before a draft is useful
+                printer.show(asr.partial(cur, sample_rate))
+
+        drain_segments(vad, sample_rate, asr, stats, printer)
 
 
 def main():
@@ -130,30 +180,27 @@ def main():
     ap.add_argument("--wav", help="wav file to simulate streaming from (16kHz mono s16)")
     ap.add_argument("--no-realtime", action="store_true", help="don't sleep between chunks in --wav mode")
     ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--no-partial", action="store_true", help="disable in-progress draft subtitles")
     args = ap.parse_args()
 
     print("loading models...", file=sys.stderr)
     asr = RoutedASR(threads=args.threads)
     vad = build_vad()
     stats = SessionStats()
+    printer = PartialPrinter(enabled=not args.no_partial)
 
     try:
         if args.wav:
             samples, sr = read_wave(args.wav)  # resampled to SAMPLE_RATE if needed
-            for chunk in wav_chunks(samples, sr, realtime=not args.no_realtime):
-                vad.accept_waveform(chunk)
-                stats.total_audio_s += len(chunk) / sr
-                drain_segments(vad, sr, asr, stats)
+            run_stream(wav_chunks(samples, sr, realtime=not args.no_realtime),
+                       vad, sr, asr, stats, printer)
             vad.flush()
-            drain_segments(vad, sr, asr, stats)
+            drain_segments(vad, sr, asr, stats, printer)
         else:
-            for chunk in mic_chunks():
-                vad.accept_waveform(chunk)
-                stats.total_audio_s += len(chunk) / SAMPLE_RATE
-                drain_segments(vad, SAMPLE_RATE, asr, stats)
+            run_stream(mic_chunks(), vad, SAMPLE_RATE, asr, stats, printer)
     except KeyboardInterrupt:
         vad.flush()
-        drain_segments(vad, SAMPLE_RATE, asr, stats)
+        drain_segments(vad, SAMPLE_RATE, asr, stats, printer)
     finally:
         print(f"\n=== session summary: {stats.summary()} ===")
 

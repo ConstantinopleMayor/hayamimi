@@ -86,6 +86,7 @@ class RoutedASR:
         self._sv = None
         self._v3 = None
         self._omni = None
+        self.last_lang = None  # sticky language from the most recent final
         self.lid = _build_lid(threads)
         if warmup:
             # LID + tier-1 model pay their one-time kernel/allocation costs here
@@ -136,6 +137,20 @@ class RoutedASR:
             return self.v3, "v3"
         return self.omni, "omni"
 
+    def partial(self, samples: np.ndarray, sample_rate: int) -> str:
+        """Fast draft transcription of an in-progress utterance.
+
+        Routes by the last finalized language of the session (sticky), so a
+        German speaker gets German drafts from the second utterance on.
+        Before any final exists, drafts use tier-1 SenseVoice (its built-in
+        LID covers ja/zh/ko/yue/en).
+        """
+        if self.last_lang is not None:
+            rec, _ = self._route(self.last_lang)
+        else:
+            rec = self.sense_voice
+        return self._decode(rec, samples, sample_rate)
+
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> dict:
         t0 = time.perf_counter()
         lang = self._identify_lang(samples, sample_rate)
@@ -151,4 +166,5 @@ class RoutedASR:
             tier = "omni"
         decode_ms = (time.perf_counter() - t0) * 1000
 
+        self.last_lang = lang
         return {"text": text, "lang": lang, "tier": tier, "lid_ms": lid_ms, "decode_ms": decode_ms}
