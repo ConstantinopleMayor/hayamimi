@@ -3,7 +3,8 @@
 Piper-style tiered catalog: a whisper-tiny spoken-language identifier routes
 each audio segment to the best model for that language.
 
-  tier 1  ja/zh/ko/yue/en      -> SenseVoice small (fastest, most accurate CJK)
+  tier 0  ja/en                -> ReazonSpeech k2 zipformer (best real-speech ja, fastest)
+  tier 1  zh/ko/yue            -> SenseVoice small
   tier 2  25 European langs    -> Parakeet TDT v3 (transducer)
   tier 3  everything else      -> Omnilingual ASR 300M CTC (1600+ languages)
 
@@ -23,9 +24,14 @@ V3_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-i
 SV_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")
 OMNI_MODEL_DIR = os.path.join(MODELS_DIR, "omnilingual-300m-ctc-int8")
 WHISPER_TINY_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-whisper-tiny")
+RZ_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-zipformer-ja-en-reazonspeech-2025-01-17")
+
+# ReazonSpeech ja-en zipformer: on real broadcast Japanese it beats even
+# whisper-turbo (CER 8.6% vs 13.8%) at RTF 0.02. See docs/EVAL_REAL.md.
+RZ_LANGS = {"ja", "en"}
 
 # SenseVoice small coverage (built-in ITN and punctuation).
-SV_LANGS = {"ja", "zh", "ko", "yue", "en"}
+SV_LANGS = {"zh", "ko", "yue"}
 
 # Languages covered by the Parakeet-TDT-0.6B-v3 multilingual model.
 V3_LANGS = {
@@ -48,6 +54,17 @@ def _build_sense_voice(threads: int):
         num_threads=threads,
         use_itn=True,
         language="",  # auto: SenseVoice has its own internal LID for its 5 langs
+    )
+
+
+def _build_reazon(threads: int):
+    return sherpa_onnx.OfflineRecognizer.from_transducer(
+        encoder=_find(RZ_MODEL_DIR, "encoder-*.int8.onnx"),
+        decoder=_find(RZ_MODEL_DIR, "decoder-*.int8.onnx"),
+        joiner=_find(RZ_MODEL_DIR, "joiner-*.int8.onnx"),
+        tokens=os.path.join(RZ_MODEL_DIR, "tokens.txt"),
+        num_threads=threads,
+        model_type="zipformer",
     )
 
 
@@ -84,6 +101,7 @@ class RoutedASR:
 
     def __init__(self, threads: int = 4, warmup: bool = True, preload: bool = True):
         self._threads = threads
+        self._rz = None
         self._sv = None
         self._v3 = None
         self._omni = None
@@ -95,7 +113,7 @@ class RoutedASR:
             # so the first real segment isn't penalized.
             silence = np.zeros(16000, dtype=np.float32)
             self._identify_lang(silence, 16000)
-            self._decode(self.sense_voice, silence, 16000)
+            self._decode(self.reazon, silence, 16000)
         if preload:
             # pull tier-2/3 in on a daemon thread so the first non-tier-1
             # utterance doesn't pay the ~2s model-load cost.
@@ -103,8 +121,16 @@ class RoutedASR:
 
     def _preload_rest(self):
         silence = np.zeros(16000, dtype=np.float32)
-        for rec in (self.v3, self.omni):
+        for rec in (self.sense_voice, self.v3, self.omni):
             self._decode(rec, silence, 16000)
+
+    @property
+    def reazon(self):
+        if self._rz is None:
+            with self._load_lock:
+                if self._rz is None:
+                    self._rz = _build_reazon(self._threads)
+        return self._rz
 
     @property
     def sense_voice(self):
@@ -144,9 +170,14 @@ class RoutedASR:
         stream = rec.create_stream()
         stream.accept_waveform(sample_rate, samples)
         rec.decode_stream(stream)
-        return stream.result.text
+        text = stream.result.text
+        # ReazonSpeech models emit TV-subtitle annotation brackets around
+        # boundary words; they carry no speech content.
+        return text.replace("［", "").replace("］", "")
 
     def _route(self, lang: str):
+        if lang in RZ_LANGS:
+            return self.reazon, "rz"
         if lang in SV_LANGS:
             return self.sense_voice, "sv"
         if lang in V3_LANGS:
@@ -164,7 +195,7 @@ class RoutedASR:
         if self.last_lang is not None:
             rec, _ = self._route(self.last_lang)
         else:
-            rec = self.sense_voice
+            rec = self.reazon
         return self._decode(rec, samples, sample_rate)
 
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> dict:

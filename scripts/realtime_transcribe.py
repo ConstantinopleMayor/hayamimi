@@ -135,12 +135,43 @@ class SessionStats:
                 f"mean_latency={mean:.0f}ms max_latency={max(self.latencies_ms):.0f}ms")
 
 
+PREROLL_S = 0.8  # audio to prepend before the VAD's detected speech onset
+
+
+class AudioHistory:
+    """Rolling buffer of recent audio so finals can include pre-onset context."""
+
+    def __init__(self, sample_rate: int, keep_s: float = 30.0):
+        self.sr = sample_rate
+        self.keep = int(keep_s * sample_rate)
+        self.buf = np.zeros(0, dtype=np.float32)
+        self.offset = 0  # absolute sample index of buf[0]
+        self.last_seg_end = 0  # don't let preroll bleed into the previous utterance
+
+    def push(self, chunk: np.ndarray):
+        self.buf = np.concatenate([self.buf, chunk])
+        if len(self.buf) > self.keep:
+            drop = len(self.buf) - self.keep
+            self.buf = self.buf[drop:]
+            self.offset += drop
+
+    def with_preroll(self, seg_start: int, seg_samples: np.ndarray) -> np.ndarray:
+        want = max(seg_start - int(PREROLL_S * self.sr), self.last_seg_end, self.offset)
+        pre = self.buf[want - self.offset:seg_start - self.offset]
+        self.last_seg_end = seg_start + len(seg_samples)
+        if len(pre) == 0:
+            return seg_samples
+        return np.concatenate([pre, seg_samples])
+
+
 def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
-                   printer: PartialPrinter):
+                   printer: PartialPrinter, history: AudioHistory | None = None):
     while not vad.empty():
         segment = vad.front
         seg_end_time = time.perf_counter()  # segment-end reference point for latency
         samples = np.asarray(segment.samples, dtype=np.float32)
+        if history is not None:
+            samples = history.with_preroll(segment.start, samples)
         vad.pop()
 
         seg_s = len(samples) / sample_rate
@@ -159,8 +190,10 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
                printer: PartialPrinter):
     audio_pos = 0.0
     last_partial = 0.0
+    history = AudioHistory(sample_rate)
     for chunk in chunks:
         vad.accept_waveform(chunk)
+        history.push(chunk)
         audio_pos += len(chunk) / sample_rate
         stats.total_audio_s += len(chunk) / sample_rate
 
@@ -172,7 +205,7 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
             if len(cur) >= sample_rate // 2:  # need ~0.5s before a draft is useful
                 printer.show(asr.partial(cur, sample_rate))
 
-        drain_segments(vad, sample_rate, asr, stats, printer)
+        drain_segments(vad, sample_rate, asr, stats, printer, history)
 
 
 def main():
