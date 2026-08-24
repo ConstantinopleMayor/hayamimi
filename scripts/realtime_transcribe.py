@@ -295,6 +295,20 @@ class TranslationWorker:
                     print(f"[→{lang}] {out}")
 
 
+def script_corrected_lang(tagged: str, text: str) -> str:
+    """Correct an LID tag that contradicts the script of the decoded text."""
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return tagged
+    cjk = sum(1 for c in letters if "぀" <= c <= "ヿ" or "一" <= c <= "鿿")
+    frac = cjk / len(letters)
+    if frac > 0.3 and tagged not in ("ja", "zh", "yue", "ko"):
+        return "ja"
+    if frac < 0.05 and tagged == "ja" and len(letters) >= 8:
+        return "en"
+    return tagged
+
+
 GROUP_GAP_S = 2.0   # this much true silence closes an utterance group
 GROUP_MAX_S = 25.0  # refine early rather than outgrow the audio history
 
@@ -331,8 +345,17 @@ class Refiner:
             return
         lo = max(first_start - int(PREROLL_S * self.sr), self.history.offset)
         buf = self.history.buf[lo - self.history.offset:last_end - self.history.offset].copy()
-        langs = [lang for _, _, lang, _, _ in self.spans]
+        # LID tags lie under BGM; trust the script of the decoded text over
+        # the tag (an "en" span full of kanji was misdetected Japanese, an
+        # ALL-CAPS "ja" span was misdetected English).
+        langs = [script_corrected_lang(lang, text)
+                 for _, _, lang, text, _ in self.spans]
         lang = max(set(langs), key=langs.count)
+        # a genuinely mixed-language group must not be re-decoded in one
+        # language: the per-segment finals already used the right model per
+        # language, and a majority-language re-decode mangles the minority
+        # (docs/BENCHMARKS.md iteration 25). Keep the merge, skip the decode.
+        mixed = len(set(langs)) > 1 and min(langs.count(l) for l in set(langs)) / len(langs) >= 0.25
         speakers = [sp for _, _, _, _, sp in self.spans if sp]
         speaker = max(set(speakers), key=speakers.count) if speakers else ""
         fast_joined = " ".join(t for _, _, _, t, _ in self.spans if t.strip())
@@ -345,7 +368,10 @@ class Refiner:
             # not delay the next utterance's instant final (soak test showed
             # 2.6s latency spikes when run inline)
             with self._worker_lock:
-                text = self.asr.transcribe(buf, self.sr, known_lang=lang, live=False)["text"]
+                if mixed:
+                    text = fast_joined
+                else:
+                    text = self.asr.transcribe(buf, self.sr, known_lang=lang, live=False)["text"]
                 # a merged re-decode must never LOSE content; if it comes back
                 # much shorter than the fast finals combined, trust those
                 if len(text.strip()) < 0.7 * len(fast_joined):
