@@ -157,3 +157,11 @@ FLEURS実音声 (zh 12 / ko 12クリップ) で検証（docs/EVAL_REAL_ZHKO.md�
 - 5モデル全ロード時のRSS実測 **1.88GB**（目標2GB以内ぎりぎり維持。次のモデル追加時はロード方針の見直しが必要）。
 - OBS字幕オーバーレイ実装（scripts/subtitle_server.py, `--serve`）: localhost HTTP+SSE、partial/final配信、透過背景。
 - 教訓の再確認: 「専用モデル=常に最良」ではない（韓国語Zipformerの脆弱性）。差し替えは必ず実音声評価を通す。
+
+## 2026-08-24: LRUアンロード + 日本語句読点付与 (改善イテレーション#7)
+
+- **LRUモデルアンロード** (`max_resident`, CLI既定3): tier0(rz)は常駐、他はLRUで追い出し。cap=2で全カタログを巡回してもRSS 1.35GB、追い出し後の再デコードも正常。
+- **日本語句読点復元**: Mojicastと同じBERT ONNX (`ishiki-emo/mojicast-punct-onnx`, Apache-2.0) をja確定文に適用。1回15〜24ms。
+  **注意: 同リポジトリのINT8版はonnxruntime 1.29/Windowsで出力が壊れている（logitsが入力に反応しない）。fp32版を使うこと**（docs/PUNCT_JA.md）。
+- 句読点モデルはプリロード最優先に（本線に乗ると初回確定が2.2秒化するため）。
+- 最終確認: ja確定 平均197ms（句読点込み）。RSS: cap=3+句読点で1.95GB（目標2GB以内、ただし余裕なし）。
