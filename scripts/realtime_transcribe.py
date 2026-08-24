@@ -11,6 +11,7 @@ import argparse
 import os
 import queue
 import sys
+import threading
 import time
 import wave
 
@@ -223,6 +224,7 @@ class Refiner:
         self.printer = printer
         self.spans: list[tuple[int, int, str, str]] = []
         self._transcript = open(transcript_path, "a", encoding="utf-8") if transcript_path else None
+        self._worker_lock = threading.Lock()  # serialize refine decodes off the hot path
 
     def maybe_refine(self, now_sample: int, force: bool = False):
         if not self.spans:
@@ -235,26 +237,37 @@ class Refiner:
         if not due:
             return
         lo = max(first_start - int(PREROLL_S * self.sr), self.history.offset)
-        buf = self.history.buf[lo - self.history.offset:last_end - self.history.offset]
+        buf = self.history.buf[lo - self.history.offset:last_end - self.history.offset].copy()
         langs = [lang for _, _, lang, _ in self.spans]
         lang = max(set(langs), key=langs.count)
         fast_joined = " ".join(t for _, _, _, t in self.spans if t.strip())
         self.spans = []
         if len(buf) < self.sr // 2:
             return
-        text = self.asr.transcribe(buf, self.sr, known_lang=lang)["text"]
-        # a merged re-decode must never LOSE content; if it comes back much
-        # shorter than the fast finals combined, trust the fast pass instead
-        if len(text.strip()) < 0.7 * len(fast_joined):
-            text = fast_joined
-        if not text.strip():
-            return
-        print(f"[refine/{lang}] {text}")
-        if self.printer.server is not None:
-            self.printer.server.publish({"type": "refine", "text": text, "lang": lang})
-        if self._transcript is not None:
-            self._transcript.write(text + "\n")
-            self._transcript.flush()
+
+        def work():
+            # off the hot path: a refine of a 25s group takes ~0.5-1s and must
+            # not delay the next utterance's instant final (soak test showed
+            # 2.6s latency spikes when run inline)
+            with self._worker_lock:
+                text = self.asr.transcribe(buf, self.sr, known_lang=lang)["text"]
+                # a merged re-decode must never LOSE content; if it comes back
+                # much shorter than the fast finals combined, trust those
+                if len(text.strip()) < 0.7 * len(fast_joined):
+                    text = fast_joined
+                if not text.strip():
+                    return
+                print(f"[refine/{lang}] {text}")
+                if self.printer.server is not None:
+                    self.printer.server.publish({"type": "refine", "text": text, "lang": lang})
+                if self._transcript is not None:
+                    self._transcript.write(text + "\n")
+                    self._transcript.flush()
+
+        if force:
+            work()  # shutdown path: finish the transcript before exiting
+        else:
+            threading.Thread(target=work, daemon=True).start()
 
 
 def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
