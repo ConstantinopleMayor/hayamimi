@@ -207,14 +207,37 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
     return drained
 
 
-def translate_by_sentence(translator, text: str) -> str:
-    """FuguMT is trained on single sentences; feed it one at a time."""
-    import re
+import re as _re
 
-    sentences = [s for s in re.split(r"(?<=[。！？!?])\s*", text) if s.strip()]
+
+def digits_consistent(src: str, out: str) -> bool:
+    """Every digit run in the source must survive into the translation.
+
+    Guards against the MT models' number errors (500万円 -> "5万英镑"): a
+    wrong number in a subtitle is worse than no translation. Kanji numerals
+    carry no ASCII digits, so those lines pass through unguarded.
+    """
+    src_runs = _re.findall(r"\d+", src)
+    if not src_runs:
+        return True
+    out_runs = set(_re.findall(r"\d+", out))
+    return all(run in out_runs for run in src_runs)
+
+
+def safe_translate(translator, text: str) -> str:
+    """Translate one line; fall back to the source when numbers got mangled."""
+    out = translator.translate(text)
+    if out != text and not digits_consistent(text, out):
+        return text
+    return out
+
+
+def translate_by_sentence(translator, text: str) -> str:
+    """The MT models are trained on single sentences; feed one at a time."""
+    sentences = [s for s in _re.split(r"(?<=[。！？!?])\s*", text) if s.strip()]
     out = []
     for s in sentences:
-        en = translator.translate(s)
+        en = safe_translate(translator, s)
         if en != s:
             out.append(en)
     return " ".join(out)
@@ -252,7 +275,7 @@ class TranslationWorker:
         while True:
             text = self._q.get()
             for lang, tr in self._translators.items():
-                out = tr.translate(text)
+                out = safe_translate(tr, text)
                 if out != text:  # fallback returns the source: nothing worth showing
                     print(f"[→{lang}] {out}")
 
