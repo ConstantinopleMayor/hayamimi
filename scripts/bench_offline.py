@@ -32,7 +32,7 @@ def read_wave(path: str):
     return samples, sample_rate
 
 
-def build_recognizer(model_dir: str, threads: int):
+def build_recognizer(model_dir: str, threads: int, language: str = ""):
     import sherpa_onnx
 
     def find(pattern):
@@ -55,6 +55,14 @@ def build_recognizer(model_dir: str, threads: int):
 
     single = find("model*.onnx")
     assert single, f"no onnx model found in {model_dir}"
+    if "sense-voice" in os.path.basename(os.path.normpath(model_dir)):
+        return sherpa_onnx.OfflineRecognizer.from_sense_voice(
+            model=single,
+            tokens=tokens,
+            num_threads=threads,
+            use_itn=True,
+            language=language,  # "" = auto; SenseVoice misroutes ja->zh on auto
+        )
     return sherpa_onnx.OfflineRecognizer.from_nemo_ctc(
         model=single,
         tokens=tokens,
@@ -68,13 +76,14 @@ def main():
     ap.add_argument("--wav", nargs="*", default=None)
     ap.add_argument("--threads", type=int, default=6)
     ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--language", default="", help="language hint for sense-voice models (e.g. ja, en)")
     args = ap.parse_args()
 
     wavs = args.wav or sorted(glob.glob(os.path.join(args.model_dir, "test_wavs", "*.wav")))
     assert wavs, "no wav files found"
 
     t0 = time.perf_counter()
-    rec = build_recognizer(args.model_dir, args.threads)
+    rec = build_recognizer(args.model_dir, args.threads, args.language)
     load_s = time.perf_counter() - t0
     print(f"model load: {load_s:.2f}s  (threads={args.threads})")
 

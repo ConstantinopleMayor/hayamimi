@@ -114,6 +114,45 @@ class ParakeetSystem:
         return stream.result.text, dt
 
 
+MODEL_SV_DIR = os.path.join(ROOT, "models", "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")
+
+
+class SenseVoiceSystem:
+    """SenseVoice small INT8 (Mojicast's multilingual model). One model for ja+en."""
+
+    name = "SenseVoice"
+
+    def __init__(self):
+        self._rec = {}
+
+    def _get(self, lang):
+        # language is fixed at construction time in sherpa-onnx, so keep one
+        # recognizer per language (the model itself is shared on disk).
+        if lang not in self._rec:
+            import sherpa_onnx
+
+            self._rec[lang] = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                model=_find(MODEL_SV_DIR, "model*.onnx"),
+                tokens=os.path.join(MODEL_SV_DIR, "tokens.txt"),
+                num_threads=THREADS,
+                language=lang,
+                use_itn=True,
+            )
+        return self._rec[lang]
+
+    def transcribe(self, wav_path, lang):
+        samples, sr = sf.read(wav_path, dtype="float32", always_2d=False)
+        if samples.ndim > 1:
+            samples = samples.mean(axis=1)
+        rec = self._get(lang)
+        stream = rec.create_stream()
+        stream.accept_waveform(sr, samples)
+        t0 = time.perf_counter()
+        rec.decode_stream(stream)
+        dt = time.perf_counter() - t0
+        return stream.result.text, dt
+
+
 class WhisperSystem:
     """Wraps faster-whisper large-v3-turbo, INT8, CPU. Loaded once, lazily."""
 
@@ -207,7 +246,7 @@ def main():
     with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    systems = [ParakeetSystem(), WhisperSystem()]
+    systems = [ParakeetSystem(), SenseVoiceSystem(), WhisperSystem()]
 
     results = []  # list of dicts, one per (file, system)
     for entry in manifest:
@@ -299,29 +338,26 @@ def write_markdown(results, systems, agg):
         "(NeMo CTC)\n"
         "- English/multilingual Parakeet model: `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` "
         "(NeMo transducer)\n"
+        "- SenseVoice: `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17` "
+        "(non-autoregressive, use_itn=True, language forced per entry; the model Mojicast uses)\n"
         "- Whisper: `large-v3-turbo`, `device=cpu`, `compute_type=int8`, `beam_size=1`, "
         "language forced per entry\n"
     )
 
+    def esc(s):
+        return str(s).replace("|", "\\|").replace("\n", " ")
+
     lines.append("\n## Per-file results\n")
-    lines.append(
-        "| file | lang | ref | Parakeet hyp | Parakeet metric | Parakeet RTF | "
-        "Whisper hyp | Whisper metric | Whisper RTF |"
-    )
-    lines.append("|---|---|---|---|---|---|---|---|---|")
+    sys_cols = "".join(f" {s.name} hyp | {s.name} metric | {s.name} RTF |" for s in systems)
+    lines.append("| file | lang | ref |" + sys_cols)
+    lines.append("|---|---|---|" + "---|" * (3 * len(systems)))
     for row in results:
         metric_name = "CER" if row["lang"] == "ja" else "WER"
-        p = row["Parakeet"]
-        w = row["Whisper-turbo"]
-
-        def esc(s):
-            return str(s).replace("|", "\\|").replace("\n", " ")
-
-        lines.append(
-            f"| {row['wav']} | {row['lang']} | {esc(row['ref'])} | {esc(p['hyp'])} | "
-            f"{metric_name}={p['score']:.3f} | {p['rtf']:.3f} | {esc(w['hyp'])} | "
-            f"{metric_name}={w['score']:.3f} | {w['rtf']:.3f} |"
-        )
+        cells = ""
+        for s in systems:
+            r = row[s.name]
+            cells += f" {esc(r['hyp'])} | {metric_name}={r['score']:.3f} | {r['rtf']:.3f} |"
+        lines.append(f"| {row['wav']} | {row['lang']} | {esc(row['ref'])} |" + cells)
 
     lines.append("\n## Aggregate\n")
     lines.append("| system | WER (en, micro-avg) | CER (ja, micro-avg) | mean RTF |")
