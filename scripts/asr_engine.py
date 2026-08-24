@@ -9,8 +9,9 @@ each audio segment to the best model for that language.
   tier 2  25 European langs    -> Parakeet TDT v3 (transducer)
   tier 3  everything else      -> Omnilingual ASR 300M CTC (1600+ languages)
 
-Models are loaded lazily on first use, so memory stays proportional to the
-languages actually spoken in the session.
+Models are loaded lazily on first use and, when `max_resident` is set, the
+least-recently-used ones are unloaded so memory stays bounded no matter how
+many languages a session wanders through.
 """
 import glob
 import os
@@ -54,16 +55,6 @@ def _find(model_dir: str, pattern: str) -> str:
     return hits[0] if hits else ""
 
 
-def _build_sense_voice(threads: int):
-    return sherpa_onnx.OfflineRecognizer.from_sense_voice(
-        model=_find(SV_MODEL_DIR, "model*.onnx"),
-        tokens=os.path.join(SV_MODEL_DIR, "tokens.txt"),
-        num_threads=threads,
-        use_itn=True,
-        language="",  # auto: SenseVoice has its own internal LID for its 5 langs
-    )
-
-
 def _build_reazon(threads: int):
     return sherpa_onnx.OfflineRecognizer.from_transducer(
         encoder=_find(RZ_MODEL_DIR, "encoder-*.int8.onnx"),
@@ -72,6 +63,24 @@ def _build_reazon(threads: int):
         tokens=os.path.join(RZ_MODEL_DIR, "tokens.txt"),
         num_threads=threads,
         model_type="zipformer",
+    )
+
+
+def _build_paraformer_zh(threads: int):
+    return sherpa_onnx.OfflineRecognizer.from_paraformer(
+        paraformer=_find(PARA_ZH_DIR, "model*.onnx"),
+        tokens=os.path.join(PARA_ZH_DIR, "tokens.txt"),
+        num_threads=threads,
+    )
+
+
+def _build_sense_voice(threads: int):
+    return sherpa_onnx.OfflineRecognizer.from_sense_voice(
+        model=_find(SV_MODEL_DIR, "model*.onnx"),
+        tokens=os.path.join(SV_MODEL_DIR, "tokens.txt"),
+        num_threads=threads,
+        use_itn=True,
+        language="",  # auto: SenseVoice has its own internal LID for its 5 langs
     )
 
 
@@ -94,14 +103,6 @@ def _build_omnilingual(threads: int):
     )
 
 
-def _build_paraformer_zh(threads: int):
-    return sherpa_onnx.OfflineRecognizer.from_paraformer(
-        paraformer=_find(PARA_ZH_DIR, "model*.onnx"),
-        tokens=os.path.join(PARA_ZH_DIR, "tokens.txt"),
-        num_threads=threads,
-    )
-
-
 def _build_lid(threads: int):
     whisper_cfg = sherpa_onnx.SpokenLanguageIdentificationWhisperConfig(
         encoder=_find(WHISPER_TINY_DIR, "tiny-encoder.int8.onnx"),
@@ -111,74 +112,80 @@ def _build_lid(threads: int):
     return sherpa_onnx.SpokenLanguageIdentification(cfg)
 
 
-class RoutedASR:
-    """Lazily loads catalog models and routes each segment by detected language."""
+_BUILDERS = {
+    "rz": _build_reazon,
+    "pz": _build_paraformer_zh,
+    "sv": _build_sense_voice,
+    "v3": _build_v3_recognizer,
+    "omni": _build_omnilingual,
+}
 
-    def __init__(self, threads: int = 4, warmup: bool = True, preload: bool = True):
+# preload priority when a residency cap is in effect
+_PRELOAD_ORDER = ("pz", "sv", "v3", "omni")
+
+
+class RoutedASR:
+    """Lazily loads catalog models and routes each segment by detected language.
+
+    max_resident bounds how many recognizers besides tier-0 ("rz", always kept:
+    it is the ja/en primary and the default draft model) stay in memory; the
+    least recently used one is dropped when the cap would be exceeded.
+    """
+
+    def __init__(self, threads: int = 4, warmup: bool = True, preload: bool = True,
+                 max_resident: int | None = None):
         self._threads = threads
-        self._rz = None
-        self._pz = None
-        self._sv = None
-        self._v3 = None
-        self._omni = None
+        self._models: dict[str, object] = {}
+        self._last_used: dict[str, float] = {}
+        self._max_resident = max_resident
         self._load_lock = threading.Lock()
         self.last_lang = None  # sticky language from the most recent final
         self.lid = _build_lid(threads)
         if warmup:
-            # LID + tier-1 model pay their one-time kernel/allocation costs here
+            # LID + tier-0 pay their one-time kernel/allocation costs here
             # so the first real segment isn't penalized.
             silence = np.zeros(16000, dtype=np.float32)
             self._identify_lang(silence, 16000)
-            self._decode(self.reazon, silence, 16000)
+            self._decode(self._get("rz"), silence, 16000)
         if preload:
-            # pull tier-2/3 in on a daemon thread so the first non-tier-1
-            # utterance doesn't pay the ~2s model-load cost.
+            # pull the other tiers in on a daemon thread so the first
+            # non-tier-0 utterance doesn't pay the ~2s model-load cost.
             threading.Thread(target=self._preload_rest, daemon=True).start()
 
     def _preload_rest(self):
         silence = np.zeros(16000, dtype=np.float32)
-        for rec in (self.paraformer_zh, self.sense_voice, self.v3, self.omni):
-            self._decode(rec, silence, 16000)
+        budget = None if self._max_resident is None else self._max_resident
+        for name in _PRELOAD_ORDER:
+            if budget is not None:
+                if budget <= 0:
+                    break
+                budget -= 1
+            self._decode(self._get(name), silence, 16000)
+
+    def _get(self, name: str):
+        rec = self._models.get(name)
+        if rec is None:
+            with self._load_lock:
+                rec = self._models.get(name)
+                if rec is None:
+                    self._evict_if_needed(incoming=name)
+                    rec = _BUILDERS[name](self._threads)
+                    self._models[name] = rec
+        self._last_used[name] = time.monotonic()
+        return rec
+
+    def _evict_if_needed(self, incoming: str):
+        if self._max_resident is None or incoming == "rz":
+            return
+        resident = [n for n in self._models if n != "rz"]
+        if len(resident) < self._max_resident:
+            return
+        victim = min(resident, key=lambda n: self._last_used.get(n, 0.0))
+        del self._models[victim]
 
     @property
-    def reazon(self):
-        if self._rz is None:
-            with self._load_lock:
-                if self._rz is None:
-                    self._rz = _build_reazon(self._threads)
-        return self._rz
-
-    @property
-    def paraformer_zh(self):
-        if self._pz is None:
-            with self._load_lock:
-                if self._pz is None:
-                    self._pz = _build_paraformer_zh(self._threads)
-        return self._pz
-
-    @property
-    def sense_voice(self):
-        if self._sv is None:
-            with self._load_lock:
-                if self._sv is None:
-                    self._sv = _build_sense_voice(self._threads)
-        return self._sv
-
-    @property
-    def v3(self):
-        if self._v3 is None:
-            with self._load_lock:
-                if self._v3 is None:
-                    self._v3 = _build_v3_recognizer(self._threads)
-        return self._v3
-
-    @property
-    def omni(self):
-        if self._omni is None:
-            with self._load_lock:
-                if self._omni is None:
-                    self._omni = _build_omnilingual(self._threads)
-        return self._omni
+    def resident_models(self) -> list[str]:
+        return sorted(self._models)
 
     def _identify_lang(self, samples: np.ndarray, sample_rate: int) -> str:
         clip = samples
@@ -199,29 +206,28 @@ class RoutedASR:
         # boundary words; they carry no speech content.
         return text.replace("［", "").replace("］", "")
 
-    def _route(self, lang: str):
+    def _route(self, lang: str) -> tuple[object, str]:
         if lang in RZ_LANGS:
-            return self.reazon, "rz"
+            return self._get("rz"), "rz"
         if lang in PARA_LANGS:
-            return self.paraformer_zh, "pz"
+            return self._get("pz"), "pz"
         if lang in SV_LANGS:
-            return self.sense_voice, "sv"
+            return self._get("sv"), "sv"
         if lang in V3_LANGS:
-            return self.v3, "v3"
-        return self.omni, "omni"
+            return self._get("v3"), "v3"
+        return self._get("omni"), "omni"
 
     def partial(self, samples: np.ndarray, sample_rate: int) -> str:
         """Fast draft transcription of an in-progress utterance.
 
         Routes by the last finalized language of the session (sticky), so a
         German speaker gets German drafts from the second utterance on.
-        Before any final exists, drafts use tier-1 SenseVoice (its built-in
-        LID covers ja/zh/ko/yue/en).
+        Before any final exists, drafts use the tier-0 ja/en model.
         """
         if self.last_lang is not None:
             rec, _ = self._route(self.last_lang)
         else:
-            rec = self.reazon
+            rec = self._get("rz")
         return self._decode(rec, samples, sample_rate)
 
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> dict:
@@ -235,7 +241,7 @@ class RoutedASR:
         if not text.strip() and tier != "omni":
             # safety net: the specialist came back empty (likely LID mistake);
             # the 1600-language generalist gets the last word.
-            text = self._decode(self.omni, samples, sample_rate)
+            text = self._decode(self._get("omni"), samples, sample_rate)
             tier = "omni"
         decode_ms = (time.perf_counter() - t0) * 1000
 

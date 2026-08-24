@@ -219,6 +219,8 @@ def main():
     ap.add_argument("--no-realtime", action="store_true", help="don't sleep between chunks in --wav mode")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--no-partial", action="store_true", help="disable in-progress draft subtitles")
+    ap.add_argument("--max-resident", type=int, default=3,
+                    help="max non-tier0 models kept in memory (LRU eviction); 0 or less = unlimited")
     ap.add_argument("--serve", type=int, nargs="?", const=8765, default=None, metavar="PORT",
                     help="serve an OBS browser-source overlay at http://localhost:PORT (default 8765)")
     args = ap.parse_args()
@@ -232,7 +234,8 @@ def main():
               file=sys.stderr)
 
     print("loading models...", file=sys.stderr)
-    asr = RoutedASR(threads=args.threads)
+    asr = RoutedASR(threads=args.threads,
+                    max_resident=args.max_resident if args.max_resident > 0 else None)
     vad = build_vad()
     stats = SessionStats()
     printer = PartialPrinter(enabled=not args.no_partial, server=server)
