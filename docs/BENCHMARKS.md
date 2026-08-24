@@ -143,3 +143,17 @@ ReazonSpeech test（実TV放送日本語）15クリップ + LibriSpeech dev-clea
 - 対策としてエンジンに tier0 (ja/en → ReazonSpeech zipformer) を追加。これで日本語は「Whisper turboより高精度かつ66倍速い」構成になった。
 - VADプリロール（最大0.8秒、前セグメント食い込みガード付き）で発話冒頭の欠落を軽減。ReazonSpeechモデルの「［］」ゴミトークンは除去。
 - 既知の癖: edge-tts合成音声の柔らかい語頭（「明日の」等）をrzが落とすことがある。実音声では未観測（15クリップで冒頭欠落なし）。
+
+## 2026-08-24: 中韓 実音声評価 + OBSオーバーレイ (改善イテレーション#6)
+
+FLEURS実音声 (zh 12 / ko 12クリップ) で検証（docs/EVAL_REAL_ZHKO.md）:
+
+| lang | SenseVoice | 専用モデル | Omnilingual | 結論 |
+|---|---|---|---|---|
+| zh | CER 7.49% | **Paraformer-zh 5.62%** (RTF 0.018) | 16.85% | **Paraformerに切替** |
+| ko | **CER 9.26%** | Zipformer-ko 30.25%（小音量で空出力2/12） | 20.71% | SenseVoice維持 |
+
+- 現行5層ルーティング: ja/en→rz, zh→pz, ko/yue→sv, 欧州25→v3, その他→omni。
+- 5モデル全ロード時のRSS実測 **1.88GB**（目標2GB以内ぎりぎり維持。次のモデル追加時はロード方針の見直しが必要）。
+- OBS字幕オーバーレイ実装（scripts/subtitle_server.py, `--serve`）: localhost HTTP+SSE、partial/final配信、透過背景。
+- 教訓の再確認: 「専用モデル=常に最良」ではない（韓国語Zipformerの脆弱性）。差し替えは必ず実音声評価を通す。
