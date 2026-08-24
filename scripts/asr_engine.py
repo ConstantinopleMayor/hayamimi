@@ -133,11 +133,13 @@ class RoutedASR:
     """
 
     def __init__(self, threads: int = 4, warmup: bool = True, preload: bool = True,
-                 max_resident: int | None = None):
+                 max_resident: int | None = None, punctuate: bool = True):
         self._threads = threads
         self._models: dict[str, object] = {}
         self._last_used: dict[str, float] = {}
         self._max_resident = max_resident
+        self._punctuate = punctuate
+        self._punct = None
         self._load_lock = threading.Lock()
         self.last_lang = None  # sticky language from the most recent final
         self.lid = _build_lid(threads)
@@ -153,6 +155,8 @@ class RoutedASR:
             threading.Thread(target=self._preload_rest, daemon=True).start()
 
     def _preload_rest(self):
+        if self._punctuate:
+            self.punct  # first: ja finals need this almost immediately
         silence = np.zeros(16000, dtype=np.float32)
         budget = None if self._max_resident is None else self._max_resident
         for name in _PRELOAD_ORDER:
@@ -161,6 +165,20 @@ class RoutedASR:
                     break
                 budget -= 1
             self._decode(self._get(name), silence, 16000)
+
+    @property
+    def punct(self):
+        """Japanese punctuation restorer (BERT ONNX); None if unavailable."""
+        if self._punct is None and self._punctuate:
+            with self._load_lock:
+                if self._punct is None:
+                    try:
+                        from punct_ja import PunctuatorJa
+
+                        self._punct = PunctuatorJa()
+                    except Exception:
+                        self._punctuate = False  # missing model/deps: degrade quietly
+        return self._punct
 
     def _get(self, name: str):
         rec = self._models.get(name)
@@ -243,6 +261,11 @@ class RoutedASR:
             # the 1600-language generalist gets the last word.
             text = self._decode(self._get("omni"), samples, sample_rate)
             tier = "omni"
+        if lang == "ja" and text.strip() and self.punct is not None:
+            try:
+                text = self.punct.restore(text)
+            except Exception:
+                pass  # a punctuation failure must never lose the transcription
         decode_ms = (time.perf_counter() - t0) * 1000
 
         self.last_lang = lang
