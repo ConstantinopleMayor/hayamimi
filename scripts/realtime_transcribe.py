@@ -173,7 +173,8 @@ class AudioHistory:
 def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
                    printer: PartialPrinter, history: AudioHistory | None = None,
                    known_lang: str | None = None, spans_out: list | None = None,
-                   translator_worker: "TranslationWorker | None" = None) -> int:
+                   translator_worker: "TranslationWorker | None" = None,
+                   speaker_labeler=None) -> int:
     drained = 0
     while not vad.empty():
         segment = vad.front
@@ -192,12 +193,16 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
                                 known_lang=known_lang if drained == 1 else None)
         latency_ms = (time.perf_counter() - seg_end_time) * 1000
 
+        speaker = ""
+        if speaker_labeler is not None:
+            speaker = speaker_labeler.label(samples, sample_rate) + "|"
+
         stats.segments += 1
         stats.latencies_ms.append(latency_ms)
         printer.clear()
         if printer.server is not None:
             printer.server.final(result["text"], result["lang"])
-        print(f"[{result['lang']}/{result.get('tier', '?')}] {result['text']}  "
+        print(f"[{speaker}{result['lang']}/{result.get('tier', '?')}] {result['text']}  "
               f"(seg={seg_s:.1f}s, lid={result['lid_ms']:.0f}ms, "
               f"decode={result['decode_ms']:.0f}ms, latency={latency_ms:.0f}ms)")
         if translator_worker is not None and result["lang"] == "ja" and result["text"].strip():
@@ -364,7 +369,8 @@ class Refiner:
 def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
                printer: PartialPrinter, refiner: "Refiner | None" = None,
                history: AudioHistory | None = None,
-               translator_worker: "TranslationWorker | None" = None):
+               translator_worker: "TranslationWorker | None" = None,
+               speaker_labeler=None):
     audio_pos = 0.0
     last_partial = 0.0
     early_lang = None  # LID result computed mid-utterance so finals skip it
@@ -388,7 +394,8 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
 
         if drain_segments(vad, sample_rate, asr, stats, printer, history, early_lang,
                           spans_out=refiner.spans if refiner else None,
-                          translator_worker=translator_worker):
+                          translator_worker=translator_worker,
+                          speaker_labeler=speaker_labeler):
             early_lang = None
         if refiner is not None and not vad.is_speech_detected():
             refiner.maybe_refine(int(audio_pos * sample_rate))
@@ -414,6 +421,8 @@ def main():
                     help="hotword list (one per line) to bias Japanese decoding")
     ap.add_argument("--replace", metavar="PATH", default="",
                     help="user dictionary: 'wrong=right' per line, applied to all output")
+    ap.add_argument("--speakers", action="store_true",
+                    help="label utterances with speaker ids (S1, S2, ...)")
     ap.add_argument("--translate", nargs="?", const="en", default=None, metavar="LANGS",
                     help="translate Japanese lines to these languages, comma-separated "
                          "(en/zh/ko; default en). en=FuguMT, zh/ko=M2M-100")
@@ -435,6 +444,12 @@ def main():
     stats = SessionStats()
     printer = PartialPrinter(enabled=not args.no_partial, server=server)
 
+    speaker_labeler = None
+    if args.speakers:
+        from speaker_id import SpeakerLabeler
+
+        speaker_labeler = SpeakerLabeler()
+
     translators = {}
     translator_worker = None
     if args.translate:
@@ -452,7 +467,8 @@ def main():
         vad.flush()
         drain_segments(vad, sr, asr, stats, printer, history,
                        spans_out=refiner.spans if refiner else None,
-                       translator_worker=translator_worker)
+                       translator_worker=translator_worker,
+                       speaker_labeler=speaker_labeler)
         if refiner is not None:
             refiner.maybe_refine(0, force=True)
 
@@ -460,11 +476,12 @@ def main():
         if args.wav:
             samples, sr = read_wave(args.wav)  # resampled to SAMPLE_RATE if needed
             run_stream(wav_chunks(samples, sr, realtime=not args.no_realtime),
-                       vad, sr, asr, stats, printer, refiner, history, translator_worker)
+                       vad, sr, asr, stats, printer, refiner, history, translator_worker,
+                       speaker_labeler)
             finish(sr)
         else:
             run_stream(mic_chunks(), vad, SAMPLE_RATE, asr, stats, printer, refiner, history,
-                       translator_worker)
+                       translator_worker, speaker_labeler)
     except KeyboardInterrupt:
         finish(SAMPLE_RATE)
     finally:
