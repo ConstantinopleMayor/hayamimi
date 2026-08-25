@@ -1,5 +1,7 @@
 # hayamimi (早耳)
 
+[![tests](https://github.com/oboroge0/hayamimi/actions/workflows/test.yml/badge.svg)](https://github.com/oboroge0/hayamimi/actions/workflows/test.yml) [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![release](https://img.shields.io/github/v/release/oboroge0/hayamimi)](https://github.com/oboroge0/hayamimi/releases)
+
 **CPUのみで動くリアルタイム多言語音声認識。** ライブ字幕・ブラウザダッシュボード・話者ラベル・
 その場翻訳まで、GPUもクラウドAPIも使わず、メモリ2GB未満で動く。
 
@@ -46,6 +48,14 @@ CPUのみのリアルタイム音声認識は、たいてい汎用モデル（Wh
 - **`http://localhost:8765/transcript`** — プレーンなスクロール式トランスクリプト履歴。
 
 ![dashboard](docs/images/dashboard.png)
+
+🎬 **[デモ動画を見る](https://github.com/oboroge0/hayamimi/releases/download/v0.1.0/hayamimi_demo.mp4)** — 実際の4言語音声（日英韓中）をライブ文字起こしした収録の忠実再生です。
+
+## 動作環境
+
+Python 3.10+ と ffmpeg（PATH上）。開発・検証は **Windows 11**。
+macOS/Linuxもランタイムは全てクロスプラットフォームのため動く見込みですが、
+エンドツーエンドのCI検証はまだです — 動作報告歓迎。
 
 ## クイックスタート
 
