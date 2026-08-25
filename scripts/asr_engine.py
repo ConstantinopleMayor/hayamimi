@@ -130,6 +130,9 @@ def script_corrected_lang(tagged: str, text: str) -> str:
     if not letters:
         return tagged
     cjk = sum(1 for c in letters if "぀" <= c <= "ヿ" or "一" <= c <= "鿿")
+    hangul = sum(1 for c in letters if "가" <= c <= "힯")
+    if hangul / len(letters) > 0.3 and tagged != "ko":
+        return "ko"
     frac = cjk / len(letters)
     if frac > 0.3 and tagged not in ("ja", "zh", "yue", "ko"):
         return "ja"

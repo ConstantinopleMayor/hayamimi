@@ -116,3 +116,20 @@ def test_expected_language_homes():
     assert "en" in asr_engine.V3_LANGS       # rz English is ALL-CAPS; must stay on v3
     assert "yue" in asr_engine.SV_LANGS      # LID can't detect yue; sv arbitrates
     assert "zh" in asr_engine.PARA_LANGS
+
+
+# ---- script correction matrix ----------------------------------------------
+
+def test_script_correction_matrix():
+    f = asr_engine.script_corrected_lang
+    assert f("en", "選手紹介のときのブルーカーペット") == "ja"   # CJK under latin tag
+    assert f("ja", "NICETOMEETYOUEVERYONE") == "en"             # ASCII caps under ja tag
+    assert f("vi", "안녕하세요 반갑습니다 여러분") == "ko"        # hangul under wrong tag
+    assert f("yue", "值得在这座迷人村庄") == "yue"               # CJK under CJK tag: keep
+    assert f("ja", "はい") == "ja"                               # short: keep
+    assert f("en", "Nice to meet you.") == "en"
+
+
+def test_has_kana():
+    assert asr_engine._has_kana("漢字とかなの文")
+    assert not asr_engine._has_kana("值得在这座迷人村庄")
