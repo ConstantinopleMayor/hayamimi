@@ -52,6 +52,14 @@ same clips, while running at 10-50x realtime on a 6-core desktop CPU.
 
 ![dashboard](docs/images/dashboard.png)
 
+🎬 **[Watch the demo video](https://github.com/oboroge0/hayamimi/releases/download/v0.1.0/hayamimi_demo.mp4)** — real 4-language audio (ja/en/ko/zh) transcribed live, replayed frame-accurately from a captured session.
+
+## Requirements
+
+Python 3.10+ and ffmpeg on PATH. Developed and tested on **Windows 11**;
+macOS/Linux are expected to work (all runtimes are cross-platform) but are
+not yet CI-tested end to end — reports welcome.
+
 ## Quickstart
 
 ```bash
