@@ -76,12 +76,17 @@ def build_vad(min_silence: float = 0.35,
 def wav_chunks(samples: np.ndarray, sample_rate: int, realtime: bool):
     pos = 0
     n = len(samples)
+    start = time.perf_counter()
     while pos < n:
         chunk = samples[pos:pos + WINDOW_SIZE]
         if len(chunk) < WINDOW_SIZE:
             chunk = np.pad(chunk, (0, WINDOW_SIZE - len(chunk)))
         if realtime:
-            time.sleep(WINDOW_SIZE / sample_rate)
+            # absolute-deadline pacing: naive per-chunk sleeps accumulate
+            # ~15% drift on Windows (15.6ms timer granularity)
+            delay = start + pos / sample_rate - time.perf_counter()
+            if delay > 0:
+                time.sleep(delay)
         yield chunk
         pos += WINDOW_SIZE
 
@@ -420,7 +425,7 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
             cur = np.asarray(vad.current_segment.samples, dtype=np.float32)
             if len(cur) > int(PARTIAL_WINDOW_S * sample_rate):
                 cur = cur[-int(PARTIAL_WINDOW_S * sample_rate):]
-            if early_lang is None and len(cur) >= int(1.0 * sample_rate):
+            if early_lang is None and len(cur) >= int(2.0 * sample_rate):
                 early_lang = asr.identify(cur, sample_rate)
             if printer.enabled and len(cur) >= sample_rate // 2:
                 printer.show(asr.partial(cur, sample_rate))
@@ -512,6 +517,8 @@ def main():
             refiner.maybe_refine(0, force=True)
 
     try:
+        if server is not None:
+            server.publish({"type": "session_start"})
         if args.wav:
             samples, sr = read_wave(args.wav)  # resampled to SAMPLE_RATE if needed
             run_stream(wav_chunks(samples, sr, realtime=not args.no_realtime),

@@ -133,6 +133,9 @@ def script_corrected_lang(tagged: str, text: str) -> str:
     hangul = sum(1 for c in letters if "가" <= c <= "힯")
     if hangul / len(letters) > 0.3 and tagged != "ko":
         return "ko"
+    if tagged == "ko" and hangul == 0 and len(letters) >= 4:
+        # SenseVoice Korean output is hangul; hangul-free "ko" is a mislabel
+        return "zh" if cjk / len(letters) > 0.3 else "en"
     frac = cjk / len(letters)
     if frac > 0.3 and tagged not in ("ja", "zh", "yue", "ko"):
         return "ja"
@@ -284,6 +287,11 @@ class RoutedASR:
 
     def _identify_lang(self, samples: np.ndarray, sample_rate: int) -> str:
         clip = samples
+        # skip the leading quiet (preroll padding): it eats into the 4s LID
+        # window and cost the demo capture its first-utterance language
+        loud = np.flatnonzero(np.abs(clip) > 0.015)
+        if len(loud) and loud[0] > sample_rate // 10:
+            clip = clip[max(loud[0] - sample_rate // 20, 0):]
         max_len = int(LID_MAX_SECONDS * sample_rate)
         if len(clip) > max_len:
             clip = clip[:max_len]
@@ -353,7 +361,11 @@ class RoutedASR:
                    live: bool = True) -> dict:
         """live=False (e.g. the refine pass re-decoding past audio) must not
         touch the sticky/pending language state of the live stream."""
-        if known_lang is not None:
+        if known_lang is not None and (speech_s is None or speech_s < 4.0):
+            # trust the mid-utterance early LID only for short utterances; a
+            # long one gives the full 4s window a chance to overrule the
+            # guess made from its first 2 seconds (first-clip-per-language
+            # errors in the demo capture came from exactly this)
             lang, lid_ms = known_lang, 0.0
         else:
             t0 = time.perf_counter()
