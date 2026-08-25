@@ -1,0 +1,19 @@
+{
+  "name": "hayamimi-demo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts Main out/main.mp4 --codec h264"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.286",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.286"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.1",
+    "typescript": "5.6.3"
+  }
+}

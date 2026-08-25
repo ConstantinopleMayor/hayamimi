@@ -1,0 +1,8 @@
+node_modules/
+out/
+.venv-manim/
+manim_media/
+demo_audio.wav
+events.json
+hayamimi_demo.mp4
+*.log

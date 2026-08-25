@@ -1,0 +1,50 @@
+[
+ {
+  "lang": "ja",
+  "start": 0.8,
+  "end": 7.32,
+  "src": "ja_08.wav"
+ },
+ {
+  "lang": "ja",
+  "start": 9.92,
+  "end": 18.39,
+  "src": "ja_06.wav"
+ },
+ {
+  "lang": "en",
+  "start": 20.99,
+  "end": 25.96,
+  "src": "en_05.wav"
+ },
+ {
+  "lang": "en",
+  "start": 28.56,
+  "end": 35.71,
+  "src": "en_02.wav"
+ },
+ {
+  "lang": "ko",
+  "start": 38.31,
+  "end": 47.19,
+  "src": "ko_11.wav"
+ },
+ {
+  "lang": "ko",
+  "start": 49.79,
+  "end": 57.05,
+  "src": "ko_12.wav"
+ },
+ {
+  "lang": "zh",
+  "start": 59.65,
+  "end": 67.21,
+  "src": "zh_02.wav"
+ },
+ {
+  "lang": "zh",
+  "start": 69.81,
+  "end": 75.39,
+  "src": "zh_03.wav"
+ }
+]
