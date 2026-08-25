@@ -1,0 +1,22 @@
+# Runtime dependencies for hayamimi (early hearing / 早耳).
+# Pinned to versions verified working on Windows 11 / Python 3.11 (CPU-only).
+# See THIRD_PARTY_NOTICES.md for the license of each package.
+
+numpy==2.4.6
+soundfile==0.14.0
+sounddevice==0.5.6
+sherpa-onnx==1.13.6
+onnxruntime==1.29.0
+ctranslate2==4.8.1
+sentencepiece==0.2.2
+fugashi==1.5.2
+unidic-lite==1.0.8
+psutil==7.2.2
+huggingface_hub==1.28.0
+
+# Optional: fixes SenseVoice's token-spaced Korean output (--translate / ko
+# route). LGPL-2.1-or-later -- see THIRD_PARTY_NOTICES.md. realtime_transcribe.py
+# falls through silently if this is not installed, so it's listed here as an
+# extra rather than a hard dependency; comment it out if LGPL is a concern for
+# your distribution.
+kiwipiepy==0.23.2

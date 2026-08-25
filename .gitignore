@@ -3,3 +3,10 @@ models/
 testdata/
 __pycache__/
 *.pyc
+.pytest_cache/
+session.txt
+*.egg-info/
+.DS_Store
+Thumbs.db
+.claude/
+.playwright-mcp/
