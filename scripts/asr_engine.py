@@ -15,6 +15,7 @@ many languages a session wanders through.
 """
 import glob
 import os
+import sys
 import threading
 import time
 
@@ -162,6 +163,22 @@ def _load_replacements(path: str) -> list[tuple[str, str]]:
     return pairs
 
 
+# a key file per model: checked BEFORE building, because sherpa-onnx's C++
+# layer exits the process (not a catchable exception) on an empty model path
+_KEY_FILES = {
+    "rz": (RZ_MODEL_DIR, "encoder-*.int8.onnx"),
+    "pz": (PARA_ZH_DIR, "model*.onnx"),
+    "sv": (SV_MODEL_DIR, "model*.onnx"),
+    "v3": (V3_MODEL_DIR, "encoder*.onnx"),
+    "omni": (OMNI_MODEL_DIR, "model*.onnx"),
+}
+
+
+def _model_present(name: str) -> bool:
+    d, pat = _KEY_FILES[name]
+    return bool(_find(d, pat))
+
+
 _BUILDERS = {
     "rz": _build_reazon,
     "pz": _build_paraformer_zh,
@@ -172,6 +189,14 @@ _BUILDERS = {
 
 # preload priority when a residency cap is in effect
 _PRELOAD_ORDER = ("pz", "sv", "v3", "omni")
+
+
+class ModelUnavailable(RuntimeError):
+    """Raised when a model tier is not present on disk (--minimal install)."""
+
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.name = name
 
 
 class RoutedASR:
@@ -198,6 +223,7 @@ class RoutedASR:
         self._load_lock = threading.Lock()  # punct + registry bookkeeping
         self._model_locks = {name: threading.Lock() for name in _BUILDERS}
         self.last_lang = None  # sticky language from the most recent final
+        self._unavailable: set[str] = set()  # models missing on disk (--minimal installs)
         self._pending_lang = None   # candidate language seen on short utterances
         self._pending_count = 0
         self.lid = _build_lid(threads)
@@ -219,11 +245,14 @@ class RoutedASR:
         silence = np.zeros(16000, dtype=np.float32)
         budget = None if self._max_resident is None else self._max_resident
         for name in _PRELOAD_ORDER:
+            if budget is not None and budget <= 0:
+                break
+            try:
+                self._decode(self._get(name), silence, 16000)
+            except ModelUnavailable:
+                continue  # --minimal install: this tier simply isn't there
             if budget is not None:
-                if budget <= 0:
-                    break
                 budget -= 1
-            self._decode(self._get(name), silence, 16000)
 
     @property
     def punct(self):
@@ -256,21 +285,45 @@ class RoutedASR:
         return self._ko_spacer
 
     def _get(self, name: str):
+        if name in self._unavailable:
+            raise ModelUnavailable(name)
+        if name not in self._models and not _model_present(name):
+            self._unavailable.add(name)
+            print(f"[hayamimi] model '{name}' not found under models/ "
+                  f"(minimal install?): routing falls back", file=sys.stderr)
+            raise ModelUnavailable(name)
         rec = self._models.get(name)
         if rec is None:
             # per-model lock: loading v3 must not block a prefetch of omni
             with self._model_locks[name]:
                 rec = self._models.get(name)
                 if rec is None:
-                    if name == "rz":
-                        rec = _build_reazon(self._threads, self._hotwords_file)
-                    else:
-                        rec = _BUILDERS[name](self._threads)
+                    try:
+                        if name == "rz":
+                            rec = _build_reazon(self._threads, self._hotwords_file)
+                        else:
+                            rec = _BUILDERS[name](self._threads)
+                    except Exception as exc:
+                        # a --minimal install ships only some models: degrade
+                        self._unavailable.add(name)
+                        print(f"[hayamimi] model '{name}' unavailable "
+                              f"(minimal install?): routing falls back",
+                              file=sys.stderr)
+                        raise ModelUnavailable(name) from exc
                     with self._load_lock:
                         self._evict_if_needed(incoming=name)
                         self._models[name] = rec
         self._last_used[name] = time.monotonic()
         return rec
+
+    def _get_with_fallback(self, name: str) -> tuple[object, str]:
+        for cand in (name, "rz", "sv", "v3", "pz", "omni"):
+            try:
+                return self._get(cand), cand
+            except ModelUnavailable:
+                continue
+        raise RuntimeError(
+            "no ASR models found under models/ -- run scripts/download_models.py")
 
     def _evict_if_needed(self, incoming: str):
         if self._max_resident is None or incoming == "rz":
@@ -317,14 +370,14 @@ class RoutedASR:
 
     def _route(self, lang: str) -> tuple[object, str]:
         if lang in RZ_LANGS:
-            return self._get("rz"), "rz"
+            return self._get_with_fallback("rz")
         if lang in PARA_LANGS:
-            return self._get("pz"), "pz"
+            return self._get_with_fallback("pz")
         if lang in SV_LANGS:
-            return self._get("sv"), "sv"
+            return self._get_with_fallback("sv")
         if lang in V3_LANGS:
-            return self._get("v3"), "v3"
-        return self._get("omni"), "omni"
+            return self._get_with_fallback("v3")
+        return self._get_with_fallback("omni")
 
     def partial(self, samples: np.ndarray, sample_rate: int) -> str:
         """Fast draft transcription of an in-progress utterance.
@@ -398,16 +451,24 @@ class RoutedASR:
             self._pending_lang, self._pending_count = None, 0
 
         t0 = time.perf_counter()
+        sv = None
         if lang == "zh":
             # whisper-tiny LID labels Cantonese as "zh" (measured 0/12 correct
             # on FLEURS yue), so let SenseVoice's internal LID arbitrate: keep
             # its transcript for yue, re-decode with Paraformer for true zh.
-            text, sv_lang = self._decode_full(self._get("sv"), samples, sample_rate)
+            try:
+                sv = self._get("sv")
+            except ModelUnavailable:
+                sv = None  # minimal install: plain routing below
+        if sv is not None:
+            text, sv_lang = self._decode_full(sv, samples, sample_rate)
             if "yue" in sv_lang:
                 lang, tier = "yue", "sv"
             else:
-                text = self._decode(self._get("pz"), samples, sample_rate)
-                tier = "pz"
+                rec, tier = self._get_with_fallback("pz")
+                text2 = self._decode(rec, samples, sample_rate)
+                if text2.strip():
+                    text = text2
         else:
             rec, tier = self._route(lang)
             text = self._decode(rec, samples, sample_rate)
@@ -421,19 +482,24 @@ class RoutedASR:
             # the decoded script contradicts the LID tag (romaji-mangled
             # English under a ja tag, CJK under a non-CJK tag): re-decode
             # with the right model before anyone sees the final.
-            if corrected == "ja" and not _has_kana(text):
+            if corrected == "ja" and not _has_kana(text) and "sv" not in self._unavailable:
                 # han-only text is just as likely zh/yue as ja; let
                 # SenseVoice's internal LID arbitrate instead of assuming
                 # (assuming ja here cost yue 7.4% -> 24% CER, iteration 27)
-                text2, sv_lang = self._decode_full(self._get("sv"), samples, sample_rate)
+                try:
+                    sv2 = self._get("sv")
+                except ModelUnavailable:
+                    sv2 = None
+                text2, sv_lang = (self._decode_full(sv2, samples, sample_rate)
+                                  if sv2 is not None else ("", ""))
                 if text2.strip():
                     if "yue" in sv_lang:
                         lang, tier, text = "yue", "sv", text2
                     elif "zh" in sv_lang:
-                        text3 = self._decode(self._get("pz"), samples, sample_rate)
+                        text3 = self._decode(self._get_with_fallback("pz")[0], samples, sample_rate)
                         lang, tier, text = "zh", "pz", (text3 if text3.strip() else text2)
                     elif "ja" in sv_lang:
-                        text3 = self._decode(self._get("rz"), samples, sample_rate)
+                        text3 = self._decode(self._get_with_fallback("rz")[0], samples, sample_rate)
                         lang, tier, text = "ja", "rz", (text3 if text3.strip() else text2)
                     elif "ko" in sv_lang:
                         lang, tier, text = "ko", "sv", text2
