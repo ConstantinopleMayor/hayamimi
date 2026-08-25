@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<style>
+  :root {
+    --ink:#0d0f13; --panel:#14171d; --line:#2a2f3a; --cream:#ece5d8; --dim:#b0a898;
+    --shu:#e04f2f; --ja:#e04f2f; --en:#5b7fd4; --zh:#d4a13c; --ko:#3fae9d; --xx:#7a8194;
+  }
+  * { box-sizing:border-box; margin:0; }
+  body { width:1600px; height:900px; background:var(--ink); color:var(--cream);
+    font-family:"Yu Gothic UI","Meiryo",sans-serif; padding:52px 64px 96px; overflow:hidden; display:flex; flex-direction:column; justify-content:space-between;
+    background-image: radial-gradient(900px 400px at 88% -8%, rgba(224,79,47,.08), transparent 60%); }
+  .mono { font-family:Consolas,monospace; }
+  h1 { font-family:"Yu Mincho",serif; font-size:46px; letter-spacing:.08em; margin-bottom:6px; }
+  h1 em { font-style:normal; color:var(--shu); }
+  .sub { color:var(--dim); font-size:19px; margin-bottom:0; letter-spacing:.06em; }
+  .flow { display:flex; align-items:stretch; gap:14px; }
+  .stage { background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:24px 24px; flex:1; position:relative; }
+  .stage h2 { font-size:18px; color:var(--shu); letter-spacing:.2em; margin-bottom:10px;
+    font-weight:700; }
+  .stage p { font-size:16.5px; color:var(--dim); line-height:1.65; }
+  .stage b { color:var(--cream); font-weight:600; }
+  .arrow { align-self:center; color:var(--dim); font-size:22px; flex:none; }
+  .routes { display:flex; flex-direction:column; gap:11px; }
+  .route { display:flex; align-items:center; gap:12px; font-size:16.5px; }
+  .chip { width:56px; text-align:center; border-radius:4px; padding:2px 0; font-weight:700;
+    font-size:14px; color:var(--ink); font-family:Consolas,monospace; flex:none; }
+  .route .m { color:var(--cream); } .route .n { color:var(--dim); margin-left:auto;
+    font-family:Consolas,monospace; font-size:14px; }
+  .band { margin-top:26px; display:flex; gap:14px; }
+  .band .stage { flex:1; }
+  .footer { position:absolute; bottom:34px; left:64px; right:64px; display:flex;
+    justify-content:space-between; color:var(--dim); font-size:16px; }
+  .kpis { display:flex; gap:16px; margin-top:0; }
+  .kpi { background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:22px 20px; flex:1; text-align:center; }
+  .kpi .v { font-family:Consolas,monospace; font-size:44px; color:var(--shu); font-weight:700; }
+  .kpi .k { font-size:15px; color:var(--dim); margin-top:4px; }
+</style>
+<body>
+  <h1>早<em>耳</em> hayamimi — 仕組み</h1>
+  <div class="sub">CPUだけでリアルタイム多言語文字起こしを成立させる5つの工程</div>
+
+  <div class="flow">
+    <div class="stage" style="flex:.8">
+      <h2>① 区間検出</h2>
+      <p><b>Silero VAD</b>が発話区間だけを切り出し<br>無音0.35秒で発話終了と判定。<br>語頭は<b>プリロール1秒</b>で救済</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="stage" style="flex:.9">
+      <h2>② 発話中に先回り</h2>
+      <p>話している最中に<b>0.5秒ごと暫定字幕</b>。<br>2秒時点で<b>言語判定</b>を先行実行し、<br>確定用モデルを裏で先読みロード</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="stage" style="flex:1.25">
+      <h2>③ 言語別ルーティング</h2>
+      <div class="routes">
+        <div class="route"><span class="chip" style="background:var(--ja)">JA</span><span class="m">ReazonSpeech Zipformer</span><span class="n">CER 5.8%</span></div>
+        <div class="route"><span class="chip" style="background:var(--en)">EN+EU</span><span class="m">NVIDIA Parakeet TDT</span><span class="n">WER 2.3%</span></div>
+        <div class="route"><span class="chip" style="background:var(--zh)">ZH</span><span class="m">Paraformer</span><span class="n">CER 5.3%</span></div>
+        <div class="route"><span class="chip" style="background:var(--ko)">KO/粤</span><span class="m">SenseVoice</span><span class="n">8.1 / 6.1%</span></div>
+        <div class="route"><span class="chip" style="background:var(--xx)">他</span><span class="m">Meta Omnilingual</span><span class="n">+1600言語</span></div>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="stage" style="flex:.9">
+      <h2>④ 誤り防御網</h2>
+      <p>文字種×言語タグの矛盾検知で<b>誤ルートを表示前に再デコード</b>。短発話の新言語はノイズ扱い（2回連続で切替受理）</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="stage" style="flex:.9">
+      <h2>⑤ 仕上げ</h2>
+      <p>日本語<b>句読点BERT</b>・韓国語<b>分かち書き</b>・置換辞書。2秒の沈黙で発話群を<b>一括再デコード</b>した清書も出力</p>
+    </div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="v">〜0.1s</div><div class="k">発話終了→確定字幕（日本語）</div></div>
+    <div class="kpi"><div class="v">1/2</div><div class="k">whisper-large-v3-turbo比の誤り率（実放送日本語）</div></div>
+    <div class="kpi"><div class="v">&lt;2GB</div><div class="k">RAM上限（LRU自動アンロード）</div></div>
+    <div class="kpi"><div class="v">0</div><div class="k">GPU・クラウド・PyTorch依存</div></div>
+  </div>
+
+  <div class="footer">
+    <span>すべてINT8量子化ONNX / sherpa-onnx ランタイム</span>
+    <span class="mono">github.com/oboroge0/hayamimi</span>
+  </div>
+</body>
+</html>
