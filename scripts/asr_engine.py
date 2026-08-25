@@ -390,22 +390,35 @@ class RoutedASR:
         blank after an English section (the sticky en model returns nothing
         for Korean speech).
         """
-        lang = lang_hint or self.last_lang
-        if lang is not None:
-            rec, _ = self._route(lang)
-        else:
+        if lang_hint is not None:
+            # this utterance's language is confirmed: use its specialist
+            rec, _ = self._route(lang_hint)
+            return self._replace(self._decode(rec, samples, sample_rate))
+
+        sticky = self.last_lang
+        if sticky in V3_LANGS and sticky != "en":
+            # EU languages: SenseVoice can't probe these; trust the session
+            rec, _ = self._route(sticky)
+            return self._replace(self._decode(rec, samples, sample_rate))
+
+        # Before the early LID lands, never show the previous language's
+        # guesswork (an English model romanizing Korean reads as garbage --
+        # user feedback). SenseVoice runs its own per-utterance LID over
+        # ja/zh/ko/yue/en, so probe with it and follow its tag: the very
+        # first draft comes out in the right language.
+        try:
+            sv_text, sv_tag = self._decode_full(self._get("sv"), samples, sample_rate)
+        except ModelUnavailable:
             rec = self._get_with_fallback("rz")[0]
-        out = self._decode(rec, samples, sample_rate)
-        if not out.strip() and "sv" not in self._unavailable:
-            # sticky model hears nothing: likely a language switch. SenseVoice
-            # auto-detects ja/zh/ko/yue/en internally, so it can draft the new
-            # language right away without waiting for the 2.0s early LID
-            # (which stays authoritative for the actual switch).
+            return self._replace(self._decode(rec, samples, sample_rate))
+        if "ja" in sv_tag:
             try:
-                out = self._decode(self._get("sv"), samples, sample_rate)
+                rz_text = self._decode(self._get("rz"), samples, sample_rate)
+                if rz_text.strip():
+                    return self._replace(rz_text)
             except ModelUnavailable:
                 pass
-        return self._replace(out)
+        return self._replace(sv_text)
 
     def _replace(self, text: str) -> str:
         for wrong, right in self._replacements:
