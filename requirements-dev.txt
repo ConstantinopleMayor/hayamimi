@@ -9,3 +9,5 @@ edge-tts==7.2.8
 yt-dlp==2026.8.19
 pytest==9.1.1
 OpenCC==1.4.2
+pykakasi==2.3.0   # kana-space scoring for the singing eval (eval_singing.py)
+gdown==6.1.0      # PJS corpus download in make_singset.py
