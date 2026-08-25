@@ -6,3 +6,4 @@ demo_audio.wav
 events.json
 hayamimi_demo.mp4
 *.log
+manim_out/
