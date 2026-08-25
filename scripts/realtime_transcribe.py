@@ -210,7 +210,8 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         stats.latencies_ms.append(latency_ms)
         printer.clear()
         if printer.server is not None:
-            printer.server.final(result["text"], result["lang"])
+            printer.server.final(result["text"], result["lang"], speaker.rstrip("|"),
+                                 latency_ms, result.get("tier", ""))
         print(f"[{speaker}{result['lang']}/{result.get('tier', '?')}] {result['text']}  "
               f"(seg={seg_s:.1f}s, lid={result['lid_ms']:.0f}ms, "
               f"decode={result['decode_ms']:.0f}ms, latency={latency_ms:.0f}ms)")
@@ -278,8 +279,9 @@ def build_translators(langs: str) -> dict:
 class TranslationWorker:
     """Async ja->target translation of finalized lines (console display)."""
 
-    def __init__(self, translators: dict):
+    def __init__(self, translators: dict, server=None):
         self._translators = translators
+        self._server = server
         self._q: "queue.Queue[str]" = queue.Queue()
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -293,6 +295,8 @@ class TranslationWorker:
                 out = safe_translate(tr, text)
                 if out != text:  # fallback returns the source: nothing worth showing
                     print(f"[→{lang}] {out}")
+                    if self._server is not None:
+                        self._server.publish({"type": "translation", "lang": lang, "text": out})
 
 
 from asr_engine import script_corrected_lang  # shared with the engine's live correction
@@ -369,7 +373,8 @@ class Refiner:
                 tag = f"{speaker}|{lang}" if speaker else lang
                 print(f"[refine/{tag}] {text}")
                 if self.printer.server is not None:
-                    self.printer.server.publish({"type": "refine", "text": text, "lang": lang})
+                    self.printer.server.publish({"type": "refine", "text": text, "lang": lang,
+                                                 "speaker": speaker})
                 outs = []
                 if self.translators and lang == "ja":
                     # synchronous here (we're already off the hot path) so the
@@ -490,7 +495,7 @@ def main():
         print(f"loading translators ({args.translate})...", file=sys.stderr)
         translators = build_translators(args.translate)
         if translators:
-            translator_worker = TranslationWorker(translators)
+            translator_worker = TranslationWorker(translators, server=server)
 
     history = AudioHistory(SAMPLE_RATE)
     refiner = None if args.no_refine else Refiner(asr, history, SAMPLE_RATE, printer,
