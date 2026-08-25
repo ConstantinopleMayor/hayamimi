@@ -2,24 +2,24 @@
 
 [![tests](https://github.com/oboroge0/hayamimi/actions/workflows/test.yml/badge.svg)](https://github.com/oboroge0/hayamimi/actions/workflows/test.yml) [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![release](https://img.shields.io/github/v/release/oboroge0/hayamimi)](https://github.com/oboroge0/hayamimi/releases)
 
-**CPUのみで動くリアルタイム多言語音声認識。** ライブ字幕・ブラウザダッシュボード・話者ラベル・
-その場翻訳まで、GPUもクラウドAPIも使わず、メモリ2GB未満で動く。
+**CPUだけで動くリアルタイム多言語音声認識。** GPUもクラウドAPIも使わず、メモリ2GB未満で、
+ライブ字幕からブラウザ表示、話者ラベル、翻訳字幕まで動きます。
 
 English README is at [README.md](README.md).
 
-「早耳」は聞き分けが早い人を指す言葉。設計目標もそのまま — 発話中にも速報字幕が出て、
-話し終えてから**約100ms**で確定文が出る。
+名前の「早耳」は、情報を聞きつけるのが早い人のこと。このツールも耳が早く、
+話している最中から字幕が出て、話し終えると**約100ms**で確定します。
 
 ## なぜ作ったか
 
-CPUのみのリアルタイム音声認識は、たいてい汎用モデル（Whisperなど）1つに頼り、その精度の
-上限を受け入れることになる。hayamimiは代わりに、各発話をその言語に最も強いモデルへルーティングする。
-すべて量子化（INT8）ONNXモデルとして[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)上で動く
-— PyTorchもCUDAも不要。
+CPUだけでリアルタイム音声認識をやろうとすると、普通はWhisperのような汎用モデルを1つ選び、
+その精度で我慢することになります。hayamimiは発想を変えて、発話ごとに言語を判定し、
+その言語がいちばん得意なモデルに振り分けます。モデルはすべてINT8量子化のONNX形式で、
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)の上で動くため、PyTorchもCUDAも要りません。
 
-実放送日本語音声（`docs/SCORECARD.md`参照）でこのルーティングは**CER 5.8%**を達成し、
-同じクリップでの`whisper-large-v3-turbo`の13.8%の半分以下。6コアデスクトップCPUで
-実時間の10〜50倍速で動く。
+実際のテレビ放送の日本語音声で測ると、この方式で**CER 5.8%**が出ます（`docs/SCORECARD.md`）。
+同じ音声で`whisper-large-v3-turbo`は13.8%なので、誤りは半分以下。速度は6コアの
+デスクトップCPUで実時間の10〜50倍です。
 
 ## 機能
 
@@ -38,24 +38,24 @@ CPUのみのリアルタイム音声認識は、たいてい汎用モデル（Wh
 
 ## デモUI
 
-`--serve`はローカルサーバーを起動し、3つのビューを提供する:
+`--serve`を付けるとローカルサーバーが立ち、ブラウザから3つのページを開けます。
 
-- **`http://localhost:8765/dashboard`** — ライブダッシュボード。発話中のテキストを表示する
-  速報ストリップ、言語バッジ・話者チップ・行ごとのレイテンシ付きの確定フィード、各行に
-  インライン表示される翻訳、そして二段パス補正済みの清書トランスクリプトを表示する2列目。
-- **`http://localhost:8765/`** — シンプルなOBSブラウザソースオーバーレイ
-  （このURLをOBSのブラウザソースに追加すれば配信字幕として使える）。
-- **`http://localhost:8765/transcript`** — プレーンなスクロール式トランスクリプト履歴。
+- **`http://localhost:8765/dashboard`**: ライブダッシュボード。発話中のテキスト、
+  確定した行（言語バッジと話者、行ごとの応答時間つき）、その下に翻訳、右側に清書版の
+  トランスクリプトが流れます。
+- **`http://localhost:8765/`**: OBS用のシンプルなオーバーレイ。OBSのブラウザソースに
+  このURLを入れると配信画面に字幕が載ります。
+- **`http://localhost:8765/transcript`**: 清書トランスクリプトだけを流すページ。
 
 ![dashboard](docs/images/dashboard.png)
 
-🎬 **[デモ動画を見る](https://github.com/oboroge0/hayamimi/releases/download/v0.1.0/hayamimi_demo.mp4)** — 実際の4言語音声（日英韓中）をライブ文字起こしした収録の忠実再生です。
+🎬 **[デモ動画を見る](https://github.com/oboroge0/hayamimi/releases/download/v0.1.0/hayamimi_demo.mp4)**: 実際の4言語音声（日英韓中）を文字起こししたときの記録を、そのまま再生した動画です。
 
 ## 動作環境
 
-Python 3.10+ と ffmpeg（PATH上）。開発・検証は **Windows 11**。
-macOS/Linuxもランタイムは全てクロスプラットフォームのため動く見込みですが、
-エンドツーエンドのCI検証はまだです — 動作報告歓迎。
+Python 3.10以上と、PATHの通ったffmpegが必要です。開発と検証は**Windows 11**で行いました。
+使っているランタイムはどれもクロスプラットフォームなのでmacOS/Linuxでも動くはずですが、
+実機での通し確認はまだできていません。動いた・動かなかったの報告を歓迎します。
 
 ## クイックスタート
 
@@ -79,13 +79,13 @@ python -m venv .venv
 # -> ブラウザで http://localhost:8765/dashboard を開く
 ```
 
-`scripts/download_models.py`は約3.1GBの学習済みモデルを`models/`（git管理外）にダウンロードする。
-`--minimal`を付けると日英のみの約1.1GB構成（ReazonSpeech・whisper-tiny・Silero VAD・日本語句読点）になる。
-各モデルのライセンス条件は`THIRD_PARTY_NOTICES.md`を参照。
+`scripts/download_models.py`は約3.1GB分のモデルを`models/`（git管理外）にダウンロードします。
+`--minimal`を付けると日本語と英語だけの約1.1GB構成になります。
+各モデルのライセンスは`THIRD_PARTY_NOTICES.md`にまとめてあります。
 
 ## CLIリファレンス
 
-すべてのフラグは`scripts/realtime_transcribe.py`にある:
+フラグはすべて`scripts/realtime_transcribe.py`のものです。
 
 | フラグ | 既定値 | 説明 |
 |---|---|---|
@@ -144,15 +144,13 @@ python -m venv .venv
                             ダッシュボード / OBSオーバーレイ / トランスクリプトファイル
 ```
 
-モデルは初回使用時に遅延ロードされる。LRUキャッシュが最も使われていない非日本語モデルを
-退避させる（`--max-resident`）ため、セッション中にどれだけ多くの言語をまたいでもメモリは
-上限内に収まる。
+モデルは最初に必要になったときに読み込みます。上限（`--max-resident`）を超えたら
+長く使っていないものから外すので、何か国語話してもメモリは上限を超えません。
 
 ## 実測パフォーマンス
 
-エンドツーエンド（言語判定→ルーティング→デコード→日本語句読点付与）、実音声、
-プリロール・二段パスなし（単発クリップ）。`en`はWER、それ以外はCER（`yue`はt2s正規化）。
-詳細な手法は`docs/SCORECARD.md`参照。
+本番と同じ経路（言語判定からデコード、日本語の句読点付与まで）を、実音声のクリップ単位で
+採点した結果です。`en`はWER、それ以外はCER。測り方の詳細は`docs/SCORECARD.md`にあります。
 
 | 言語 | クリップ数 | LID正解率 | ルート | 平均誤り率 | 平均RTF |
 |---|---|---|---|---|---|
@@ -162,72 +160,63 @@ python -m venv .venv
 | ko | 12 | 12/12 | SenseVoice | 8.1% | 0.062 |
 | yue | 12 | 12/12 | SenseVoice | 6.1% | 0.061 |
 
-全ルートでRTFが0.2を大きく下回っている、つまりCPU単体で実時間の9〜16倍速で動作する。
-目標値の全体は`docs/GOALS.md`、30回以上の改善イテレーション全履歴（レイテンシ・メモリ・
-精度のトレードオフとその採否理由）は`docs/BENCHMARKS.md`を参照。
+どの言語もCPU単体で実時間の9〜16倍の速さです。開発中に何を試して何を捨てたかは、
+30回分の改善記録ごと`docs/BENCHMARKS.md`に残してあります。
 
-その記録からの主要な数値:
+主な実測値:
 
-- **日本語CER 5.8%**（ビームサーチ）、実放送音声で `whisper-large-v3-turbo`（同クリップで13.8%）
-  の半分以下の誤り率。
-- **平均確定レイテンシ約100ms**（日本語、句読点付き）。5言語ソークテスト・全機能有効時は
-  平均236ms・最大552ms。
-- **メモリ2GB未満**（`--max-resident 3`）。`--max-resident 2`なら1.35GB。
+- **日本語CER 5.8%**（ビームサーチ使用時）。同じ実放送音声で`whisper-large-v3-turbo`は13.8%。
+- **確定までの平均が約100ms**（日本語、句読点込み）。5言語混在で全機能を有効にしても平均236ms。
+- **メモリ2GB未満**（`--max-resident 3`のとき）。`--max-resident 2`なら1.35GB。
 
-## 制限事項（正直に書く）
+## 既知の制限
 
-- **1文内でのコードスイッチング（言語混在）は非対応。** ルーターは発話1つにつき1言語を選ぶため、
-  1文内で日本語と英語が混ざると少数派言語の部分が化けるか欠落する。発話単位の切り替え
-  （通訳が文単位で日英を交互に話す等）は問題なく追従するが、1文内の単語レベル混在は対応不可。
-- **ジングル・効果音・BGMの直後の短い発話は誤ルーティングしうる。** 言語切替ガード
-  (`--lang-switch-guard`)で緩和しているが、セッション最初の発話（まだセッション言語が
-  確立していない）と、化けたテキストが偶然別言語の文字種と整合してしまうケースは既知の
-  盲点として残る（定量化した例は`docs/BENCHMARKS.md`のイテレーション#29参照）。
-- **重なった2人の話者は分離できない。** `--speakers`はターンテイキング方式の話者ラベリング
-  （確定VADセグメントごとに1つの埋め込み、最近傍セントロイドへの割り当て）であり、
-  真の話者分離ではない。同時発話は1つのラベルにまとめられる。
-- **翻訳品質には現実的な上限がある**（チューニング不足ではなく）。FuguMT（ja→en）と
-  M2M-100（ja→zh/ko）は小型モデルで、繰り返しループは抑制されているが完全には解消されておらず、
-  ja→zh/koの翻訳では数値が確実には保持されない（数値・金額に関わる用途で使う前に
-  `docs/TRANSLATE.md`と`docs/TRANSLATE_M2M.md`の実測の失敗例を確認すること）。
-- **エンドツーエンドのマイクパイプラインは、本プロジェクトの検証以外での独立した検証は
-  行われていない** — 残課題は`docs/GOALS.md`参照。上記の数値と結果が異なる場合はIssueを立ててほしい。
+- **1文の中に複数言語が混ざる発話には対応していません。** 発話1つにつき言語を1つ選ぶ方式のため、
+  日本語の文に英語フレーズが挟まると、そこが化けるか消えます。文単位で言語が切り替わる分には
+  問題なく追従します（通訳が日英交互に話すような場面は得意です）。
+- **効果音やBGMの直後の短い発話は、言語判定を外すことがあります。** ガード機構
+  （`--lang-switch-guard`）である程度抑えていますが、起動直後の1発話目などは
+  外すことがあります。どの程度外すかは`docs/BENCHMARKS.md`のイテレーション#29に実測があります。
+- **同時に話す2人は分離できません。** `--speakers`は発話ごとに「誰の声か」を推定する方式で、
+  声が重なった区間は1人分のラベルにまとまります。
+- **翻訳は小型モデルなりの品質です。** とくに中国語・韓国語への翻訳は数値や金額を
+  間違えることがあるため、数字が壊れた訳文は原文をそのまま出す安全装置を入れています。
+  実際の失敗例を`docs/TRANSLATE.md`と`docs/TRANSLATE_M2M.md`に載せているので、
+  数字が大事な用途では先に見てください。
+- **作者の環境以外での検証はまだ多くありません。** 手元で数値が再現しない場合は
+  Issueで教えてもらえると助かります。
 
 ## ライセンス
 
-ソースコードはMIT（`LICENSE`、著作権者oboroge0）。このリポジトリにモデルの重みは
-含まれていない — `scripts/download_models.py`がインストール時に各モデルを配布元から
-取得する。それぞれ個別のライセンスを持つ（一覧は`THIRD_PARTY_NOTICES.md`）。
+ソースコードはMITライセンスです（`LICENSE`）。モデルの重みはこのリポジトリに含まれておらず、
+`scripts/download_models.py`が各配布元からダウンロードします。モデルごとのライセンスは
+`THIRD_PARTY_NOTICES.md`にまとめました。
 
-**1つだけ非permissiveなモデルがある:** ja→en翻訳モデル（`mojicast-fugumt-ja-en-ct2`、
-`--translate en`で使用）は**CC BY-SA 4.0（継承ライセンス）**。このモデルの重みを
-再配布する場合はクレジット表示を維持し、再配布物もCC BY-SA 4.0で公開する必要がある。
-これはhayamimi自体のコードのライセンスには影響せず、`--translate zh,ko`（M2M-100, MIT）にも影響しない。
+1つだけ注意が必要なモデルがあります。日→英翻訳モデル（`mojicast-fugumt-ja-en-ct2`、
+`--translate en`で使用）は**CC BY-SA 4.0**です。このモデルの重みを再配布するときは
+クレジット表示と同ライセンスでの公開が必要になります。hayamimi本体のコードや、
+`--translate zh,ko`で使うM2M-100（MIT）には影響しません。
 
 ## クレジット
 
-hayamimiは以下のプロジェクトの上に成り立っている:
+hayamimiは次のプロジェクトの成果を借りて動いています。
 
-- [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — ここで動く
-  すべてのモデルの推論基盤であるONNX Runtimeエンジン。
-- [ReazonSpeech](https://research.reazon.jp/)（Reazon Human Interaction Lab）
-  — このプロジェクトの精度の根拠となっている日本語ASRモデル。
-- [NVIDIA NeMo / Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
-  — 英語+欧州24言語。
-- [Meta AI Omnilingual ASR](https://github.com/facebookresearch/omnilingual-asr)
-  — 「多言語対応」を嘘にしない約1600言語フォールバック。
-- [FunASR / SenseVoice](https://github.com/FunAudioLLM/SenseVoice)
-  （Alibaba DAMO Academy）— 中国語・韓国語・広東語のASR。
-- [Mojicast](https://github.com/ishiki-emo/mojicast)（ishiki-emo）—
-  ライブ字幕パイプラインの設計面での着想元であり、本プロジェクトが使う
-  句読点/翻訳モデルの変換版の出所。Mojicast自体、完全オフラインで動く
-  配信字幕アプリとして一見の価値あり。
-- [Silero VAD](https://github.com/snakers4/silero-vad) — 発話区間検出。
-- [3D-Speaker](https://github.com/modelscope/3D-Speaker)
-  （Alibaba DAMO Academy）— `--speakers`が使うCAM++話者埋め込みモデル。
-- [Kiwi](https://github.com/bab2min/kiwipiepy) — SenseVoiceのトークン間
-  スペース混じりの韓国語出力を補正する韓国語形態素解析器。
+- [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx): 全モデルを動かしている推論エンジン。
+- [ReazonSpeech](https://research.reazon.jp/)（Reazon Human Interaction Lab）: 日本語認識の主力モデル。
+  日本語の精度はこのモデルに支えられています。
+- [NVIDIA NeMo / Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3): 英語と欧州24言語。
+- [Meta AI Omnilingual ASR](https://github.com/facebookresearch/omnilingual-asr): 約1600言語を
+  受け止めるフォールバック。
+- [FunASR / SenseVoice](https://github.com/FunAudioLLM/SenseVoice)（Alibaba DAMO Academy）:
+  中国語、韓国語、広東語の認識。
+- [Mojicast](https://github.com/ishiki-emo/mojicast)（ishiki-emo）: ライブ字幕パイプラインの
+  設計で多くを参考にしました。句読点モデルと翻訳モデルの変換版もこのプロジェクトの配布物です。
+  完全オフラインで動く配信字幕アプリとして、Mojicast自体もおすすめです。
+- [Silero VAD](https://github.com/snakers4/silero-vad): 発話区間の検出。
+- [3D-Speaker](https://github.com/modelscope/3D-Speaker)（Alibaba DAMO Academy）:
+  `--speakers`で使う話者埋め込みモデル。
+- [Kiwi](https://github.com/bab2min/kiwipiepy): 韓国語の分かち書きを直す形態素解析器。
 
 ## Contributing
 
-`CONTRIBUTING.md`参照。
+`CONTRIBUTING.md`を見てください。
