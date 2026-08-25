@@ -2,49 +2,49 @@
  {
   "lang": "ja",
   "start": 0.8,
-  "end": 7.32,
-  "src": "ja_08.wav"
+  "end": 12.92,
+  "src": "ja_03.wav"
  },
  {
   "lang": "ja",
-  "start": 9.92,
-  "end": 18.39,
-  "src": "ja_06.wav"
+  "start": 15.52,
+  "end": 24.76,
+  "src": "ja_10.wav"
  },
  {
   "lang": "en",
-  "start": 20.99,
-  "end": 25.96,
+  "start": 28.16,
+  "end": 33.13,
   "src": "en_05.wav"
  },
  {
   "lang": "en",
-  "start": 28.56,
-  "end": 35.71,
+  "start": 35.73,
+  "end": 42.88,
   "src": "en_02.wav"
  },
  {
   "lang": "ko",
-  "start": 38.31,
-  "end": 47.19,
+  "start": 46.27,
+  "end": 55.16,
   "src": "ko_11.wav"
  },
  {
   "lang": "ko",
-  "start": 49.79,
-  "end": 57.05,
+  "start": 57.76,
+  "end": 65.02,
   "src": "ko_12.wav"
  },
  {
   "lang": "zh",
-  "start": 59.65,
-  "end": 67.21,
+  "start": 68.42,
+  "end": 75.98,
   "src": "zh_02.wav"
  },
  {
   "lang": "zh",
-  "start": 69.81,
-  "end": 75.39,
+  "start": 78.58,
+  "end": 84.16,
   "src": "zh_03.wav"
  }
 ]

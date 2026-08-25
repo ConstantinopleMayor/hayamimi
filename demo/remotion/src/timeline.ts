@@ -25,22 +25,17 @@ export type Segment = {
 // displayStart/displayEnd are in demo_audio.wav-absolute seconds. Each
 // section = a 0.7s title interstitial + the "replay" (captions + audio).
 //
-// Known limitation (documented, not hidden): the `en` section's refine event
-// (t=40.077) genuinely fires ~1.8s after `ko`'s first clip has already begun
-// in the raw capture (ko starts at 38.31s). Because we hard-cut per language,
-// giving `en` enough time to show its trailing refine pushes the `ko`
-// section's start later than ko's real speech onset, clipping ~2s off the
-// very start of the ko replay audio. This is an artifact of real captured
-// ASR latency colliding with hard section cuts, not fabricated data.
+// Sections were re-captured with 3.4s language-boundary gaps so every
+// refine event lands before the next language begins: no audio clipping.
 export const SECTIONS: {
   lang: "ja" | "en" | "ko" | "zh";
   displayStart: number;
   displayEnd: number;
 }[] = [
-  { lang: "ja", displayStart: 0.3, displayEnd: 21.1 },
-  { lang: "en", displayStart: 21.1, displayEnd: 40.4 },
-  { lang: "ko", displayStart: 40.4, displayEnd: 59.0 },
-  { lang: "zh", displayStart: 59.0, displayEnd: 76.5 },
+  { lang: "ja", displayStart: 0.3, displayEnd: 26.0 },
+  { lang: "en", displayStart: 26.0, displayEnd: 45.9 },
+  { lang: "ko", displayStart: 45.9, displayEnd: 67.6 },
+  { lang: "zh", displayStart: 67.6, displayEnd: 85.8 },
 ];
 
 export const TITLE_CARD_SECONDS = 0.7;
