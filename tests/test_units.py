@@ -133,3 +133,90 @@ def test_script_correction_matrix():
 def test_has_kana():
     assert asr_engine._has_kana("漢字とかなの文")
     assert not asr_engine._has_kana("值得在这座迷人村庄")
+
+
+# ---- sticky LID hysteresis --------------------------------------------------
+
+def test_sticky_first_utterance_has_no_last_lang_yet():
+    # last_lang=None (session bootstrap): accept immediately, no hold.
+    lang, suppress, pend, cnt = asr_engine.resolve_sticky_lang(
+        "en", None, 3.0, 2.0, 2, None, 0)
+    assert (lang, suppress, pend, cnt) == ("en", False, None, 0)
+
+
+def test_sticky_same_lang_resets_pending():
+    lang, suppress, pend, cnt = asr_engine.resolve_sticky_lang(
+        "ja", "ja", 3.0, 2.0, 2, "en", 1)
+    assert (lang, suppress, pend, cnt) == ("ja", False, None, 0)
+
+
+def test_sticky_single_misfire_is_held_not_switched():
+    # A lone babble-noise misfire to "en" while the session is "ja" must be
+    # held at "ja" for a long (>= min_switch_s) segment, and the omni
+    # fallback must NOT be suppressed (it's presumed real speech, just
+    # decoded under the wrong tier's model).
+    lang, suppress, pend, cnt = asr_engine.resolve_sticky_lang(
+        "en", "ja", 3.0, 2.0, 2, None, 0)
+    assert lang == "ja"
+    assert suppress is False
+    assert (pend, cnt) == ("en", 1)
+
+
+def test_sticky_short_misfire_suppresses_fallback():
+    # Same, but the segment is shorter than min_switch_s (jingle/SFX case):
+    # held language's empty decode must not be resurrected by omni.
+    lang, suppress, pend, cnt = asr_engine.resolve_sticky_lang(
+        "en", "ja", 1.0, 2.0, 2, None, 0)
+    assert lang == "ja"
+    assert suppress is True
+
+
+def test_sticky_confirmed_switch_after_two_consecutive_detections():
+    # First "en" sighting: held. Second consecutive "en" sighting: switch.
+    lang1, _, pend1, cnt1 = asr_engine.resolve_sticky_lang(
+        "en", "ja", 3.0, 2.0, 2, None, 0)
+    assert lang1 == "ja" and (pend1, cnt1) == ("en", 1)
+
+    lang2, suppress2, pend2, cnt2 = asr_engine.resolve_sticky_lang(
+        "en", "ja", 3.0, 2.0, 2, pend1, cnt1)
+    assert lang2 == "en"
+    assert suppress2 is False
+    assert (pend2, cnt2) == (None, 0)
+
+
+def test_sticky_alternating_misfires_never_accumulate():
+    # Two DIFFERENT wrong-language misfires in a row must not add up to a
+    # switch -- each one resets the pending candidate.
+    lang1, _, pend1, cnt1 = asr_engine.resolve_sticky_lang(
+        "en", "ja", 3.0, 2.0, 2, None, 0)
+    assert (pend1, cnt1) == ("en", 1)
+
+    lang2, _, pend2, cnt2 = asr_engine.resolve_sticky_lang(
+        "zh", "ja", 3.0, 2.0, 2, pend1, cnt1)
+    assert lang2 == "ja"          # still held at the session language
+    assert (pend2, cnt2) == ("zh", 1)  # candidate reset to the new guess
+
+
+def test_reset_session_clears_sticky_state():
+    # reset_session() only touches plain attributes (no model calls), so it
+    # can be exercised against a bare stand-in without loading any models.
+    class _Stub:
+        pass
+
+    stub = _Stub()
+    stub.last_lang = "ja"
+    stub._pending_lang = "en"
+    stub._pending_count = 1
+    asr_engine.RoutedASR.reset_session(stub)
+    assert stub.last_lang is None
+    assert stub._pending_lang is None
+    assert stub._pending_count == 0
+
+
+def test_sticky_switch_confirm_one_disables_hysteresis():
+    # switch_confirm=1 reproduces "switch immediately" (pre-hysteresis
+    # behaviour), useful as a regression anchor for responsiveness.
+    lang, suppress, pend, cnt = asr_engine.resolve_sticky_lang(
+        "en", "ja", 3.0, 2.0, 1, None, 0)
+    assert lang == "en"
+    assert (pend, cnt) == (None, 0)

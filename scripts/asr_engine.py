@@ -145,6 +145,48 @@ def script_corrected_lang(tagged: str, text: str) -> str:
     return tagged
 
 
+def resolve_sticky_lang(
+    lang: str, last_lang: str | None, speech_s: float | None,
+    min_switch_s: float, switch_confirm: int,
+    pending_lang: str | None, pending_count: int,
+) -> tuple[str, bool, str | None, int]:
+    """Sticky-LID hysteresis: decide whether to accept a new LID detection
+    as a real language switch, or hold the session's current language.
+
+    A single new-language detection can be a babble-noise misfire
+    (docs/NOISE.md -- whisper-tiny LID exposes no confidence score to
+    threshold on) or a jingle/SFX blip (docs/VIDEO_TEST.md) rather than a
+    genuine switch. A real switch -- the speaker changing language, or a new
+    speaker -- repeats the SAME new language on the next detection, while a
+    misfire lands on a random one. `switch_confirm` CONSECUTIVE detections
+    of one new language are required before switching; staying on the
+    current language needs no confirmation (asymmetric, so noise can't lock
+    the session onto a wrong language). This costs a genuine switch at most
+    `switch_confirm - 1` segments of latency.
+
+    Returns (resolved_lang, suppress_fallback, new_pending_lang, new_pending_count).
+    """
+    if last_lang is None or lang == last_lang:
+        return lang, False, None, 0
+
+    if lang == pending_lang:
+        pending_count += 1
+    else:
+        pending_lang, pending_count = lang, 1
+
+    if pending_count < switch_confirm:
+        # Hold the session language for this segment. If it's a
+        # sub-min_switch_s blip, it's presumed non-speech (jingle/SFX): an
+        # empty decode under the held language must not be resurrected by
+        # the omni fallback. A longer hold is presumed genuine speech
+        # merely under the wrong tier's model, so let the omni fallback
+        # have a shot if that specialist draws a blank.
+        is_short = speech_s is not None and speech_s < min_switch_s
+        return last_lang, is_short, pending_lang, pending_count
+
+    return lang, False, None, 0
+
+
 def _load_replacements(path: str) -> list[tuple[str, str]]:
     """User dictionary: one "wrong=right" (or tab/arrow-separated) pair per line."""
     if not path:
@@ -209,7 +251,8 @@ class RoutedASR:
 
     def __init__(self, threads: int = 4, warmup: bool = True, preload: bool = True,
                  max_resident: int | None = None, punctuate: bool = True,
-                 hotwords_file: str = "", replace_file: str = ""):
+                 hotwords_file: str = "", replace_file: str = "",
+                 lid_switch_confirm: int = 2):
         self._threads = threads
         self._models: dict[str, object] = {}
         self._last_used: dict[str, float] = {}
@@ -224,8 +267,9 @@ class RoutedASR:
         self._model_locks = {name: threading.Lock() for name in _BUILDERS}
         self.last_lang = None  # sticky language from the most recent final
         self._unavailable: set[str] = set()  # models missing on disk (--minimal installs)
-        self._pending_lang = None   # candidate language seen on short utterances
+        self._pending_lang = None   # candidate new language awaiting confirmation
         self._pending_count = 0
+        self.lid_switch_confirm = lid_switch_confirm  # consecutive detections to accept a switch
         self.lid = _build_lid(threads)
         if warmup:
             # LID + tier-0 pay their one-time kernel/allocation costs here
@@ -437,6 +481,22 @@ class RoutedASR:
 
     min_switch_s = 2.0  # a shorter utterance can't establish a new language
 
+    def reset_session(self):
+        """Clear the sticky/pending language state.
+
+        Call this between unrelated audio streams (a new recording, a new
+        speaker with no continuity from the last one, an eval harness moving
+        to the next independent clip set). Without it, the sticky-LID
+        hysteresis in transcribe() would treat the first utterance of the
+        new stream as a language SWITCH away from whatever the previous,
+        unrelated stream last said -- costing it an extra confirmation
+        segment for no reason, since there was never a real session to
+        switch away from.
+        """
+        self.last_lang = None
+        self._pending_lang = None
+        self._pending_count = 0
+
     def transcribe(self, samples: np.ndarray, sample_rate: int,
                    known_lang: str | None = None, speech_s: float | None = None,
                    live: bool = True) -> dict:
@@ -456,27 +516,11 @@ class RoutedASR:
         suppress_fallback = False
         if not live:
             pass  # out-of-band decode: leave the live language state alone
-        elif (speech_s is not None and speech_s < self.min_switch_s
-                and self.last_lang is not None and lang != self.last_lang):
-            # A sub-2s utterance in a brand-new language is usually a
-            # jingle/SFX misdetection (docs/VIDEO_TEST.md) -- but a speaker
-            # genuinely switching in short phrases repeats the SAME language,
-            # while noise lands on random ones. Accept the switch on the
-            # second consecutive detection of one language.
-            if lang == self._pending_lang:
-                self._pending_count += 1
-            else:
-                self._pending_lang, self._pending_count = lang, 1
-            if self._pending_count < 2:
-                # first sighting: hold the session language; if that decode
-                # comes back empty it was non-speech and the omni fallback
-                # must not resurrect it.
-                lang = self.last_lang
-                suppress_fallback = True
-            else:
-                self._pending_lang, self._pending_count = None, 0
         else:
-            self._pending_lang, self._pending_count = None, 0
+            lang, suppress_fallback, self._pending_lang, self._pending_count = resolve_sticky_lang(
+                lang, self.last_lang, speech_s, self.min_switch_s, self.lid_switch_confirm,
+                self._pending_lang, self._pending_count,
+            )
 
         t0 = time.perf_counter()
         sv = None

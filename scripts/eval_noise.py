@@ -131,7 +131,19 @@ def eval_manifest_dir(asr: RoutedASR, mdir: str, denoiser=None):
     with open(os.path.join(mdir, "manifest.json"), encoding="utf-8") as f:
         entries = json.load(f)
     rows = []
+    prev_lang = None
     for e in entries:
+        if e["lang"] != prev_lang:
+            # Each language's clip block is an independent recording, not a
+            # continuous multi-lingual conversation -- reset the sticky-LID
+            # session so the engine's language-switch hysteresis (see
+            # RoutedASR.transcribe / resolve_sticky_lang in asr_engine.py)
+            # doesn't charge the first clip of a new block for "switching
+            # away" from an unrelated previous block's language. Real
+            # in-session switch latency is covered separately by
+            # tests/test_units.py's resolve_sticky_lang tests.
+            asr.reset_session()
+            prev_lang = e["lang"]
         wav_path = os.path.join(mdir, e["wav"])
         samples, sr = sf.read(wav_path, dtype="float32")
         if samples.ndim > 1:
