@@ -1,6 +1,6 @@
 import React from "react";
 import { interpolate, useCurrentFrame } from "remotion";
-import { COLORS, FONT_DISPLAY, FONT_MONO, LANG_COLORS } from "../theme";
+import { COLORS, FONT_DISPLAY, FONT_MONO, LANG_COLORS, fontFor } from "../theme";
 import { EventItem, FPS } from "../timeline";
 
 const LangBadge: React.FC<{ lang?: string }> = ({ lang }) => {
@@ -48,7 +48,8 @@ const SpeakerChip: React.FC<{ speaker?: string }> = ({ speaker }) => {
 export const ReplayUI: React.FC<{
   events: EventItem[];
   timeOffsetSeconds: number;
-}> = ({ events, timeOffsetSeconds }) => {
+  lang?: string;
+}> = ({ events, timeOffsetSeconds, lang }) => {
   const frame = useCurrentFrame();
   const absoluteTime = timeOffsetSeconds + frame / FPS;
 
@@ -114,7 +115,7 @@ export const ReplayUI: React.FC<{
         </div>
         <div
           style={{
-            fontFamily: FONT_DISPLAY,
+            fontFamily: fontFor(lang),
             fontSize: 50,
             color: COLORS.cream,
             lineHeight: 1.25,
@@ -183,7 +184,7 @@ export const ReplayUI: React.FC<{
                 </div>
                 <div
                   style={{
-                    fontFamily: FONT_DISPLAY,
+                    fontFamily: fontFor(f.lang),
                     fontSize: 44,
                     color: COLORS.cream,
                     lineHeight: 1.3,
@@ -278,7 +279,7 @@ export const ReplayUI: React.FC<{
               </div>
               <div
                 style={{
-                  fontFamily: FONT_DISPLAY,
+                  fontFamily: fontFor(r.lang),
                   fontSize: 24,
                   color: COLORS.dim,
                   lineHeight: 1.4,

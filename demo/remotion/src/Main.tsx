@@ -134,7 +134,7 @@ export const Main: React.FC = () => {
               name="replay"
             >
               <AbsoluteFill style={{ backgroundColor: COLORS.bg }}>
-                <ReplayUI events={events} timeOffsetSeconds={s.displayStart + TITLE_CARD_SECONDS} />
+                <ReplayUI events={events} timeOffsetSeconds={s.displayStart + TITLE_CARD_SECONDS}  lang={s.lang} />
               </AbsoluteFill>
             </Sequence>
             <Audio

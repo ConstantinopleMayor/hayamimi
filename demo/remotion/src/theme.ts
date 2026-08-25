@@ -23,5 +23,17 @@ export const LANG_LABEL: Record<string, { name: string; romaji: string }> = {
 
 export const FONT_DISPLAY =
   '"Shippori Mincho B1", "Yu Mincho", "Hiragino Mincho ProN", serif';
+// per-language body fonts: mincho suits Japanese, but its Latin/Hangul
+// glyphs read as broken typography (user feedback) -- give each script a
+// native face instead.
+export const FONT_BY_LANG: Record<string, string> = {
+  ja: '"Shippori Mincho B1", "Yu Mincho", serif',
+  en: '"Georgia", "Segoe UI", sans-serif',
+  ko: '"Malgun Gothic", sans-serif',
+  zh: '"Microsoft YaHei", "SimHei", sans-serif',
+  yue: '"Microsoft JhengHei", "Microsoft YaHei", sans-serif',
+};
+export const fontFor = (lang?: string) => FONT_BY_LANG[lang ?? ''] ?? FONT_BY_LANG.en;
+
 export const FONT_MONO =
   '"Consolas", "SFMono-Regular", "Menlo", monospace';
