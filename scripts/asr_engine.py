@@ -379,18 +379,33 @@ class RoutedASR:
             return self._get_with_fallback("v3")
         return self._get_with_fallback("omni")
 
-    def partial(self, samples: np.ndarray, sample_rate: int) -> str:
+    def partial(self, samples: np.ndarray, sample_rate: int,
+                lang_hint: str | None = None) -> str:
         """Fast draft transcription of an in-progress utterance.
 
-        Routes by the last finalized language of the session (sticky), so a
-        German speaker gets German drafts from the second utterance on.
-        Before any final exists, drafts use the tier-0 ja/en model.
+        Prefers the caller's early-LID hint for THIS utterance (so drafts
+        switch language as soon as the mid-utterance LID fires, ~2s in);
+        otherwise falls back to the session's sticky language. Without
+        either, the tier-0 ja/en model drafts. Fixes Korean drafts staying
+        blank after an English section (the sticky en model returns nothing
+        for Korean speech).
         """
-        if self.last_lang is not None:
-            rec, _ = self._route(self.last_lang)
+        lang = lang_hint or self.last_lang
+        if lang is not None:
+            rec, _ = self._route(lang)
         else:
-            rec = self._get("rz")
-        return self._replace(self._decode(rec, samples, sample_rate))
+            rec = self._get_with_fallback("rz")[0]
+        out = self._decode(rec, samples, sample_rate)
+        if not out.strip() and "sv" not in self._unavailable:
+            # sticky model hears nothing: likely a language switch. SenseVoice
+            # auto-detects ja/zh/ko/yue/en internally, so it can draft the new
+            # language right away without waiting for the 2.0s early LID
+            # (which stays authoritative for the actual switch).
+            try:
+                out = self._decode(self._get("sv"), samples, sample_rate)
+            except ModelUnavailable:
+                pass
+        return self._replace(out)
 
     def _replace(self, text: str) -> str:
         for wrong, right in self._replacements:

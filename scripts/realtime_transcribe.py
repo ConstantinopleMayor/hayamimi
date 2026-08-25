@@ -428,7 +428,7 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
             if early_lang is None and len(cur) >= int(2.0 * sample_rate):
                 early_lang = asr.identify(cur, sample_rate)
             if printer.enabled and len(cur) >= sample_rate // 2:
-                printer.show(asr.partial(cur, sample_rate))
+                printer.show(asr.partial(cur, sample_rate, lang_hint=early_lang))
 
         if drain_segments(vad, sample_rate, asr, stats, printer, history, early_lang,
                           spans_out=refiner.spans if refiner else None,

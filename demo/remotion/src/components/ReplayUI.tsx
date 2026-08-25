@@ -94,7 +94,8 @@ export const ReplayUI: React.FC<{
           top: 104,
           left: 60,
           right: 60,
-          minHeight: 130,
+          height: 210,
+          overflow: "hidden",
           background: COLORS.panel,
           border: `1px solid ${COLORS.line}`,
           borderRadius: 14,
@@ -116,7 +117,8 @@ export const ReplayUI: React.FC<{
         <div
           style={{
             fontFamily: fontFor(lang),
-            fontSize: 50,
+            // two lines must fit inside the fixed 210px strip: shrink with length
+            fontSize: (currentPartial?.text?.length ?? 0) > 120 ? 30 : (currentPartial?.text?.length ?? 0) > 64 ? 38 : 50,
             color: COLORS.cream,
             lineHeight: 1.25,
             opacity: partialOpacity,
@@ -141,7 +143,7 @@ export const ReplayUI: React.FC<{
       <div
         style={{
           position: "absolute",
-          top: 270,
+          top: 340,
           left: 60,
           right: 60,
           display: "flex",
