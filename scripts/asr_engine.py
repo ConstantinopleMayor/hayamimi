@@ -120,6 +120,10 @@ def _build_lid(threads: int):
     return sherpa_onnx.SpokenLanguageIdentification(cfg)
 
 
+def _has_kana(text: str) -> bool:
+    return any("぀" <= c <= "ヿ" for c in text)
+
+
 def script_corrected_lang(tagged: str, text: str) -> str:
     """Correct an LID tag that contradicts the script of the decoded text."""
     letters = [c for c in text if c.isalpha()]
@@ -400,12 +404,29 @@ class RoutedASR:
         corrected = script_corrected_lang(lang, text)
         if live and text.strip() and corrected != lang:
             # the decoded script contradicts the LID tag (romaji-mangled
-            # English under a ja tag, kanji under an en tag): one re-decode
-            # with the right model fixes the final before anyone sees it
-            rec2, tier2 = self._route(corrected)
-            text2 = self._decode(rec2, samples, sample_rate)
-            if text2.strip():
-                lang, tier, text = corrected, tier2, text2
+            # English under a ja tag, CJK under a non-CJK tag): re-decode
+            # with the right model before anyone sees the final.
+            if corrected == "ja" and not _has_kana(text):
+                # han-only text is just as likely zh/yue as ja; let
+                # SenseVoice's internal LID arbitrate instead of assuming
+                # (assuming ja here cost yue 7.4% -> 24% CER, iteration 27)
+                text2, sv_lang = self._decode_full(self._get("sv"), samples, sample_rate)
+                if text2.strip():
+                    if "yue" in sv_lang:
+                        lang, tier, text = "yue", "sv", text2
+                    elif "zh" in sv_lang:
+                        text3 = self._decode(self._get("pz"), samples, sample_rate)
+                        lang, tier, text = "zh", "pz", (text3 if text3.strip() else text2)
+                    elif "ja" in sv_lang:
+                        text3 = self._decode(self._get("rz"), samples, sample_rate)
+                        lang, tier, text = "ja", "rz", (text3 if text3.strip() else text2)
+                    elif "ko" in sv_lang:
+                        lang, tier, text = "ko", "sv", text2
+            else:
+                rec2, tier2 = self._route(corrected)
+                text2 = self._decode(rec2, samples, sample_rate)
+                if text2.strip():
+                    lang, tier, text = corrected, tier2, text2
 
         text = self._replace(text)
         if lang == "ko" and text.strip() and self.ko_spacer is not None:
