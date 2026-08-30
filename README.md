@@ -113,6 +113,72 @@ python -m venv .venv
 (ReazonSpeech, whisper-tiny, Silero VAD, Japanese punctuation). See
 `THIRD_PARTY_NOTICES.md` for what each model's license commits you to.
 
+## Desktop subtitle window (`desktop-subtitle/`)
+
+This fork adds a transparent, always-on-top **desktop subtitle window** that
+renders hayamimi's OBS overlay directly on your screen — no OBS required.
+It lives in `desktop-subtitle/` (an Electron app, separate from the Python
+server).
+
+**What it does**
+
+- Shows the live subtitles on your desktop (transparent background,
+  frameless, always on top, has a taskbar icon).
+- `final` (confirmed) line and `partial` (in-progress) draft share ONE line,
+  wrapping together; the translation sits on its OWN line below.
+- Subtitle text flows top→bottom and the window **auto-fits its height**
+  to the content (width is fixed — text wraps instead).
+- Buttons pinned at the top-left corner:
+  - **🔒 / 🔓** — toggle interactive drag vs click-through mode.
+  - **⚙** — settings menu (font size, font family, translation language,
+    click-through, quit).
+  - **EN / ZH / KO / OFF** — cycle the displayed translation language.
+- Dragging is OS-native (`-webkit-app-region`), so the window moves without
+  resizing or drifting its content.
+
+**Setup & run**
+
+```bash
+cd desktop-subtitle
+npm install            # installs Electron (devDependency)
+npm start              # opens the subtitle window
+```
+
+The server must be running with `--serve` (see Quickstart). The window loads
+`http://localhost:8833/` by default.
+
+**Keyboard shortcuts**
+
+| Key | Action |
+|---|---|
+| `Ctrl+Alt+D` | toggle click-through |
+| `Ctrl+Alt+L` | cycle translation language |
+| `Esc` | quit the subtitle window |
+
+**Windows one-click launcher** (`desktop-subtitle/启动早耳.bat`)
+
+Double-click it and it starts (or re-uses) the hayamimi server with
+`--translate zh` by default, then opens the subtitle window. A matching
+`desktop-subtitle/停止早耳.bat` stops both.
+
+## Runtime translation hot-switch (no restart)
+
+Two independent ways to change which languages Japanese lines are translated
+to **while the server is already running**:
+
+1. **Console commands** — type in the server's terminal window:
+   `translate en,zh,ko` (activate), `translate off` (deactivate),
+   `translate zh` (switch), `quit` (exit).
+2. **HTTP endpoint** — `POST /api/translate` accepts
+   `{"langs": "zh"}` / `{"langs": "en,zh,ko"}` / `{"langs": ""}` and
+   hot-swaps the active translators. This is exactly what the subtitle
+   window's **EN/ZH/KO/OFF** button uses.
+
+Under the hood: `TranslationWorker` gained `set_langs()` (thread-safe swaps,
+no stale iteration), and `main()` always starts an empty worker so a later
+hot-switch works without a restart. Translators are still lazy-loaded on
+first use, so the first `translate ...` takes a few seconds to load models.
+
 ## CLI reference
 
 All flags are on `scripts/realtime_transcribe.py`:
