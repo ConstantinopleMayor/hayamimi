@@ -130,14 +130,14 @@ function makeCss() {
     /* final on the same line, wrapping together naturally -- it can never be  */
     /* pushed to its own row like flex items can. #hmy-tr is a block, so the   */
     /* translation always sits on its OWN line below.                         */
-    #box{top:44px!important;bottom:auto!important;text-align:center;
+    #box{top:44px!important;bottom:auto!important;text-align:left!important;
          max-width:100%;white-space:normal;}
     #final-line,#partial-line{display:inline!important;max-width:100%;
          white-space:pre-wrap;overflow-wrap:anywhere;
-         min-height:0!important;}
+         min-height:0!important;text-align:left!important;}
     #hmy-tr{display:block;margin-top:0.3em;max-width:100%;
             font-size:${opts.size}px!important;opacity:0.92;color:#ffd75e;
-            text-shadow:0 0 6px #000,0 0 3px #000;min-height:1.1em;text-align:center;
+            text-shadow:0 0 6px #000,0 0 3px #000;min-height:1.1em;text-align:left;
             white-space:pre-wrap;overflow-wrap:anywhere;}
     #box{font-size:${opts.size}px!important;}
     ${fontCss}
