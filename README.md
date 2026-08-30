@@ -6,7 +6,7 @@
 browser dashboard, speaker labels, and on-the-fly translation -- no GPU, no
 cloud API, under 2GB RAM.
 
-日本語版 README は [README.ja.md](README.ja.md) にあります。
+日本語版 README は [README.ja.md](README.ja.md) にあります。 中文版见 [README.zh.md](README.zh.md)。
 
 "早耳" (hayamimi) is Japanese for "quick ear" -- someone who picks up on
 things fast. That's the design goal: partial subtitles appear while you're
