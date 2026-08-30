@@ -90,6 +90,12 @@ class SubtitleServer:
         self._refines: list[str] = []  # recent refine events, replayed to new clients
         self._lock = threading.Lock()
         self._httpd = None
+        self._translate_cb = None  # injected by realtime_transcribe: cb(langs_spec)
+
+    def set_translate_callback(self, cb):
+        """Register a runtime translation-switch handler, e.g. to hot-enable
+        translation from the desktop subtitle window via POST /api/translate."""
+        self._translate_cb = cb
 
     def publish(self, event: dict):
         data = json.dumps(event, ensure_ascii=False)
@@ -171,6 +177,41 @@ class SubtitleServer:
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
+
+            def do_POST(self):
+                """POST /api/translate  {langs: "en,zh,ko"} | {langs: ""}  --
+                hot-switch translation from the desktop subtitle window
+                without restarting the server. Falls back to a 404 for any
+                other path so only our own endpoint is reachable."""
+                if self.path == "/api/translate":
+                    length = int(self.headers.get("Content-Length") or 0)
+                    raw = self.rfile.read(length) if length else b"{}"
+                    langs = ""
+                    try:
+                        payload = json.loads(raw.decode("utf-8") or "{}")
+                        langs = str(payload.get("langs", ""))
+                    except Exception:
+                        pass
+                    cb = server._translate_cb
+                    ok = False
+                    err = ""
+                    if cb is not None:
+                        try:
+                            cb(langs)
+                            ok = True
+                        except Exception as exc:
+                            err = str(exc)
+                    else:
+                        err = "no translate callback registered"
+                    body = json.dumps({"ok": ok, "langs": langs, "err": err},
+                                      ensure_ascii=False).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_error(404)
 
         self._httpd = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
         threading.Thread(target=self._httpd.serve_forever, daemon=True).start()

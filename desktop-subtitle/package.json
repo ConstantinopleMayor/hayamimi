@@ -1,0 +1,12 @@
+{
+  "name": "hayamimi-desktop-subtitle",
+  "version": "1.0.0",
+  "description": "Transparent always-on-top desktop subtitle window for hayamimi's OBS overlay",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^37.0.0"
+  }
+}

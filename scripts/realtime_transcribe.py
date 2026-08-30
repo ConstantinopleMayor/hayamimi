@@ -314,13 +314,25 @@ def build_translators(langs: str) -> dict:
 
 
 class TranslationWorker:
-    """Async ja->target translation of finalized lines (console display)."""
+    """Async ja->target translation of finalized lines (console display).
+
+    Supports hot enabling/disabling at runtime: set_langs() swaps the active
+    translator set from a live stdin command (e.g. "translate en,zh" or
+    "translate off") without restarting the server.
+    """
 
     def __init__(self, translators: dict, server=None):
-        self._translators = translators
+        self._lock = threading.Lock()
+        self._translators = dict(translators)  # copy: never mutate in place
         self._server = server
         self._q: "queue.Queue[str]" = queue.Queue()
         threading.Thread(target=self._run, daemon=True).start()
+
+    def set_langs(self, translators: dict):
+        with self._lock:
+            self._translators = dict(translators)  # atomic swap, no stale iteration
+        print(f"[translate] active langs: {list(n for n in self._translators) or ['off']}",
+              flush=True)
 
     def submit(self, text: str):
         self._q.put(text)
@@ -328,7 +340,11 @@ class TranslationWorker:
     def _run(self):
         while True:
             text = self._q.get()
-            for lang, tr in self._translators.items():
+            with self._lock:
+                langs = list(self._translators.items())
+            if not langs:
+                continue
+            for lang, tr in langs:
                 out = safe_translate(tr, text)
                 if out != text:  # fallback returns the source: nothing worth showing
                     print(f"[→{lang}] {out}", flush=True)
@@ -729,13 +745,65 @@ def main():
 
         speaker_labeler = SpeakerLabeler()
 
+    # Translation worker always exists (even with no --translate) so it can be
+    # hot-activated later via the stdin command thread below -- no restart needed.
     translators = {}
-    translator_worker = None
+    translator_worker = TranslationWorker(translators, server=server)
     if args.translate:
         print(f"loading translators ({args.translate})...", file=sys.stderr)
         translators = build_translators(args.translate)
         if translators:
-            translator_worker = TranslationWorker(translators, server=server)
+            translator_worker.set_langs(translators)
+
+
+    def apply_translation_spec(spec: str, worker: TranslationWorker) -> None:
+        """"translate en,zh,ko" | "" / "off" -> hot-switch the worker's active
+        translators. Shared by the stdin command thread and by the HTTP
+        POST /api/translate endpoint (called from the desktop subtitle window),
+        so both paths can switch translation at runtime without a restart.
+        """
+        spec = (spec or "").strip().lower()
+        if spec in ("", "off", "none", "0"):
+            worker.set_langs({})
+            print("[cmd] translation off", file=sys.stderr, flush=True)
+            return
+        print(f"[cmd] loading translators ({spec})...", file=sys.stderr, flush=True)
+        try:
+            tr = build_translators(spec)
+        except Exception as exc:
+            print(f"[cmd] failed: {exc}", file=sys.stderr, flush=True)
+            return
+        if tr:
+            worker.set_langs(tr)
+        else:
+            print("[cmd] no supported targets", file=sys.stderr, flush=True)
+
+
+    def hot_commands(worker: TranslationWorker):
+        """Live stdin commands (run-time translation switch, no restart):
+            translate en,zh,ko   -> build + activate translators
+            translate off        -> deactivate translation
+            quit                 -> exit the process
+        Feedback goes to stderr so the tty partial-printer isn't clobbered.
+        """
+        for line in sys.stdin:
+            line = line.strip().lower()
+            if not line:
+                continue
+            if line.startswith("translate "):
+                apply_translation_spec(line[len("translate "):], worker)
+            elif line in ("quit", "exit"):
+                print("[cmd] bye", file=sys.stderr, flush=True)
+                raise SystemExit(0)
+
+    threading.Thread(target=hot_commands, args=(translator_worker,), daemon=True).start()
+
+    # Register the shared switcher with the HTTP server so the desktop
+    # subtitle window's language button can hot-toggle translation too
+    # (POST /api/translate). Both entry points use the same apply function.
+    if server is not None:
+        server.set_translate_callback(
+            lambda langs: apply_translation_spec(langs, translator_worker))
 
     history = AudioHistory(SAMPLE_RATE)
     refiner = None if args.no_refine else Refiner(asr, history, SAMPLE_RATE, printer,
