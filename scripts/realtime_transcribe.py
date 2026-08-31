@@ -8,6 +8,7 @@ Usage:
     python scripts/realtime_transcribe.py                                 # live microphone
 """
 import argparse
+import itertools
 import os
 import queue
 import sys
@@ -24,6 +25,11 @@ from asr_engine import RoutedASR
 from audio_utils import resample_linear
 
 SAMPLE_RATE = 16000
+# Monotonic utterance id so async translation events can be attached to
+# the exact finalized line they translate (front-ends key on this "seq").
+_UTT_SEQ = itertools.count(1)
+_UTT_SEQ_LOCK = threading.Lock()
+
 WINDOW_SIZE = 512  # samples per VAD chunk, ~32ms @ 16kHz
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 VAD_MODEL = os.path.join(MODELS_DIR, "silero_vad.onnx")
@@ -126,7 +132,14 @@ def ws_chunks(ingest):
 
 
 PARTIAL_EVERY_S = 0.5   # decode a draft this often (in audio time) during speech
-PARTIAL_WINDOW_S = 8.0  # cap draft decoding to the last N seconds of the utterance
+# Partial (in-progress) drafts decode only the last PARTIAL_WINDOW_S seconds
+# of the utterance. It must be >= the VAD's max_speech_duration
+# (default --max-speech 12.0 s) or the leading part of a long sentence
+# silently vanishes from the draft while the speaker is still talking
+# ("前面的内容消失"). 14 s keeps every section of any segment that the VAD
+# can emit (<=12 s) present in the draft; raise it if you also raise
+# --max-speech.
+PARTIAL_WINDOW_S = 14.0
 
 
 class PartialPrinter:
@@ -236,15 +249,20 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         stats.segments += 1
         stats.latencies_ms.append(latency_ms)
         printer.clear()
+        seq = next(_UTT_SEQ)  # utterance id for translation attachment
         if printer.server is not None:
             printer.server.final(result["text"], result["lang"], speaker.rstrip("|"),
-                                 latency_ms, result.get("tier", ""))
+                                 latency_ms, result.get("tier", ""), seq=seq)
         probe_part = f", probe={result['probe_ms']:.0f}ms" if result.get("probe_ms") else ""
         print(f"[{speaker}{result['lang']}/{result.get('tier', '?')}] {result['text']}  "
               f"(seg={seg_s:.1f}s, lid={result['lid_ms']:.0f}ms{probe_part}, "
               f"decode={result['decode_ms']:.0f}ms, latency={latency_ms:.0f}ms)", flush=True)
-        if translator_worker is not None and result["lang"] == "ja" and result["text"].strip():
-            translator_worker.submit(result["text"])
+        if translator_worker is not None and result["text"].strip():
+            # Every finalized line goes to the worker regardless of its detected
+            # language. The worker hands it to API translators for ANY source
+            # language, and to the local ja-fixed MT translators only when the
+            # source is ja (see TranslationWorker._run).
+            translator_worker.submit(result["text"], result["lang"], seq)
         if refiner is not None:
             refiner.add_span(seg_start, seg_end, result["lang"], result["text"],
                              speaker.rstrip("|"))
@@ -252,6 +270,11 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
 
 
 import re as _re
+
+
+# Set in main() from --api-config (or auto-detected openai_translate.json in
+# the project root). Non-None means the API translation route is available.
+_api_cfg = None
 
 
 def digits_consistent(src: str, out: str) -> bool:
@@ -268,20 +291,27 @@ def digits_consistent(src: str, out: str) -> bool:
     return all(run in out_runs for run in src_runs)
 
 
-def safe_translate(translator, text: str) -> str:
-    """Translate one line; fall back to the source when numbers got mangled."""
-    out = translator.translate(text)
+def safe_translate(translator, text: str, src_lang: str = "ja") -> str:
+    """Translate one line; fall back to the source when numbers got mangled.
+
+    src_lang is the detected language of `text` -- the API translator needs it
+    to build its prompt; the local MT translators ignore it (they are ja-fixed).
+    """
+    if getattr(translator, "IS_API", False):
+        out = translator.translate(text, src_lang)
+    else:
+        out = translator.translate(text)
     if out != text and not digits_consistent(text, out):
         return text
     return out
 
 
-def translate_by_sentence(translator, text: str) -> str:
+def translate_by_sentence(translator, text: str, src_lang: str = "ja") -> str:
     """The MT models are trained on single sentences; feed one at a time."""
     sentences = [s for s in _re.split(r"(?<=[。！？!?])\s*", text) if s.strip()]
     out = []
     for s in sentences:
-        en = safe_translate(translator, s)
+        en = safe_translate(translator, s, src_lang)
         if en != s:
             out.append(en)
     return " ".join(out)
@@ -290,15 +320,43 @@ def translate_by_sentence(translator, text: str) -> str:
 def build_translators(langs: str) -> dict:
     """"en,zh,ko,es,..." -> {lang: translator}.
 
-    en uses the dedicated FuguMT module; any other target is accepted if
-    M2M-100's vocabulary has a token for it (see
-    translate_m2m.is_supported_target()). Only a subset of those targets have
-    measured translation quality (translate_m2m.VALIDATED_TARGETS) --
-    constructing a translator for an unvalidated target prints a note to
-    stderr but still works.
+    Syntax supports two kinds of targets, mixed freely:
+      - `api:zh`, `api:en,zh,ko` or bare `api`  -> OpenAI-compatible API
+        translation of ANY detected source language -> target(s). Only works
+        when openai_translate.json is configured (see translate_api.py).
+      - plain codes (`en`, `zh`, `ko`, ...)      -> the local models as
+        before: en uses FuguMT (ja->en); any other target is accepted if
+        M2M-100's vocabulary has a token for it (see
+        translate_m2m.is_supported_target()). Only a subset have measured
+        quality (translate_m2m.VALIDATED_TARGETS) -- constructing one outside
+        that set prints a note to stderr but still works.
     """
     out = {}
     for lang in [x.strip() for x in langs.split(",") if x.strip()]:
+        if lang == "api" or lang.startswith("api:"):
+            if _api_cfg is None:
+                print("api: target requested but openai_translate.json is not "
+                      "configured (missing base_url/model)", file=sys.stderr)
+                continue
+            from translate_api import TranslatorApi, api_targets
+
+            available = sorted(api_targets(_api_cfg))
+            if not available:
+                print("api: openai_translate.json has no usable targets",
+                      file=sys.stderr)
+                continue
+            wanted = lang[4:].strip() if lang.startswith("api:") else ""
+            if wanted:
+                if wanted not in available:
+                    print(f"api: unsupported target {wanted!r} "
+                          f"(config targets: {available})", file=sys.stderr)
+                    continue
+                targets = [wanted]
+            else:
+                targets = available
+            for t in targets:
+                out[t] = TranslatorApi(_api_cfg, t)
+            continue
         if lang == "en":
             from translate_ja_en import TranslatorJaEn
 
@@ -314,18 +372,24 @@ def build_translators(langs: str) -> dict:
 
 
 class TranslationWorker:
-    """Async ja->target translation of finalized lines (console display).
+    """Async source->target translation of finalized lines (console display).
 
     Supports hot enabling/disabling at runtime: set_langs() swaps the active
     translator set from a live stdin command (e.g. "translate en,zh" or
     "translate off") without restarting the server.
+
+    Source-language handling:
+    - The API translator (translate_api.TranslatorApi, IS_API=True) accepts
+      ANY detected source language; it is prompted with the src_lang name.
+    - The local MT translators (FuguMT / M2M-100) are ja-fixed, so for a
+      source other than ja their target is silently skipped.
     """
 
     def __init__(self, translators: dict, server=None):
         self._lock = threading.Lock()
         self._translators = dict(translators)  # copy: never mutate in place
         self._server = server
-        self._q: "queue.Queue[str]" = queue.Queue()
+        self._q: "queue.Queue[tuple]" = queue.Queue()
         threading.Thread(target=self._run, daemon=True).start()
 
     def set_langs(self, translators: dict):
@@ -334,22 +398,38 @@ class TranslationWorker:
         print(f"[translate] active langs: {list(n for n in self._translators) or ['off']}",
               flush=True)
 
-    def submit(self, text: str):
-        self._q.put(text)
+    def submit(self, text: str, src_lang: str = "ja", seq: int | None = None):
+        self._q.put((text, src_lang or "ja", seq))
 
     def _run(self):
         while True:
-            text = self._q.get()
+            text, src_lang, seq = self._q.get()
             with self._lock:
                 langs = list(self._translators.items())
             if not langs:
                 continue
             for lang, tr in langs:
-                out = safe_translate(tr, text)
+                # local ja-fixed MT: only ja source makes sense
+                if src_lang != "ja" and not getattr(tr, "IS_API", False):
+                    continue
+                # Translating a line into its own language is a no-op (zh ->
+                # zh) and a wasted API round-trip, but the viewer still wants
+                # to SEE the translation line populated -- so for a
+                # same-language target we publish the SOURCE text itself as
+                # the "translation" (no API call). The front-end thus always
+                # has something under the subtitle for the active language.
+                if lang == (src_lang or "ja"):
+                    if self._server is not None:
+                        self._server.publish(
+                            {"type": "translation", "lang": lang,
+                             "text": text, "seq": seq})
+                    continue
+                out = safe_translate(tr, text, src_lang)
                 if out != text:  # fallback returns the source: nothing worth showing
                     print(f"[→{lang}] {out}", flush=True)
                     if self._server is not None:
-                        self._server.publish({"type": "translation", "lang": lang, "text": out})
+                        self._server.publish({"type": "translation", "lang": lang,
+                                              "text": out, "seq": seq})
 
 
 from asr_engine import (  # shared with the engine's live correction / refine dual-LID confirm
@@ -546,13 +626,26 @@ class Refiner:
                 self.printer.server.publish({"type": "refine", "text": text, "lang": refine_lang,
                                              "speaker": speaker})
             outs = []
-            if self.translators and refine_lang == "ja":
+            if self.translators:
                 # synchronous here (we're already off the hot path) so the
                 # transcript keeps source and translations adjacent, in
                 # order. The MT models degrade on multi-sentence input,
                 # so translate sentence by sentence.
+                # API translators accept any refined source language; the
+                # local ja-fixed MT translators only run for ja (unchanged
+                # behavior).
                 for tlang, tr in self.translators.items():
-                    out = translate_by_sentence(tr, text)
+                    if refine_lang != "ja" and not getattr(tr, "IS_API", False):
+                        continue
+                    # target == refined source: no transform is meaningful, but the
+                    # transcript should still pair the line with its own
+                    # language -- record the source text as the output.
+                    if tlang == (refine_lang or "ja"):
+                        if text.strip():
+                            print(f"[refine→{tlang}] {text}", flush=True)
+                            outs.append((tlang, text))
+                        continue
+                    out = translate_by_sentence(tr, text, refine_lang)
                     if out and out != text:
                         print(f"[refine→{tlang}] {out}", flush=True)
                         outs.append((tlang, out))
@@ -690,12 +783,21 @@ def main():
     ap.add_argument("--speakers", action="store_true",
                     help="label utterances with speaker ids (S1, S2, ...)")
     ap.add_argument("--translate", nargs="?", const="en", default=None, metavar="LANGS",
-                    help="translate Japanese lines to these languages, comma-separated "
-                         "(default en). en=FuguMT; any other M2M-100 target code "
-                         "(zh, ko, es, fr, de, ...) is accepted if the model's vocabulary "
-                         "supports it. Only zh/ko have measured translation quality so far "
-                         "-- other targets print an 'unvalidated' note to stderr, see "
-                         "docs/TRANSLATE_M2M.md")
+                    help="translate lines to these languages, comma-separated "
+                         "(default en). Two kinds of targets, mixable: "
+                         "plain codes (en=FuguMT; any other M2M-100 target code such as "
+                         "zh, ko, es, fr, de ... is accepted if the model's vocabulary "
+                         "supports it) translate Japanese lines; prefixed targets "
+                         "(api:zh, api:en,ko or bare api) use the OpenAI-compatible API "
+                         "configured in openai_translate.json (or the --api-config file) "
+                         "and translate the DETECTED language of every line. Only zh/ko "
+                         "have measured local-model quality so far -- other local targets "
+                         "print an 'unvalidated' note to stderr, see docs/TRANSLATE_M2M.md")
+    ap.add_argument("--api-config", metavar="PATH", default=None,
+                    help="path to an openai_translate.json config file. If omitted, "
+                         "scripts/../openai_translate.json in the project root is "
+                         "detected automatically (when present). The api: translate "
+                         "route only works when a usable config exists.")
     ap.add_argument("--input", choices=["mic", "wav", "ws"], default=None,
                     help="audio source; default is mic, or wav if --wav is given")
     ap.add_argument("--ws-host", default="0.0.0.0", metavar="HOST",
@@ -718,6 +820,29 @@ def main():
         args.lang_switch_guard = default_guard
     if args.lid_switch_confirm is None:
         args.lid_switch_confirm = default_confirm
+
+    # API translation config: --api-config path wins; otherwise auto-detect
+    # the project-root openai_translate.json. A usable config enables the
+    # "api:..." translation route (see build_translators).
+    global _api_cfg
+    from translate_api import api_targets as _api_targets
+    from translate_api import load_config as _load_api_config
+
+    if args.api_config:
+        _api_cfg = _load_api_config(args.api_config)
+        if _api_cfg is None:
+            print(f"[api] config {args.api_config} is missing or unusable "
+                  f"(empty base_url/model) -- api: route disabled",
+                  file=sys.stderr)
+    else:
+        from translate_api import CONFIG_PATH as _API_CONFIG_PATH
+        from translate_api import load_config as _load_api_config
+
+        _api_cfg = _load_api_config(_API_CONFIG_PATH)
+    if _api_cfg is not None:
+        print(f"[api] api translate configured: base_url={_api_cfg['base_url']} "
+              f"model={_api_cfg['model']} targets={sorted(_api_targets(_api_cfg))}",
+              file=sys.stderr)
 
     server = None
     if args.serve:

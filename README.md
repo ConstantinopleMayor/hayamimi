@@ -33,7 +33,8 @@ same clips, while running at 10-50x realtime on a 6-core desktop CPU.
 | Fast finals | a finalized line typically lands ~100ms after you stop talking (ja; see `docs/GOALS.md` for other languages) |
 | Two-pass refinement | after 2s of silence, recent utterances are batch re-decoded for a higher-accuracy "clean" transcript (ja real-broadcast CER 15.5% -> 12.0%) |
 | Speaker labels | `--speakers` tags each utterance S1/S2/... using CAM++ speaker embeddings (turn-taking, not full diarization) |
-| Translation | `--translate en,zh,ko,es,...` translates Japanese lines live (en via FuguMT; any other M2M-100 target code is accepted if the model's vocabulary supports it -- zh/ko/es have measured quality, see docs/TRANSLATE_M2M.md) |
+| Translation | `--translate en,zh,ko,es,...` translates the detected line live (en via FuguMT; any other M2M-100 target code is accepted if the model's vocabulary supports it -- zh/ko/es have measured quality, see docs/TRANSLATE_M2M.md) |
+| API translation | `--translate api:zh,api:en,...` (or bare `api`) sends every detected line through an OpenAI-compatible endpoint (Ollama / LM Studio / OpenAI / vLLM...) and translates ANY detected source language into the chosen targets; configured via `openai_translate.json`, hot-switchable, works alongside the local MT routes |
 | Hotwords / user dictionary | `--hotwords` biases decoding toward proper nouns (currently has no effect on the ja tier -- see Limitations); `--replace` does post-hoc find/replace and works everywhere |
 | OBS overlay + dashboard | `--serve` starts a local HTTP server with a browser-source overlay and a live dashboard |
 | Network audio input | `--input ws` accepts mic audio over a WebSocket (phone, ESP32/stackchan) and feeds it through the same pipeline, including `--serve`'s dashboard/overlay |
@@ -163,8 +164,8 @@ Double-click it and it starts (or re-uses) the hayamimi server with
 
 ## Runtime translation hot-switch (no restart)
 
-Two independent ways to change which languages Japanese lines are translated
-to **while the server is already running**:
+Two independent ways to change which languages **the detected text** is
+translated to **while the server is already running**:
 
 1. **Console commands** — type in the server's terminal window:
    `translate en,zh,ko` (activate), `translate off` (deactivate),
@@ -178,6 +179,56 @@ Under the hood: `TranslationWorker` gained `set_langs()` (thread-safe swaps,
 no stale iteration), and `main()` always starts an empty worker so a later
 hot-switch works without a restart. Translators are still lazy-loaded on
 first use, so the first `translate ...` takes a few seconds to load models.
+
+## OpenAI-compatible API translation (`api:` targets)
+
+By default every translated line's **source is the detected language** of the
+finalized utterance, but the bundled translators themselves are ja-fixed:
+`en` (FuguMT ja->en) and the M2M-100 routes all expect Japanese input. To
+translate **any** detected language (ja, zh, en, ko, yue, ...) into a chosen
+target, point hayamimi at an OpenAI-compatible chat-completions endpoint.
+
+Create `openai_translate.json` in the project root (start from
+`openai_translate.example.json`):
+
+```json
+{
+  "base_url": "http://localhost:11434/v1",
+  "model": "qwen2.5:7b",
+  "api_key": "",
+  "timeout_sec": 10,
+  "targets": ["zh", "en", "ko"],
+  "src_names": { "ja": "Japanese", "zh": "Chinese", "en": "English",
+                 "ko": "Korean", "yue": "Cantonese" },
+  "prompt": ""
+}
+```
+
+- `base_url` is any OpenAI-compatible base (OpenAI, Ollama's `/v1`, LM Studio,
+  vLLM, ...). `api_key` stays empty for local servers.
+- `targets` limits which languages `api:` can be asked for; `src_names` maps
+  detected language codes to names in the prompt (falls back to the code).
+- `prompt` is an optional custom system prompt with `{src}` and `{target}`
+  placeholders; empty means the built-in interpreter prompt (handles the
+  target language, plus "only output the translation" / keep numbers intact).
+
+Then the `--translate` route accepts an `api:` prefixed `LANGS` spec, mixed
+freely with local codes (`api:zh`, `api:en,ko`, bare `api` = all configured
+targets, or `api:zh,en` = zh via API + en via local FuguMT). The same spec
+works in the runtime hot-switch (`translate api:zh`) and via
+`POST /api/translate` (`{"langs": "api:zh"}`).
+
+The subtitle window's **API / 本地** button toggles the channel: when set to
+**API**, the language button sends `api:` specs; when set to **本地** it sends
+plain codes (local MT). Without a usable `openai_translate.json` the API
+button is greyed out and behavior is unchanged.
+
+Implementation notes: `scripts/translate_api.py` uses only the standard
+library (`urllib.request`) so no new dependency is required. The API
+translator is marked `IS_API = True`; the worker only feeds it lines whose
+detected source language it should translate, and never lets local ja-fixed
+translators touch non-ja source lines. Any API failure/timeout returns the
+source line unchanged (same non-blank guarantee as the local translators).
 
 ## CLI reference
 
@@ -203,7 +254,7 @@ All flags are on `scripts/realtime_transcribe.py`:
 | `--lang-switch-guard SEC` | 2.0 | treat a new-language detection shorter than this as noise: it can never count toward confirming a switch (see `--lid-switch-confirm`) and it suppresses the omnilingual fallback on an empty decode (`0` disables) |
 | `--lid-switch-confirm N` | 2 | consecutive new-language detections (each >= `--lang-switch-guard` long) required before the session actually switches language; raise for stickier single-language sessions |
 | `--speakers` | off | label utterances with speaker ids (S1, S2, ...) |
-| `--translate [LANGS]` | off, `en` | translate Japanese lines to these comma-separated languages. `en` uses the dedicated FuguMT module; any other M2M-100 target code (`zh`, `ko`, `es`, `fr`, ...) is accepted if the model's vocabulary supports it -- unvalidated targets (anything outside `zh`/`ko`/`es`) print a quality-not-measured note, see docs/TRANSLATE_M2M.md |
+| `--translate [LANGS]` | off, `en` | translate the detected line to these comma-separated languages. Plain codes use the local models (`en` = FuguMT ja->en; any other M2M-100 target code like `zh`, `ko`, `es`, `fr` is accepted if the model's vocabulary supports it); `api:zh`, `api:en,ko` or bare `api` route through the OpenAI-compatible endpoint configured in `openai_translate.json` (or `--api-config`) and translate ANY detected source language. Local targets outside `zh`/`ko`/`es` print a quality-not-measured note, see docs/TRANSLATE_M2M.md |
 
 ## Architecture
 

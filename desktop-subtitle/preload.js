@@ -9,5 +9,6 @@ contextBridge.exposeInMainWorld("desktopSubtitle", {
   resize: (w, h) => ipcRenderer.send("hmy:resize", Math.round(w), Math.round(h)),
   showMenu: () => ipcRenderer.send("hmy:show-menu"),
   cycleLang: () => ipcRenderer.send("hmy:cycle-lang"),
+  cycleApi: () => ipcRenderer.send("hmy:cycle-api"),
   onModeChange: (cb) => ipcRenderer.on("hmy:mode", (_e, v) => cb(v)),
 });

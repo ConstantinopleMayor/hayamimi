@@ -10,3 +10,7 @@ session.txt
 Thumbs.db
 .claude/
 .playwright-mcp/
+
+# local API-translation config (may contain api keys); commit the example instead
+openai_translate.json
+/openai_translate.jsonc

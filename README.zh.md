@@ -23,7 +23,8 @@ English README → [README.md](README.md) / 日本語版 → [README.ja.md](READ
 | 快速确认 | 日语停顿时，确认行通常约 100ms 落地（其他语言见 `docs/GOALS.md`） |
 | 两遍精修 | 静音 2 秒后对最近若干话语批量重新解码，产出更高精度的"清稿"（日语真实广播 CER 15.5% → 12.0%） |
 | 说话人标签 | `--speakers` 用 CAM++ 说话人嵌入为每段话语标注 S1/S2/...（按话轮，非完整说话人分离） |
-| 翻译 | `--translate en,zh,ko,es,...` 实时翻译日语行（en 走 FuguMT；其余任意 M2M-100 目标代码，模型词表支持即可；zh/ko/es 已实测质量，见 docs/TRANSLATE_M2M.md） |
+| 翻译 | `--translate en,zh,ko,es,...` 实时翻译识别出的行（en 走 FuguMT；其余任意 M2M-100 目标代码，模型词表支持即可；zh/ko/es 已实测质量，见 docs/TRANSLATE_M2M.md） |
+| API 翻译 | `--translate api:zh,api:en,...`（或裸 `api`）把每一行识别结果发送到 OpenAI 兼容端点（Ollama / LM Studio / OpenAI / vLLM...），将**任意识别出的源语言**翻译成所选目标；通过 `openai_translate.json` 配置、可热切换、与本地 MT 路由并存 |
 | 热词/用户词典 | `--hotwords` 向解码注入专有名词偏好（当前对 ja 路由无效，见 Limitations）；`--replace` 做事后查找替换，全路由生效 |
 | OBS 覆盖层 + 仪表盘 | `--serve` 启动本地 HTTP 服务器，提供浏览器源覆盖层与实时仪表盘 |
 | 网络音频输入 | `--input ws` 接受经 WebSocket 传来的麦克风音频（手机、ESP32/stackchan 等），走同一流水线，包括仪表盘/覆盖层 |
@@ -118,7 +119,7 @@ npm start              # 打开字幕窗
 
 ## 运行时翻译热切换（无需重启）
 
-在**服务器运行中**改变日语行翻译语言，有两条独立途径：
+在**服务器运行中**改变识别文本的翻译语言，有两条独立途径：
 
 1. **控制台命令** —— 在服务器终端窗口中输入：
    `translate en,zh,ko`（启用）、`translate off`（停用）、
@@ -128,6 +129,35 @@ npm start              # 打开字幕窗
    即热切换当前生效的翻译器。这正是字幕窗 **EN/ZH/KO/OFF** 按钮所调用的方式。
 
 底层实现：`TranslationWorker` 新增 `set_langs()`（线程安全切换，不会遍历失效副本），`main()` 始终启动一个空的 worker，因此后续热切换无需重启。翻译器仍在首次使用时懒加载，第一次 `translate ...` 需要数秒加载模型。
+
+## OpenAI 兼容 API 翻译（`api:` 目标）
+
+默认情况下每行被翻译文本的**源语言是识别出的语言**，但内置翻译器本身是日语固定：`en`（FuguMT ja->en）与各 M2M-100 路由都期望日语输入。要把**任意识别出的语言**（ja、zh、en、ko、yue...）翻成所选目标语言，可将 hayamimi 指向一个 OpenAI 兼容的 chat-completions 端点。
+
+在项目根新建 `openai_translate.json`（以 `openai_translate.example.json` 为模板）：
+
+```json
+{
+  "base_url": "http://localhost:11434/v1",
+  "model": "qwen2.5:7b",
+  "api_key": "",
+  "timeout_sec": 10,
+  "targets": ["zh", "en", "ko"],
+  "src_names": { "ja": "Japanese", "zh": "Chinese", "en": "English",
+                 "ko": "Korean", "yue": "Cantonese" },
+  "prompt": ""
+}
+```
+
+- `base_url` 为任意 OpenAI 兼容基址（OpenAI、Ollama 的 `/v1`、LM Studio、vLLM...）。本地服务器 `api_key` 留空。
+- `targets` 限定 `api:` 可请求的目标语言；`src_names` 把识别出的语言代码映射到提示词中的语言名（缺省回退到代码本身）。
+- `prompt` 为可选的自定义系统提示词模板，其中 `{src}` / `{target}` 占位符会被替换成源/目标语言名；留空则使用内置同传提示词（处理目标语言、附加"只输出译文/数字不变"约束）。
+
+随后 `--translate` 的 `LANGS` 接受带 `api:` 前缀的规约，可与本地代码自由混用（`api:zh`、`api:en,ko`、裸 `api` = 全部已配置目标，或 `api:zh,en` = zh 走 API + en 走本地 FuguMT）。同样的规约也适用于运行时热切换（`translate api:zh`）与 `POST /api/translate`（`{"langs": "api:zh"}`）。
+
+字幕窗的 **API / 本地** 按钮切换通道：设为 **API** 时语言按钮发送 `api:` 规约；设为 **本地** 时发送普通代码（本地 MT）。没有可用的 `openai_translate.json` 时该按钮置灰，行为保持不变。
+
+实现说明：`scripts/translate_api.py` 只使用标准库（`urllib.request`），无需新依赖。API 翻译器以 `IS_API = True` 标记；worker 只把识别出的各行喂给它，且绝不让本地日语固定的翻译器碰非日语源文本。任何 API 失败/超时都返回原文（与本地翻译器相同的"永不为空行"保证）。
 
 ## CLI 参考
 
@@ -139,7 +169,7 @@ npm start              # 打开字幕窗
 | `--no-realtime` | 关 | 搭配 `--wav` 时不按实时节奏播（快速批处理） |
 | `--input {mic,wav,ws}` | mic 或 wav | 音频来源；`ws` 接受网络音频 |
 | `--serve [PORT]` | 关，8833 | 启动仪表盘 + OBS 覆盖层 |
-| `--translate [LANGS]` | 关，en | 把日语行翻译成这些逗号分隔的语言 |
+| `--translate [LANGS]` | 关，en | 把识别出的行翻译成这些逗号分隔的语言。普通代码走本地模型（en 走 FuguMT ja->en；其余任意 M2M-100 目标代码如 zh/ko/es/fr，模型词表支持即可）；`api:zh` / `api:en,ko` / 裸 `api` 走 `openai_translate.json`（或 `--api-config`）配置的 OpenAI 兼容端点，翻译任意源语言 |
 | `--speakers` | 关 | 以 S1/S2/... 标记话语说话人 |
 | `--hotwords PATH` | 无 | 热词列表（每行一个），向解码注入专有名词偏好 |
 | `--replace PATH` | 无 | 用户词典：每行 `错误=正确`，作用于全部输出 |

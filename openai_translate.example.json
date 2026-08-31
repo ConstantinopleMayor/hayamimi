@@ -1,0 +1,15 @@
+{
+  "base_url": "http://localhost:11434/v1",
+  "model": "qwen2.5:7b",
+  "api_key": "",
+  "timeout_sec": 10,
+  "targets": ["zh", "en", "ko"],
+  "src_names": {
+    "ja": "Japanese",
+    "zh": "Chinese",
+    "en": "English",
+    "ko": "Korean",
+    "yue": "Cantonese"
+  },
+  "prompt": ""
+}

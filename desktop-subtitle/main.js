@@ -32,10 +32,10 @@ function diag(msg) {
   } catch (_) {}
 }
 
-const DEFAULT_SIZE = 32;
+const DEFAULT_SIZE = 20;  // 20pt initial subtitle size
 const LANGS = ["en", "zh", "ko", "off"];
 const LANG_LABEL = { en: "EN", zh: "ZH", ko: "KO", off: "OFF" };
-const SIZE_CHOICES = [24, 32, 40, 48, 56, 64];
+const SIZE_CHOICES = [12, 16, 20, 24, 32, 40, 48, 56, 64];
 const FONT_CHOICES = [
   { label: "默认（跟随页面）", family: "" },
   { label: "微软雅黑", family: '"Microsoft YaHei", sans-serif' },
@@ -57,6 +57,30 @@ const BTN_Y0 = 8;   // top
 const BTN_S = 26;   // button size
 const BTN_GAP = 6;  // gap between buttons
 const BAND_PAD = 6; // pass-through keep-clickable band padding
+
+// API/本地 translation channel toggle button sits to the RIGHT of the
+// language button. The pass-through keep-clickable band counts 4 buttons now.
+const NBUTTONS = 4;
+
+// True when a usable openai_translate.json exists next to this app (i.e. the
+// server can serve `api:` targets). Keeps the API button inert otherwise.
+let apiAvailable = false;
+// False = language button sends plain specs (local MT: zh/en/ko).
+// True  = language button sends api: specs (OpenAI-compatible endpoint).
+let apiMode = false;
+
+// The server reads the same file (scripts/../openai_translate.json), so this
+// detection mirrors translate_api.load_config()'s usability rule: base_url
+// and model must be non-empty for the api: route to be usable.
+function detectApiConfig() {
+  try {
+    const p = path.join(__dirname, "..", "openai_translate.json");
+    const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
+    return !!(cfg && String(cfg.base_url || "").trim() && String(cfg.model || "").trim());
+  } catch (_) {
+    return false;
+  }
+}
 
 function parseArgs() {
   const args = process.argv.slice(1);
@@ -107,7 +131,7 @@ function isCursorInButtonBand() {
   const c = screen.getCursorScreenPoint();
   const b = win.getBounds();
   const nx = (b.x + c.x >= 0) ? c.x : 0; // c.x is absolute screen coord
-  const bandX2 = b.x + BTN_X0 + BTN_S * 3 + BTN_GAP * 2 + BAND_PAD;
+  const bandX2 = b.x + BTN_X0 + BTN_S * NBUTTONS + BTN_GAP * (NBUTTONS - 1) + BAND_PAD;
   const bandY2 = b.y + BTN_Y0 + BTN_S + BAND_PAD;
   return c.x >= b.x && c.x <= bandX2 && c.y >= b.y && c.y <= bandY2;
 }
@@ -123,6 +147,7 @@ function makeCss() {
   const lx0 = BTN_X0;
   const lx1 = BTN_X0 + BTN_S + BTN_GAP;
   const lx2 = BTN_X0 + (BTN_S + BTN_GAP) * 2;
+  const lx3 = BTN_X0 + (BTN_S + BTN_GAP) * 3;
   return `
     /* subtitles flow TOP -> BOTTOM, anchored to the top so the confirmed line   */
     /* is never clipped. Plain INLINE flow (NOT flex!): #final-line and        */
@@ -135,6 +160,11 @@ function makeCss() {
     #final-line,#partial-line{display:inline!important;max-width:100%;
          white-space:pre-wrap;overflow-wrap:anywhere;
          min-height:0!important;text-align:left!important;}
+    /* in-progress (partial) subtitle uses the SAME size as the confirmed
+       (final) line — the server's overlay CSS shrinks partial to 0.8em,
+       which makes it bob around as it grows; force it to 1em (inherit
+       #box's font-size) so size stays stable while typing. */
+    #partial-line{font-size:1em!important;opacity:0.9;}
     #hmy-tr{display:block;margin-top:0.3em;max-width:100%;
             font-size:${opts.size}px!important;opacity:0.92;color:#ffd75e;
             text-shadow:0 0 6px #000,0 0 3px #000;min-height:1.1em;text-align:left;
@@ -156,9 +186,14 @@ function makeCss() {
     #hmy-lock-btn{left:${lx0}px;}
     #hmy-menu-btn{left:${lx1}px;}
     #hmy-lang-btn{left:${lx2}px;font-family:'Segoe UI',sans-serif;font-weight:600;}
+    #hmy-api-btn{left:${lx3}px;font-family:'Segoe UI',sans-serif;font-weight:600;
+                 font-size:11px;}
     .hmy-btn:hover{background:rgba(40,40,40,0.85);}
     #hmy-lock-btn.on{background:rgba(90,100,120,0.7);}
     .hmy-btn *{pointer-events:none;}
+    /* API channel unavailable (no openai_translate.json): grey, inert */
+    .hmy-btn.off{opacity:0.45;background:rgba(60,60,60,0.5);
+                 border-color:rgba(255,255,255,0.15);cursor:default!important;}
   `;
 }
 
@@ -194,9 +229,15 @@ function makeInitJs() {
       console.log('hmy: btn-lang-click');
       window.desktopSubtitle.cycleLang();
     });
+    var apiBtn = mkBtn('hmy-api-btn', '${apiAvailable ? '本地' : '—'}', '切换翻译通道: 本地模型 / OpenAI API (需要 openai_translate.json)');
+    apiBtn.addEventListener('click', function(){
+      console.log('hmy: btn-api-click');
+      window.desktopSubtitle.cycleApi();
+    });
     document.body.appendChild(lock);
     document.body.appendChild(menuBtn);
     document.body.appendChild(langBtn);
+    document.body.appendChild(apiBtn);
     console.log('hmy: buttons injected');
 
     // translation line under the subtitle
@@ -225,17 +266,23 @@ function makeInitJs() {
     }
     setInterval(fitHeight, 500);
 
-    // server publishes {"type":"translation","lang","text"} when started with
-    // --translate en,zh,ko; render the chosen one live
+    // API translation is slow (1-5s), so the translation MUST NOT be cleared
+    // when a new final arrives -- otherwise it flickers out before the new
+    // line's translation shows up. Instead the translation line keeps the
+    // latest completed translation and only gets REPLACED when the next
+    // translation event arrives. seq is intentionally ignored here: dropping
+    // a slow translation because a newer final appeared was the "translation
+    // disappears" bug. The displayed translation lags the subtitle by design
+    // for API mode; local MT is fast enough that lag is invisible.
     var es = new EventSource('/events');
     es.onmessage = function(e){
       var ev;
       try { ev = JSON.parse(e.data); } catch (err) { return; }
       if (ev.type === 'translation') {
-        window.__hmyTr[ev.lang] = ev.text;
-        if (window.__hmyLang === ev.lang) {
+        window.__hmyTr[ev.lang] = ev.text;   // latest per-language translation
+        if (window.__hmyLang === ev.lang) {  // render the active language
           var el = document.getElementById('hmy-tr');
-          if (el) el.textContent = ev.text;
+          if (el) el.textContent = ev.text;  // replace, never clear
         }
       }
     };
@@ -249,7 +296,10 @@ function makeInitJs() {
 
 function setPageButtons() {
   if (!win || win.isDestroyed()) return;
-  const icon = passthrough ? "🔓" : "🔒";
+  // Icon semantics: 🔒 = window is LOCKED in place (click-through/passthrough,
+  // cannot be dragged) — 🔓 = unlocked, can drag/move the window.
+  // (Previously it was inverted: passthrough showed 🔓 which was confusing.)
+  const icon = passthrough ? "🔒" : "🔓";
   const onClass = passthrough ? " on" : "";
   const label = LANG_LABEL[lang] || "EN";
   win.webContents
@@ -259,6 +309,12 @@ function setPageButtons() {
         if(lock){ lock.textContent=${JSON.stringify(icon)}; lock.className='hmy-btn${onClass}'; }
         var lp=document.getElementById('hmy-lang-btn');
         if(lp){ lp.textContent=${JSON.stringify(label)}; }
+        var ap=document.getElementById('hmy-api-btn');
+        if(ap){
+          var apiLabel = ${JSON.stringify(apiAvailable ? (apiMode ? 'API' : '本地') : '—')};
+          ap.textContent = apiLabel;
+          ap.className = 'hmy-btn' + (${JSON.stringify(apiAvailable ? '' : ' off')});
+        }
       })();`
     )
     .catch(() => {});
@@ -282,8 +338,16 @@ const SERVER_PORT = (() => {
   return m ? parseInt(m[0].slice(1), 10) : 8833;
 })();
 
+// Translate target spec sent to the server for the currently selected lang:
+// "" for off; "api:<target>" when the API channel is active (and available);
+// plain "<target>" (local MT) otherwise.
+function translateSpec(lang) {
+  if (lang === "off") return "";
+  return apiMode && apiAvailable ? "api:" + lang : lang;
+}
+
 function notifyServerTranslation(spec) {
-  // spec: "" = off, otherwise comma list e.g. "en,zh,ko".
+  // spec: "" = off, otherwise e.g. "en,zh,ko" (local) or "api:zh" (API).
   // Fire-and-forget: failures just mean the server isn't reachable.
   try {
     fetch(`http://localhost:${SERVER_PORT}/api/translate`, {
@@ -300,7 +364,7 @@ function cycleLang() {
   // The language button now controls BOTH sides:
   //  - the server's translation (hot-switched via POST /api/translate)
   //  - which of those translations this window displays
-  notifyServerTranslation(lang === "off" ? "" : lang);
+  notifyServerTranslation(translateSpec(lang));
   setPageButtons();
   win.webContents
     .executeJavaScript(
@@ -309,24 +373,34 @@ function cycleLang() {
     .catch(() => {});
 }
 
+// API/本地 channel toggle. Only meaningful when openai_translate.json exists
+// (apiAvailable true); otherwise it stays local and the button is inert.
+function cycleApi() {
+  applyApiMode(!apiMode);
+}
+
+function applyApiMode(on) {
+  apiMode = !!(on && apiAvailable);
+  notifyServerTranslation(translateSpec(lang)); // re-apply current lang via new channel
+  setPageButtons();
+}
+
 function applyFontSize(px) {
   opts.size = px;
-  const css = `#box{font-size:${px}px!important;} #hmy-tr{font-size:${px}px!important;}`;
-  if (sizeKey) {
-    win.webContents.removeInsertedCSS(sizeKey).then(() => { sizeKey = win.webContents.insertCSS(css); }).catch(() => { sizeKey = win.webContents.insertCSS(css); });
-  } else {
-    sizeKey = win.webContents.insertCSS(css);
-  }
+  // webContents.insertCSS() returns a Promise<CSSKey>; storing the promise
+  // itself and later calling removeInsertedCSS(promise) throws
+  // "Failed to serialize arguments". Fix: never remove -- just insert a NEW
+  // rule. CSS is cascade-layered: a later-inserted rule with the same
+  // specificity and !important wins over the earlier one, so re-inserting is
+  // both simpler and always applies the newest size (no async race).
+  const css = `#box{font-size:${px}px!important;} #final-line,#partial-line{font-size:${px}px!important;} #hmy-tr{font-size:${px}px!important;}`;
+  win.webContents.insertCSS(css).catch(() => {});
 }
 
 function applyFont(family) {
   opts.font = family;
-  const css = family ? `#box{font-family:${family}!important;}` : "";
-  if (fontKey) {
-    win.webContents.removeInsertedCSS(fontKey).then(() => { fontKey = css ? win.webContents.insertCSS(css) : null; }).catch(() => { fontKey = css ? win.webContents.insertCSS(css) : null; });
-  } else if (css) {
-    fontKey = win.webContents.insertCSS(css);
-  }
+  const css = family ? `#box{font-family:${family}!important;} #final-line,#partial-line,#hmy-tr{font-family:${family}!important;}` : "";
+  win.webContents.insertCSS(css).catch(() => {});
 }
 
 function showMenu() {
@@ -352,11 +426,24 @@ function showMenu() {
         type: "radio", checked: lang === l,
         click: () => {
           lang = l;
-          notifyServerTranslation(lang === "off" ? "" : lang); // also switch server-side
+          notifyServerTranslation(translateSpec(lang)); // also switch server-side
           setPageButtons();
           win.webContents.executeJavaScript(`(function(){window.__hmyLang=${JSON.stringify(lang)};if(window.__hmyShowTr)window.__hmyShowTr();})();`).catch(() => {});
         },
       })),
+    },
+    {
+      label: "翻译通道",
+      submenu: [
+        { label: "本地模型", type: "radio", checked: !apiMode,
+          enabled: true, click: () => applyApiMode(false) },
+        { label: "OpenAI API", type: "radio", checked: apiMode,
+          enabled: apiAvailable,
+          click: () => applyApiMode(true) },
+      ],
+      // API entry is disabled (greyed) and not toggleable when no config file
+      // exists; label reflects that in the menu label itself.
+      ...(apiAvailable ? {} : { toolTip: "未找到 openai_translate.json，API 通道不可用" }),
     },
     {
       label: "点击穿透", type: "checkbox", checked: passthrough,
@@ -373,6 +460,15 @@ function showMenu() {
 app.whenReady().then(() => {
   opts = parseArgs();
   lang = opts.lang;
+
+  // API-translation availability: a usable openai_translate.json in the
+  // project root (one directory above this app) enables the "API" channel
+  // button; without it the button stays greyed/local and behavior is the
+  // pre-API version.
+  apiAvailable = detectApiConfig();
+  if (apiAvailable) { diag("api config present: API channel enabled"); }
+  else { diag("no usable openai_translate.json: API channel disabled"); }
+
   const { workArea } = screen.getPrimaryDisplay();
   const winW = Math.min(opts.width, workArea.width);
   const winH = Math.min(opts.height, workArea.height);
@@ -382,6 +478,7 @@ app.whenReady().then(() => {
   ipcMain.on("hmy:show-menu", () => { diag("IPC: show-menu"); showMenu(); });
   ipcMain.on("hmy:toggle-passthrough", () => { diag("IPC: toggle-passthrough"); applyPassthrough(!passthrough); });
   ipcMain.on("hmy:cycle-lang", () => { diag("IPC: cycle-lang"); cycleLang(); });
+  ipcMain.on("hmy:cycle-api", () => { diag("IPC: cycle-api"); cycleApi(); });
   // Height-only auto-fit: the window WIDTH stays fixed (text wraps instead),
   // the HEIGHT follows the subtitle+translation content. The renderer polls
   // every 500ms, and we debounce with a threshold so this is strictly one-way

@@ -1,7 +1,7 @@
 @echo off
 rem ============================================================
 rem  Stop hayamimi: desktop subtitle window + transcribe server
-rem  Usage: double-click this file (or: stop_hayamimi.bat)
+rem  Usage: double-click this file (or right-click -> Run)
 rem ============================================================
 echo Stopping hayamimi (desktop subtitle window + server)...
 

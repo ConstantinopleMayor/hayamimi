@@ -7,10 +7,18 @@ set "PROJECT=D:\AGI\hayamimi"
 set "OVERLAY=%PROJECT%\desktop-subtitle"
 set "SERVER_URL=http://localhost:8833/"
 
-rem Translation: change the list below to add/remove target languages.
-rem   en = FuguMT (ja->en); zh / ko / es ... = M2M-100 (measured for zh/ko).
+rem Translation targets (comma-separated, mixed freely):
+rem   zh / en / ko / es ... = local models (en = FuguMT ja->en;
+rem     others = M2M-100; zh/ko measured, see docs/TRANSLATE_M2M.md)
+rem   api:zh / api:en,ko / api = OpenAI-compatible API translation
+rem     of the DETECTED source language (any language, not just ja).
+rem     Requires a usable openai_translate.json in the project root
+rem     (copy openai_translate.example.json and fill base_url/model).
+rem     The subtitle window's API/Local button also switches channels.
 rem Leave empty (set "TRANSLATE=") to turn translation off.
-set "TRANSLATE=--translate zh"
+rem Default below = API zh (uses openai_translate.json). If you have no
+rem API config, change it to "--translate zh" for the local model.
+set "TRANSLATE=--translate api:zh"
 
 echo ============================================
 echo   hayamimi - realtime subtitles
@@ -44,6 +52,7 @@ echo.
 echo Subtitle window controls:
 echo   Lock button (lock)  toggle click-through (draggable vs pass-through)
 echo   Gear button         open settings menu (font size / font family / quit)
+echo   API/Local button    switch translation channel (local MT vs OpenAI API)
 echo   Left-drag           move the window (while lock is ON)
 echo   Ctrl+Alt+D          quick toggle click-through
 echo   Esc                 quit subtitle window
