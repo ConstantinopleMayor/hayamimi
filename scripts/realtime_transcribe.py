@@ -383,14 +383,46 @@ class TranslationWorker:
       ANY detected source language; it is prompted with the src_lang name.
     - The local MT translators (FuguMT / M2M-100) are ja-fixed, so for a
       source other than ja their target is silently skipped.
+
+    In-progress (partial) drafts can also be translated while the speaker
+    is still talking -- submit_partial() throttles them (text must have
+    grown meaningfully and >= PARTIAL_MIN_GAP_S since the last submission)
+    and drops them into a separate capacity-1 queue (newest wins). Two
+    worker threads run instead of one:
+      - _final_loop blocks on the finalized-line queue and translates
+        confirmed lines immediately; a draft's slow API call can never
+        delay or sit ahead of it.
+      - _partial_loop translates whatever draft is pending whenever the
+        draft queue is non-empty, so an utterance's translation starts
+        DURING speech instead of waiting for the VAD confirm.
+    Draft results publish as type=partial_translation (no seq -- a draft
+    has no finalized id yet); the front-end renders them as a dim preview
+    under the subtitle and replaces them when the real translation of the
+    finalized line arrives.
     """
+
+    PARTIAL_MIN_GAP_S = 1.0  # don't re-submit a draft more often than this
+    PARTIAL_MIN_DELTA = 5    # unless the draft gained this many new characters
 
     def __init__(self, translators: dict, server=None):
         self._lock = threading.Lock()
         self._translators = dict(translators)  # copy: never mutate in place
         self._server = server
+        # finalized lines (priority) -- one FIFO
         self._q: "queue.Queue[tuple]" = queue.Queue()
-        threading.Thread(target=self._run, daemon=True).start()
+        # partial drafts (best-effort) -- capacity 1, newest wins
+        self._partial_q: "queue.Queue[tuple]" = queue.Queue(maxsize=1)
+        self._last_partial_at = 0.0
+        self._last_partial_text = ""
+        # Draft staleness guard: every finalized line bumps this; a partial
+        # draft records the epoch it was submitted under and is DROPPED (not
+        # published) if a final arrived while its translation was in flight.
+        # Without this, a late API draft result would overwrite the just-
+        # finalized translation ("final translation on screen, partial still
+        # lingered") -- the front-end can't tell a stale draft from a new one.
+        self._final_epoch = 0
+        threading.Thread(target=self._final_loop, daemon=True).start()
+        threading.Thread(target=self._partial_loop, daemon=True).start()
 
     def set_langs(self, translators: dict):
         with self._lock:
@@ -399,37 +431,139 @@ class TranslationWorker:
               flush=True)
 
     def submit(self, text: str, src_lang: str = "ja", seq: int | None = None):
+        self.submit_final_locked(text, src_lang, seq)
+
+    def submit_final_locked(self, text: str, src_lang: str = "ja",
+                            seq: int | None = None):
+        """Queue a confirmed line AND invalidate in-flight drafts.
+
+        The utterance is now final: anything a draft of it is still saying
+        is stale, whether it is sitting in _partial_q or already being
+        translated by the partial thread. Bumping _final_epoch marks all
+        drafts submitted before this point as outdated (the partial thread
+        checks the epoch before publishing), and draining _partial_q frees
+        any draft that has not even started yet -- so an API round-trip is
+        never wasted on text a confirmed line has already replaced.
+        """
+        with self._lock:
+            self._final_epoch += 1
+        # drop drafts that haven't started translating yet -- they belong to
+        # the now-finalized utterance
+        while True:
+            try:
+                self._partial_q.get_nowait()
+            except queue.Empty:
+                break
         self._q.put((text, src_lang or "ja", seq))
 
-    def _run(self):
+    def submit_partial(self, text: str, src_lang: str = "ja") -> bool:
+        """Offer an in-progress draft for translation (throttled).
+
+        Only forwarded when the draft has genuinely moved on since the last
+        submission: it gained >= PARTIAL_MIN_DELTA new characters, or it got
+        shorter (re-recognition), and at least PARTIAL_MIN_GAP_S elapsed. The
+        capacity-1 queue keeps exactly the latest pending draft, so the
+        worker thread picks up the most recent state of the utterance, never
+        an outdated prefix. Returns True when accepted.
+        """
+        now = time.monotonic()
+        text = (text or "").strip()
+        prev = self._last_partial_text
+        # A brand-new draft (nothing submitted for this utterance yet) is
+        # always accepted; afterwards the draft must have moved on: gained
+        # >= PARTIAL_MIN_DELTA new characters, or got shorter (re-recognition).
+        if prev == "":
+            changed = True
+        else:
+            grown = len(text) - len(prev) >= self.PARTIAL_MIN_DELTA
+            changed = text != prev and (grown or len(text) < len(prev))
+        if not changed or (now - self._last_partial_at) < self.PARTIAL_MIN_GAP_S:
+            return False
+        # newest-wins: drop whatever draft is still queued
+        while True:
+            try:
+                self._partial_q.get_nowait()
+            except queue.Empty:
+                break
+        # Snapshot the final-epoch at submission time: if a final is queued
+        # before this draft's translation finishes, the draft is stale and its
+        # result must not be published (a late partial_translation would
+        # overwrite the just-shown confirmed translation).
+        with self._lock:
+            epoch = self._final_epoch
+        self._partial_q.put((text, src_lang or "ja", epoch))
+        self._last_partial_at = now
+        self._last_partial_text = text
+        return True
+
+    def _final_loop(self):
+        """Confirmed lines are translated by their own worker thread that
+        BLOCKS on the finalized queue: a draft's slow API round-trip can
+        never delay or sit ahead of a confirmed line's translation."""
         while True:
             text, src_lang, seq = self._q.get()
-            with self._lock:
-                langs = list(self._translators.items())
-            if not langs:
+            self._translate(text, src_lang, seq, partial=False)
+
+    def _partial_loop(self):
+        """Draft translations run in a SEPARATE thread that never blocks on
+        finals: as soon as the ingestion loop offers a draft (mid-speech),
+        it is translated immediately -- the translation starts WHILE the
+        speaker is still talking, not after the VAD confirms the line."""
+        while True:
+            try:
+                ptext, plang, epoch = self._partial_q.get_nowait()
+            except queue.Empty:
+                time.sleep(0.05)
                 continue
-            for lang, tr in langs:
-                # local ja-fixed MT: only ja source makes sense
-                if src_lang != "ja" and not getattr(tr, "IS_API", False):
-                    continue
-                # Translating a line into its own language is a no-op (zh ->
-                # zh) and a wasted API round-trip, but the viewer still wants
-                # to SEE the translation line populated -- so for a
-                # same-language target we publish the SOURCE text itself as
-                # the "translation" (no API call). The front-end thus always
-                # has something under the subtitle for the active language.
-                if lang == (src_lang or "ja"):
-                    if self._server is not None:
-                        self._server.publish(
-                            {"type": "translation", "lang": lang,
-                             "text": text, "seq": seq})
-                    continue
-                out = safe_translate(tr, text, src_lang)
-                if out != text:  # fallback returns the source: nothing worth showing
+            self._translate(ptext, plang, None, partial=True,
+                            draft_epoch=epoch)
+
+    def _translate(self, text: str, src_lang: str, seq: int | None,
+                   partial: bool, draft_epoch: int | None = None):
+        with self._lock:
+            langs = list(self._translators.items())
+        if not langs:
+            return
+        ev_type = "partial_translation" if partial else "translation"
+        for lang, tr in langs:
+            # local ja-fixed MT: only ja source makes sense
+            if src_lang != "ja" and not getattr(tr, "IS_API", False):
+                continue
+            # Translating a line into its own language is a no-op (zh ->
+            # zh) and a wasted API round-trip, but the viewer still wants
+            # to SEE the translation line populated -- so for a
+            # same-language target we publish the SOURCE text itself as
+            # the "translation" (no API call). The front-end thus always
+            # has something under the subtitle for the active language.
+            if lang == (src_lang or "ja"):
+                self._maybe_publish(ev_type, lang, text, seq, partial,
+                                    draft_epoch)
+                continue
+            out = safe_translate(tr, text, src_lang)
+            if out != text:  # fallback returns the source: nothing worth showing
+                if not partial:
                     print(f"[→{lang}] {out}", flush=True)
-                    if self._server is not None:
-                        self._server.publish({"type": "translation", "lang": lang,
-                                              "text": out, "seq": seq})
+                self._maybe_publish(ev_type, lang, out, seq, partial,
+                                    draft_epoch)
+
+    def _maybe_publish(self, ev_type: str, lang: str, text: str,
+                       seq: int | None, partial: bool,
+                       draft_epoch: int | None):
+        """Publish a translation event, unless it is a STALE draft.
+
+        The epoch check happens HERE -- at the actual publish moment -- not at
+        the start of _translate. An API round-trip takes 1-5s: a final may be
+        queued (bumping _final_epoch) while the blocking safe_translate() is
+        still running, and the check must see that bump AFTER the API returns,
+        otherwise a late partial_translation overwrites the just-shown
+        confirmed translation ("final 翻译都出来了, partial 还在")."""
+        if partial:
+            with self._lock:
+                if draft_epoch != self._final_epoch:
+                    return  # a final arrived while this draft was in flight
+        if self._server is not None:
+            self._server.publish({"type": ev_type, "lang": lang,
+                                  "text": text, "seq": seq})
 
 
 from asr_engine import (  # shared with the engine's live correction / refine dual-LID confirm
@@ -722,7 +856,16 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
             if asr.forced_lang is None and early_lang is None and len(cur) >= int(2.0 * sample_rate):
                 early_lang = asr.identify(cur, sample_rate)
             if printer.enabled and len(cur) >= sample_rate // 2:
-                printer.show(asr.partial(cur, sample_rate, lang_hint=early_lang))
+                partial_text = asr.partial(cur, sample_rate, lang_hint=early_lang)
+                printer.show(partial_text)
+                # Kick off a draft translation WHILE the speaker is still
+                # talking, so the confirmed line's translation isn't the
+                # first thing the viewer sees (API round-trips take 1-5s).
+                # The worker throttles submissions itself (growth-based +
+                # 1s cadence, see TranslationWorker.submit_partial).
+                if translator_worker is not None and partial_text.strip():
+                    translator_worker.submit_partial(
+                        partial_text, early_lang or getattr(asr, "last_lang", None) or "ja")
 
         if drain_segments(vad, sample_rate, asr, stats, printer, history, early_lang,
                           refiner=refiner,

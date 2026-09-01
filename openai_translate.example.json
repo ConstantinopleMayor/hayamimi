@@ -4,6 +4,7 @@
   "api_key": "",
   "timeout_sec": 10,
   "targets": ["zh", "en", "ko"],
+  "enable_thinking": false,
   "src_names": {
     "ja": "Japanese",
     "zh": "Chinese",

@@ -23,6 +23,15 @@ const { app, BrowserWindow, screen, globalShortcut, Menu, ipcMain } = require("e
 const path = require("path");
 const fs = require("fs");
 
+// Quiet Chromium's background network probes (captive-portal connectivity
+// checks, component updater, network-quality estimation) that otherwise SLL
+// handshake-fail on networks that can't reach Google (the window itself only
+// loads http://localhost:8833 -- these errors come from Chromium, not the
+// page). Disabling them stops the repeated
+// "ssl_client_socket_impl: handshake failed" console spam.
+app.commandLine.appendSwitch("disable-background-networking");
+app.commandLine.appendSwitch("disable-component-update");
+
 const DIAG = path.join(__dirname, "diag.log");
 let diagOpen = false;
 function diag(msg) {
@@ -67,7 +76,7 @@ const NBUTTONS = 4;
 let apiAvailable = false;
 // False = language button sends plain specs (local MT: zh/en/ko).
 // True  = language button sends api: specs (OpenAI-compatible endpoint).
-let apiMode = false;
+let apiMode = false; // set true in whenReady when a config exists (matches the .bat default)
 
 // The server reads the same file (scripts/../openai_translate.json), so this
 // detection mirrors translate_api.load_config()'s usability rule: base_url
@@ -149,26 +158,35 @@ function makeCss() {
   const lx2 = BTN_X0 + (BTN_S + BTN_GAP) * 2;
   const lx3 = BTN_X0 + (BTN_S + BTN_GAP) * 3;
   return `
-    /* subtitles flow TOP -> BOTTOM, anchored to the top so the confirmed line   */
-    /* is never clipped. Plain INLINE flow (NOT flex!): #final-line and        */
-    /* #partial-line are inline spans, so the partial ALWAYS follows the       */
-    /* final on the same line, wrapping together naturally -- it can never be  */
-    /* pushed to its own row like flex items can. #hmy-tr is a block, so the   */
-    /* translation always sits on its OWN line below.                         */
+    /* ACCUMULATING subtitle flow (desktop window owns ALL rendering):
+       confirmed finals flow left-to-right / wrap on lines (top-anchored),
+       and the in-progress partial draft rides INLINE at the end of the same
+       text line -- exactly the current #final-line + #partial-line "same
+       line" look. Each confirmed final segment keeps its own 5s lifetime and
+       is removed when it expires. The same happens for translations below.
+       The server's native overlay script still writes #final-line /
+       #partial-line -- hide them; we render our own flow. */
     #box{top:44px!important;bottom:auto!important;text-align:left!important;
          max-width:100%;white-space:normal;}
-    #final-line,#partial-line{display:inline!important;max-width:100%;
-         white-space:pre-wrap;overflow-wrap:anywhere;
-         min-height:0!important;text-align:left!important;}
-    /* in-progress (partial) subtitle uses the SAME size as the confirmed
-       (final) line — the server's overlay CSS shrinks partial to 0.8em,
-       which makes it bob around as it grows; force it to 1em (inherit
-       #box's font-size) so size stays stable while typing. */
-    #partial-line{font-size:1em!important;opacity:0.9;}
-    #hmy-tr{display:block;margin-top:0.3em;max-width:100%;
-            font-size:${opts.size}px!important;opacity:0.92;color:#ffd75e;
-            text-shadow:0 0 6px #000,0 0 3px #000;min-height:1.1em;text-align:left;
-            white-space:pre-wrap;overflow-wrap:anywhere;}
+    #final-line,#partial-line{display:none!important;}
+    /* source-text flow: confirmed segments + trailing in-progress draft */
+    #hmy-txt-flow{display:block;width:100%;box-sizing:border-box;
+         font-size:${opts.size}px!important;color:#fff;
+         text-shadow:0 0 8px #000,0 0 4px #000,2px 2px 2px #000;
+         white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;
+         line-height:1.35;}
+    .hmy-txt-seg{display:inline;}
+    .hmy-txt-part{display:inline;font-style:italic;opacity:0.9;}
+    /* translation flow: confirmed per-segment translations + trailing draft */
+    #hmy-tr-flow{display:block;width:100%;box-sizing:border-box;
+         font-size:${opts.size}px!important;color:#ffd75e;
+         text-shadow:0 0 6px #000,0 0 3px #000;
+         white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;
+         line-height:1.25;}
+    .hmy-tr-seg{display:inline;}
+    .hmy-tr-draft{display:inline;font-style:italic;}
+    /* fade-out before removal */
+    .hmy-fade{opacity:0!important;transition:opacity .25s ease;}
     #box{font-size:${opts.size}px!important;}
     ${fontCss}
     /* OS-native drag while interactive */
@@ -240,17 +258,43 @@ function makeInitJs() {
     document.body.appendChild(apiBtn);
     console.log('hmy: buttons injected');
 
-    // translation line under the subtitle
+    // ACCUMULATING subtitle flows (desktop window owns ALL rendering):
+    //   #hmy-txt-flow   source text: confirmed segments inline, the current
+    //                   partial draft rides INLINE at the end (same-line look
+    //                   as the original #final-line + #partial-line pair), so
+    //                   a new final APPENDS after older finals and several can
+    //                   share the screen. Each confirmed segment keeps its own
+    //                   5s lifetime, then fades out.
+    //   #hmy-tr-flow    translations: one segment per confirmed source with
+    //                   the same 5s lifetime + an in-progress draft at the end.
+    // 'segs' maps seq -> {srcEl, trEl, timer} so a late 'translation' (API is
+    // slow) can still attach to its segment.
     var box = document.getElementById('box');
+    var txtFlow = null, trFlow = null, txtPart = null, trDraft = null;
+    var segs = {};        // seq -> {srcEl, trEl, timer}
+    var lastSeq = 0;
     if (box) {
-      var tr = document.createElement('div');
-      tr.id = 'hmy-tr';
-      tr.textContent = '';
-      box.appendChild(tr);
+      txtFlow = document.createElement('div');
+      txtFlow.id = 'hmy-txt-flow';
+      box.appendChild(txtFlow);
+      txtPart = document.createElement('span');
+      txtPart.className = 'hmy-txt-part';
+      txtFlow.appendChild(txtPart);
+      trFlow = document.createElement('div');
+      trFlow.id = 'hmy-tr-flow';
+      box.appendChild(trFlow);
+      trDraft = document.createElement('span');
+      trDraft.className = 'hmy-tr-draft';
+      trFlow.appendChild(trDraft);
     }
     window.__hmyShowTr = function(){
-      var el = document.getElementById('hmy-tr');
-      if (el) el.textContent = window.__hmyTr[window.__hmyLang] || '';
+      // language switch: refresh only the LATEST confirmed translation from
+      // the per-language cache (older segments keep their history); drafts
+      // aren't cached, so clear the draft span.
+      var txt = window.__hmyTr[window.__hmyLang] || '';
+      var sg = segs[lastSeq];
+      if (sg && sg.trEl) sg.trEl.textContent = txt;
+      if (trDraft) trDraft.textContent = '';
     };
 
     // --- height auto-fit: every 500ms measure how tall #box (subtitle +
@@ -266,26 +310,97 @@ function makeInitJs() {
     }
     setInterval(fitHeight, 500);
 
-    // API translation is slow (1-5s), so the translation MUST NOT be cleared
-    // when a new final arrives -- otherwise it flickers out before the new
-    // line's translation shows up. Instead the translation line keeps the
-    // latest completed translation and only gets REPLACED when the next
-    // translation event arrives. seq is intentionally ignored here: dropping
-    // a slow translation because a newer final appeared was the "translation
-    // disappears" bug. The displayed translation lags the subtitle by design
-    // for API mode; local MT is fast enough that lag is invisible.
+    // ACCUMULATING flows: a 'final' APPENDS a new confirmed segment to the
+    // source flow (after all older finals -- several can share the screen,
+    // each with its own 5s lifetime), and a 'translation' fills that
+    // segment's translation row (matched by seq). The in-progress draft
+    // rides inline at the end of both flows and is cleared on final, exactly
+    // like the original #partial-line next to #final-line.
     var es = new EventSource('/events');
     es.onmessage = function(e){
       var ev;
       try { ev = JSON.parse(e.data); } catch (err) { return; }
+
+      if (ev.type === 'partial') {
+        // current in-progress source text rides inline at the end of the
+        // source flow (same-line look, mirroring #partial-line).
+        if (txtPart) txtPart.textContent = ev.text;
+        return;
+      }
+      if (ev.type === 'partial_translation') {
+        // current in-progress draft translation rides inline at the end of
+        // the translation flow; never cached in __hmyTr (that map only
+        // holds confirmed translations).
+        if (window.__hmyLang === ev.lang && trDraft) {
+          trDraft.textContent = ev.text;
+        }
+        return;
+      }
       if (ev.type === 'translation') {
         window.__hmyTr[ev.lang] = ev.text;   // latest per-language translation
-        if (window.__hmyLang === ev.lang) {  // render the active language
-          var el = document.getElementById('hmy-tr');
-          if (el) el.textContent = ev.text;  // replace, never clear
+        // Attach to the segment by seq if the language is active and the
+        // segment is still on screen; otherwise it just stays cached (the
+        // language switch handler re-renders the newest segment from cache).
+        if (window.__hmyLang === ev.lang) {
+          var ty = segs[ev.seq];
+          if (ty && ty.trEl) ty.trEl.textContent = ev.text;
         }
+        return;
+      }
+      if (ev.type === 'final') {
+        // promote the current draft to a confirmed segment: append to the
+        // source flow after older finals, start its 5s lifetime, and give
+        // it an empty translation row the late 'translation' will fill.
+        var seq = (ev.seq !== undefined && ev.seq !== null) ? ev.seq : (++lastSeq);
+        if (seq > lastSeq) lastSeq = seq;
+        var srcEl = document.createElement('span');
+        srcEl.className = 'hmy-txt-seg';
+        srcEl.textContent = ev.text;
+        srcEl.textContent += ' ';    // visual gap between accumulated segments
+        // keep the draft span AFTER this new segment: move it to the end
+        if (txtPart && txtPart.parentNode === txtFlow) {
+          txtFlow.removeChild(txtPart);
+        }
+        txtFlow.appendChild(srcEl);
+        if (txtPart) { txtFlow.appendChild(txtPart); txtPart.textContent = ''; }
+
+        var trEl = document.createElement('span');
+        trEl.className = 'hmy-tr-seg';
+        if (trDraft && trDraft.parentNode === trFlow) {
+          trFlow.removeChild(trDraft);
+        }
+        trFlow.appendChild(trEl);
+        if (trDraft) { trFlow.appendChild(trDraft); }
+        // draft translation cleared on final (same as the original partial
+        // line is cleared on final).
+        if (trDraft) trDraft.textContent = '';
+
+        var segObj = { srcEl: srcEl, trEl: trEl, timer: null };
+        segs[seq] = segObj;
+        // each confirmed segment has its own 5s lifetime, then fades out and
+        // is removed -- several finals can share the screen in the meantime.
+        segObj.timer = setTimeout(function(){
+          (function(s, o){
+            if (s && s.parentNode) s.classList.add('hmy-fade');
+            if (o && o.parentNode) o.classList.add('hmy-fade');
+            setTimeout(function(){
+              if (s && s.parentNode) s.parentNode.removeChild(s);
+              if (o && o.parentNode) o.parentNode.removeChild(o);
+              delete segs[s2seq(s)];
+            }, 260);
+          })(srcEl, trEl);
+        }, 5000);
+        // keep a reverse pointer for cleanup (simplest: read data-seq)
+        srcEl.setAttribute('data-seq', String(seq));
+        return;
       }
     };
+    // helper: map a source element back to its seq via data-seq
+    function s2seq(el) {
+      if (!el) return null;
+      var d = el.getAttribute && el.getAttribute('data-seq');
+      return d !== null && d !== undefined && d !== '' ? String(d) : null;
+    }
     console.log('hmy: init ok');
   } catch (err) {
     console.log('hmy: init FAILED ' + ((err && err.message) || err));
@@ -393,13 +508,13 @@ function applyFontSize(px) {
   // rule. CSS is cascade-layered: a later-inserted rule with the same
   // specificity and !important wins over the earlier one, so re-inserting is
   // both simpler and always applies the newest size (no async race).
-  const css = `#box{font-size:${px}px!important;} #final-line,#partial-line{font-size:${px}px!important;} #hmy-tr{font-size:${px}px!important;}`;
+  const css = `#box{font-size:${px}px!important;} #hmy-txt-flow,#hmy-tr-flow{font-size:${px}px!important;}`;
   win.webContents.insertCSS(css).catch(() => {});
 }
 
 function applyFont(family) {
   opts.font = family;
-  const css = family ? `#box{font-family:${family}!important;} #final-line,#partial-line,#hmy-tr{font-family:${family}!important;}` : "";
+  const css = family ? `#box{font-family:${family}!important;} #hmy-txt-flow,#hmy-tr-flow{font-family:${family}!important;}` : "";
   win.webContents.insertCSS(css).catch(() => {});
 }
 
@@ -468,6 +583,13 @@ app.whenReady().then(() => {
   apiAvailable = detectApiConfig();
   if (apiAvailable) { diag("api config present: API channel enabled"); }
   else { diag("no usable openai_translate.json: API channel disabled"); }
+  // Default the CHANNEL to whatever the launcher does: the .bat starts the
+  // server with --translate api:zh when a config exists, so the API channel
+  // must be active in the UI from the start too -- otherwise the button says
+  // 本地 while the server actually translates via the API (which accepts ANY
+  // source language), which is exactly the "本地 mode translated non-Japanese"
+  // confusion. Without a config, apiAvailable=false -> apiMode=false -> local.
+  apiMode = apiAvailable;
 
   const { workArea } = screen.getPrimaryDisplay();
   const winW = Math.min(opts.width, workArea.width);
@@ -541,6 +663,14 @@ app.whenReady().then(() => {
     try { applyPassthrough(passthrough); } catch (e) { diag("applyPassthrough err " + e.message); }
     try { setPageButtons(); } catch (e) { diag("setPageButtons err " + e.message); }
     diag("bootstrap done");
+    // Push our channel+language to the server ONCE at startup so the UI and
+    // the server agree from the very beginning. The .bat may have started the
+    // server with api:zh while this window loaded with local -- without this
+    // sync the server kept API-translating ANY language while the button said
+    // 本地 (the "local mode translated non-Japanese" report). After this the
+    // server follows exactly what the button shows: local -> ja only, API ->
+    // any source.
+    notifyServerTranslation(translateSpec(lang));
   });
 
   win.loadURL(buildUrl(opts.url, opts.show));
