@@ -162,7 +162,7 @@ function makeCss() {
        confirmed finals flow left-to-right / wrap on lines (top-anchored),
        and the in-progress partial draft rides INLINE at the end of the same
        text line -- exactly the current #final-line + #partial-line "same
-       line" look. Each confirmed final segment keeps its own 5s lifetime and
+       line" look. Each confirmed final segment keeps its own 8s lifetime and
        is removed when it expires. The same happens for translations below.
        The server's native overlay script still writes #final-line /
        #partial-line -- hide them; we render our own flow. */
@@ -185,8 +185,7 @@ function makeCss() {
          line-height:1.25;}
     .hmy-tr-seg{display:inline;}
     .hmy-tr-draft{display:inline;font-style:italic;}
-    /* fade-out before removal */
-    .hmy-fade{opacity:0!important;transition:opacity .25s ease;}
+    /* (fade-out removed: segments disappear immediately at lifetime end) */
     #box{font-size:${opts.size}px!important;}
     ${fontCss}
     /* OS-native drag while interactive */
@@ -264,9 +263,9 @@ function makeInitJs() {
     //                   as the original #final-line + #partial-line pair), so
     //                   a new final APPENDS after older finals and several can
     //                   share the screen. Each confirmed segment keeps its own
-    //                   5s lifetime, then fades out.
+    //                   8s lifetime, then fades out.
     //   #hmy-tr-flow    translations: one segment per confirmed source with
-    //                   the same 5s lifetime + an in-progress draft at the end.
+    //                   the same 8s lifetime + an in-progress draft at the end.
     // 'segs' maps seq -> {srcEl, trEl, timer} so a late 'translation' (API is
     // slow) can still attach to its segment.
     var box = document.getElementById('box');
@@ -312,7 +311,7 @@ function makeInitJs() {
 
     // ACCUMULATING flows: a 'final' APPENDS a new confirmed segment to the
     // source flow (after all older finals -- several can share the screen,
-    // each with its own 5s lifetime), and a 'translation' fills that
+    // each with its own 8s lifetime), and a 'translation' fills that
     // segment's translation row (matched by seq). The in-progress draft
     // rides inline at the end of both flows and is cleared on final, exactly
     // like the original #partial-line next to #final-line.
@@ -349,7 +348,7 @@ function makeInitJs() {
       }
       if (ev.type === 'final') {
         // promote the current draft to a confirmed segment: append to the
-        // source flow after older finals, start its 5s lifetime, and give
+        // source flow after older finals, start its 8s lifetime, and give
         // it an empty translation row the late 'translation' will fill.
         var seq = (ev.seq !== undefined && ev.seq !== null) ? ev.seq : (++lastSeq);
         if (seq > lastSeq) lastSeq = seq;
@@ -377,19 +376,16 @@ function makeInitJs() {
 
         var segObj = { srcEl: srcEl, trEl: trEl, timer: null };
         segs[seq] = segObj;
-        // each confirmed segment has its own 5s lifetime, then fades out and
+        // each confirmed segment has its own 8s lifetime, then fades out and
         // is removed -- several finals can share the screen in the meantime.
         segObj.timer = setTimeout(function(){
-          (function(s, o){
-            if (s && s.parentNode) s.classList.add('hmy-fade');
-            if (o && o.parentNode) o.classList.add('hmy-fade');
-            setTimeout(function(){
-              if (s && s.parentNode) s.parentNode.removeChild(s);
-              if (o && o.parentNode) o.parentNode.removeChild(o);
-              delete segs[s2seq(s)];
-            }, 260);
-          })(srcEl, trEl);
-        }, 5000);
+          // no fade-out: remove immediately after the 8s lifetime (a fade
+          // felt laggy -- the text visibly sat there transitioning).
+          if (srcEl && srcEl.parentNode) srcEl.parentNode.removeChild(srcEl);
+          if (trEl && trEl.parentNode) trEl.parentNode.removeChild(trEl);
+          var ds = srcEl.getAttribute && srcEl.getAttribute('data-seq');
+          if (ds !== null && ds !== undefined && ds !== '') delete segs[String(ds)];
+        }, 8000);
         // keep a reverse pointer for cleanup (simplest: read data-seq)
         srcEl.setAttribute('data-seq', String(seq));
         return;

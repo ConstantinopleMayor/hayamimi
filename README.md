@@ -125,8 +125,11 @@ server).
 
 - Shows the live subtitles on your desktop (transparent background,
   frameless, always on top, has a taskbar icon).
-- `final` (confirmed) line and `partial` (in-progress) draft share ONE line,
-  wrapping together; the translation sits on its OWN line below.
+- **Accumulating subtitle flow**: confirmed finals ACK accumulate on the
+  screen (several share the same line set, wrapping together), and each
+  confirmed segment — source plus its translation — keeps its own **8s
+  lifetime** before it is removed instantly (no fade). The in-progress
+  `partial` draft rides inline at the end of the flow while you speak.
 - Subtitle text flows top→bottom and the window **auto-fits its height**
   to the content (width is fixed — text wraps instead).
 - Buttons pinned at the top-left corner:
