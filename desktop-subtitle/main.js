@@ -81,8 +81,29 @@ const MODE_LABEL = { both: "双语", tr: "译文" };
 // behind the source+translation block changes. 5-step granularity powers
 // both the settings-menu radios and the top-center slider.
 const BG_CHOICES = Array.from({ length: 13 }, (_, i) => i * 5); // 0..60 step 5
-// Top-center backdrop slider: 140px wide, centered on the window's top strip.
-const SLIDER_W = 140;
+// Backdrop slider + width slider, side by side, anchored to the LEFT edge of
+// the top strip (NOT centered): centering made the sliders drift when the
+// window width changed mid-drag (the thumb slid under the cursor -> jitter).
+// Fixed left anchor keeps their screen position stable while dragging.
+const SLIDER_X0 = 176;              // first slider's left (after the 5-button band)
+const SLIDER_W = 120;               // single slider width
+const SLIDER_GAP = 20;              // gap between the two sliders
+// Window-width slider range (px). Native edge-drag resize is unavailable on
+// this transparent/frameless window (no resize handles), so the width slider
+// drives setBounds() instead. 500 keeps a readable minimum; 1200 covers
+// wide monitors (the creation default stays 900).
+const WIN_W_MIN = 500;
+const WIN_W_MAX = 1200;
+// Defensive window-height floor (auto-fit may report any value, but the
+// window must never collapse below the top strip). In normal rendering the
+// reported height is always >= 48px (the card keeps a one-line min-height,
+// and even the transparent empty state reports offsetTop 44 + 4 margin), so
+// this floor never actually clips content -- it only guards extreme failures.
+const MIN_WIN_H = BTN_Y0 + BTN_S + BAND_PAD + 8; // 48px
+// (setShape was tried to clip mouse events below the card, but with
+// resizable:true the window truly fits the content, so the area below the
+// card is OUTSIDE the window -- no clipping needed; setShape only killed
+// the native resize border, so it was removed entirely.)
 
 // API/本地 translation channel toggle button sits to the RIGHT of the
 // language button; the display-mode button sits next to it. The pass-through
@@ -183,8 +204,11 @@ function pointInRightBand(b, x, y) {
   return pointInRect(x, y, x0, b.y, x1, y2);
 }
 function pointInTopCenterBand(b, x, y) {
-  const x0 = b.x + (b.width - SLIDER_W) / 2 - BAND_PAD;
-  const x1 = x0 + SLIDER_W + BAND_PAD * 2;
+  // two side-by-side sliders (bg + width) anchored at the LEFT of the top
+  // strip: fixed x span (does not depend on the window width, so the
+  // keep-clickable zone matches the sliders exactly, even mid-drag)
+  const x0 = b.x + SLIDER_X0 - BAND_PAD;
+  const x1 = b.x + SLIDER_X0 + SLIDER_W * 2 + SLIDER_GAP + BAND_PAD;
   const y2 = b.y + BTN_Y0 + BTN_S + BAND_PAD;
   return pointInRect(x, y, x0, b.y, x1, y2);
 }
@@ -250,10 +274,19 @@ function makeCss() {
     /* (fade-out removed: segments disappear immediately at lifetime end) */
     #box{font-size:${opts.size}px!important;}
     ${fontCss}
-    /* OS-native drag while interactive */
+    /* OS-native drag while interactive: only the card and the top strip are
+       draggable. body itself is no-drag, so the window's bottom margin (any
+       area below the card) never drags. The card region drags; a fixed
+       ::before strip covers the button row (which sits above the card when
+       bg=0) and stays draggable there. Buttons/slider keep their own
+       no-drag + top z-index, so they stay clickable inside both regions. */
     html.hmy-drag-mode body{position:fixed;top:0;right:0;bottom:0;left:0;
-                            -webkit-app-region:drag;}
-    html.hmy-drag-mode,html.hmy-drag-mode body{cursor:move;}
+                            -webkit-app-region:no-drag;}
+    html.hmy-drag-mode body::before{content:"";position:fixed;top:0;left:0;
+                            right:0;height:42px;-webkit-app-region:drag;}
+    html.hmy-drag-mode #box{-webkit-app-region:drag;}
+    /* (no cursor:move anywhere: the drag regions stay visually quiet -- the
+       default arrow shows everywhere, and buttons keep their pointer) */
     /* buttons: no-drag => clickable even inside the drag region.
        Modern look: rounded, dark translucent, subtle hover lift. */
     .hmy-btn{position:fixed;top:${BTN_Y0}px;width:${BTN_S}px;height:${BTN_S}px;
@@ -282,23 +315,28 @@ function makeCss() {
     .hmy-btn:active{transform:translateY(1px);}
     #hmy-lock-btn.on{background:rgba(90,100,120,0.75);}
     .hmy-btn *{pointer-events:none;}
-    /* top-center backdrop-opacity slider: thin track, round thumb, centered
-       on the window's top strip between the left band and right controls */
+    /* top-center sliders (backdrop opacity + window width): thin track,
+       round thumb, centered side by side on the window's top strip */
     #hmy-bg-slider{position:fixed;top:${BTN_Y0 + (BTN_S - 10) / 2}px;
-         left:50%;width:${SLIDER_W}px;margin-left:${-SLIDER_W / 2}px;
+         left:${SLIDER_X0}px;width:${SLIDER_W}px;
          height:10px;-webkit-appearance:none;appearance:none;background:transparent;
          cursor:pointer!important;user-select:none;-webkit-app-region:no-drag;
          z-index:2147483647;outline:none;}
-    #hmy-bg-slider::-webkit-slider-runnable-track{height:4px;border-radius:2px;
+    #hmy-w-slider{position:fixed;top:${BTN_Y0 + (BTN_S - 10) / 2}px;
+         left:${SLIDER_X0 + SLIDER_W + SLIDER_GAP}px;width:${SLIDER_W}px;
+         height:10px;-webkit-appearance:none;appearance:none;background:transparent;
+         cursor:pointer!important;user-select:none;-webkit-app-region:no-drag;
+         z-index:2147483647;outline:none;}
+    #hmy-bg-slider::-webkit-slider-runnable-track,#hmy-w-slider::-webkit-slider-runnable-track{height:4px;border-radius:2px;
          background:rgba(255,255,255,0.15);transition:background .15s ease;}
-    #hmy-bg-slider::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    #hmy-bg-slider::-webkit-slider-thumb,#hmy-w-slider::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
          border-radius:50%;background:rgba(255,255,255,0.55);margin-top:-3px;
          border:1px solid rgba(255,255,255,0.30);
          box-shadow:0 1px 3px rgba(0,0,0,0.4);
          transition:transform .08s ease,box-shadow .15s ease;}
-    #hmy-bg-slider:hover::-webkit-slider-runnable-track{background:rgba(255,255,255,0.28);}
-    #hmy-bg-slider:hover::-webkit-slider-thumb{background:rgba(255,255,255,0.85);}
-    #hmy-bg-slider:active::-webkit-slider-thumb{transform:scale(1.15);}
+    #hmy-bg-slider:hover::-webkit-slider-runnable-track,#hmy-w-slider:hover::-webkit-slider-runnable-track{background:rgba(255,255,255,0.28);}
+    #hmy-bg-slider:hover::-webkit-slider-thumb,#hmy-w-slider:hover::-webkit-slider-thumb{background:rgba(255,255,255,0.85);}
+    #hmy-bg-slider:active::-webkit-slider-thumb,#hmy-w-slider:active::-webkit-slider-thumb{transform:scale(1.15);}
     /* API channel unavailable (no openai_translate.json): grey, inert */
     .hmy-btn.off{opacity:0.45;background:rgba(60,60,60,0.5);
                  border-color:rgba(255,255,255,0.15);cursor:default!important;}
@@ -370,6 +408,18 @@ function makeInitJs() {
       console.log('hmy: bg-slider-input ' + bgSlider.value);
       window.desktopSubtitle.setBgAlpha(parseInt(bgSlider.value, 10));
     });
+    var wSlider = document.createElement('input');
+    wSlider.type = 'range';
+    wSlider.id = 'hmy-w-slider';
+    wSlider.min = '500';
+    wSlider.max = '1200';
+    wSlider.step = '10';
+    wSlider.value = '900'; // equals the window's creation width
+    wSlider.title = '窗口宽度调节 (500-1200px)';
+    wSlider.addEventListener('input', function(){
+      console.log('hmy: w-slider-input ' + wSlider.value);
+      window.desktopSubtitle.setWidth(parseInt(wSlider.value, 10));
+    });
     document.body.appendChild(lock);
     document.body.appendChild(menuBtn);
     document.body.appendChild(langBtn);
@@ -378,6 +428,7 @@ function makeInitJs() {
     document.body.appendChild(minBtn);
     document.body.appendChild(closeBtn);
     document.body.appendChild(bgSlider);
+    document.body.appendChild(wSlider);
     console.log('hmy: buttons injected');
 
     // ACCUMULATING subtitle flows (desktop window owns ALL rendering):
@@ -427,7 +478,11 @@ function makeInitJs() {
     function fitHeight() {
       var box = document.getElementById('box');
       if (!box) return;
-      var h = box.offsetTop + box.offsetHeight + 16; // rows + bottom margin
+      // bottom margin 4px (was 16px): a larger transparent strip below the
+      // card swallowed scroll-wheel events while the window was interactive
+      // and made the window look taller than the card. 4px keeps a tiny
+      // breathing room without an observable dead zone.
+      var h = box.offsetTop + box.offsetHeight + 4; // rows + tiny bottom margin
       window.desktopSubtitle.resize(0, h);
     }
     setInterval(fitHeight, 500);
@@ -679,6 +734,20 @@ function applyBg(alphaPct) {
     .catch(() => {});
 }
 
+// Window width follows the width slider (native edge-drag resize is
+// unavailable on this transparent/frameless window -- no resize handles).
+// setBounds works reliably (probed). The window KEEPS its x at all times
+// (left edge fixed, right edge stretches) so the left-anchored sliders
+// never move under the cursor -- no jitter. The window stays where the
+// user puts it; only the height keeps auto-fitting the card content.
+function applyWidth(px) {
+  const v = Math.max(WIN_W_MIN, Math.min(WIN_W_MAX, Math.round(px)));
+  if (!win || win.isDestroyed()) return;
+  const b = win.getBounds();
+  win.setBounds({ x: b.x, y: b.y, width: v, height: b.height });
+  diag("IPC: width " + v);
+}
+
 // Bold subtitle text (both flows): a layer-injected rule with !important
 // wins over defaults; switching off re-inserts the normal weight. Font
 // weight does not change line height, so fitHeight is unaffected.
@@ -821,6 +890,7 @@ app.whenReady().then(() => {
   ipcMain.on("hmy:minimize", () => { diag("IPC: minimize"); if (win && !win.isDestroyed()) win.minimize(); });
   ipcMain.on("hmy:close", () => { diag("IPC: close"); app.quit(); });
   ipcMain.on("hmy:set-bg", (_e, v) => { diag("IPC: set-bg " + v); applyBg(parseInt(v, 10)); });
+  ipcMain.on("hmy:set-width", (_e, v) => { applyWidth(parseInt(v, 10)); });
   // Height-only auto-fit: the window WIDTH stays fixed (text wraps instead),
   // the HEIGHT follows the subtitle+translation content. The renderer polls
   // every 500ms, and we debounce with a threshold so this is strictly one-way
@@ -829,11 +899,19 @@ app.whenReady().then(() => {
   let lastAutoH = 0;
   ipcMain.on("hmy:resize", (_e, w, h) => {
     if (!win || win.isDestroyed()) return;
-    h = Math.max(opts.height, Math.min(Math.round(h), workArea.height));
+    // The floor is MIN_WIN_H (not opts.height=130): keeping the initial
+    // height as a floor left the window ~30-70px taller than the card (the
+    // empty/one-line states), i.e. a large draggable dead zone below the
+    // backdrop. With the true floor the window hugs the card content.
+    h = Math.max(MIN_WIN_H, Math.min(Math.round(h), workArea.height));
     if (Math.abs(h - lastAutoH) < 4) return; // debounce: ignore tiny jitters
     lastAutoH = h;
-    const [curW] = win.getSize();
-    win.setSize(curW, h); // width unchanged
+    // setSize is unreliable on this transparent/frameless window (probe:
+    // setBounds works, setSize's result was ambiguous). Use setBounds with
+    // the CURRENT x/y/width so a user-dragged width is preserved; only the
+    // height follows the content.
+    const b = win.getBounds();
+    win.setBounds({ x: b.x, y: b.y, width: b.width, height: h });
     diag("IPC: resize h=" + h);
   });
 
@@ -846,7 +924,11 @@ app.whenReady().then(() => {
     transparent: true,
     alwaysOnTop: true,
     skipTaskbar: false,
-    resizable: false,
+    resizable: true, // user can drag the edge/corner to change WIDTH (text
+    // re-wraps); the HEIGHT keeps auto-fitting the card content (fitHeight
+    // re-asserts it every 500ms). Also unblocks programmatic setSize, which
+    // resizable:false silently rejected on Windows (window stayed at its
+    // initial height no matter what fitHeight reported).
     hasShadow: false,
     focusable: true,
     webPreferences: {

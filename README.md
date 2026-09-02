@@ -131,7 +131,8 @@ server).
   lifetime** before it is removed instantly (no fade). The in-progress
   `partial` draft rides inline at the end of the flow while you speak.
 - Subtitle text flows top→bottom and the window **auto-fits its height**
-  to the content (width is fixed — text wraps instead).
+  to the content (a tiny 4px bottom margin; the window really hugs the
+  card — no dead scroll-swallowing strip below it).
 - **Display mode toggle**: a button switches between **双语** (bilingual /
   built-in: source + translation stacked in two rows, default) and **仅译文**
   (translation only — the source flow is hidden); also in the settings menu.
@@ -141,7 +142,13 @@ server).
   empty card keeps exactly one-line height, so the card never shrinks above
   the text. Opacity is set with the **top-center slider** (0–60%, 5-step
   granularity; also 13 levels in the settings menu). Optional `--bg 30`
-  (and `--mode tr`, `--bold`) command-line args set the default.
+  (and `--mode tr`, `--bold`) command-line args set the default. The two
+  sliders (backdrop opacity + window width) sit side by side on the top
+  strip, **left-anchored** so they never drift while dragging.
+- **Window width**: a slider on the top strip adjusts the window width
+  500–1200px (step 10); the text re-wraps and the height keeps
+  auto-fitting. (This transparent/frameless window has no native resize
+  handles, so the slider drives it.)
 - **Bold text**: `字幕粗体` checkbox in the settings menu (or `--bold`)
   switches both flows to bold.
 - Buttons pinned at the top-left corner:
@@ -152,10 +159,14 @@ server).
   - **双语 / 译文** — toggle bilingual vs translation-only display.
 - Window controls pinned at the **top-right corner**: **─** minimizes the
   window, **✕** quits the app.
-- In click-through mode the top-left button band AND the top-right window
-  controls stay clickable (everything else passes through).
-- Dragging is OS-native (`-webkit-app-region`), so the window moves without
-  resizing or drifting its content.
+- In click-through mode the top-left button band, the slider band, and the
+  top-right window controls stay clickable (everything else passes
+  through).
+- Dragging is OS-native (`-webkit-app-region`): only the card and the top
+  strip drag the window (nothing below the card); no crosshair cursor is
+  shown. Because the window hugs the card, the area below it lies OUTSIDE
+  the window — the scroll wheel and clicks there fall through to the app
+  behind naturally.
 
 **Setup & run**
 
