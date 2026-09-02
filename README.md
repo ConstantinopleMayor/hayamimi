@@ -135,14 +135,19 @@ server).
 - **Display mode toggle**: a button switches between **双语** (bilingual /
   built-in: source + translation stacked in two rows, default) and **仅译文**
   (translation only — the source flow is hidden); also in the settings menu.
-- **Adjustable backdrop**: the settings menu lets you set the subtitle-card
-  background opacity (0% = fully transparent, 15% / 30% / 45% / 60% = a
-  rounded black card behind the text; the text itself always stays opaque).
-  Optional `--bg 30` (and `--mode tr`) command-line args set the default.
+- **Adjustable backdrop**: a rounded black card behind the text (the text
+  itself always stays opaque). It spans the WHOLE top strip — the button
+  row sits on top of the card, text starts 8px below the buttons — and an
+  empty card keeps exactly one-line height, so the card never shrinks above
+  the text. Opacity is set with the **top-center slider** (0–60%, 5-step
+  granularity; also 13 levels in the settings menu). Optional `--bg 30`
+  (and `--mode tr`, `--bold`) command-line args set the default.
+- **Bold text**: `字幕粗体` checkbox in the settings menu (or `--bold`)
+  switches both flows to bold.
 - Buttons pinned at the top-left corner:
   - **🔒 / 🔓** — toggle interactive drag vs click-through mode.
-  - **⚙** — settings menu (font size, font family, translation language,
-    display mode, backdrop opacity, click-through, quit).
+  - **⚙** — settings menu (font size, font family, bold text, translation
+    language, display mode, backdrop opacity, click-through, quit).
   - **EN / ZH / KO / OFF** — cycle the displayed translation language.
   - **双语 / 译文** — toggle bilingual vs translation-only display.
 - Window controls pinned at the **top-right corner**: **─** minimizes the
