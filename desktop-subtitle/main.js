@@ -78,8 +78,11 @@ const MODE_LABEL = { both: "双语", tr: "译文" };
 
 // Subtitle-card background opacity levels (percent; 0 = fully transparent,
 // 30 = a soft black card). Text itself is ALWAYS opaque; only the backdrop
-// behind the source+translation block changes.
-const BG_CHOICES = [0, 15, 30, 45, 60];
+// behind the source+translation block changes. 5-step granularity powers
+// both the settings-menu radios and the top-center slider.
+const BG_CHOICES = Array.from({ length: 13 }, (_, i) => i * 5); // 0..60 step 5
+// Top-center backdrop slider: 140px wide, centered on the window's top strip.
+const SLIDER_W = 140;
 
 // API/本地 translation channel toggle button sits to the RIGHT of the
 // language button; the display-mode button sits next to it. The pass-through
@@ -115,6 +118,7 @@ function parseArgs() {
     show: "both",
     mode: "both", // "both" = bilingual rows, "tr" = translation only
     passthrough: false,
+    bold: false, // bold subtitle text
     bg: 0, // subtitle-card backdrop opacity in percent (0 = fully transparent)
     size: DEFAULT_SIZE,
     font: "",
@@ -130,7 +134,8 @@ function parseArgs() {
     else if (a === "--mode") {
       const v = args[++i] || "both";
       opts.mode = MODES.includes(v) ? v : "both";
-    } else if (a === "--bg") {
+    } else if (a === "--bold") opts.bold = true;
+    else if (a === "--bg") {
       const v = parseInt(args[++i], 10);
       opts.bg = BG_CHOICES.includes(v) ? v : 0;
     } else if (a === "--show") {
@@ -154,6 +159,7 @@ let passthrough = false;
 let lang = "zh"; // default matches the .bat (--translate zh)
 let mode = "both";  // "both" = bilingual rows, "tr" = translation only
 let bg = 0;         // subtitle-card backdrop opacity in percent
+let bold = false;   // bold subtitle text (source + translation flows)
 let sizeKey = null;
 let fontKey = null;
 let pollTimer = null;
@@ -176,11 +182,18 @@ function pointInRightBand(b, x, y) {
   const y2 = b.y + BTN_Y0 + BTN_S + BAND_PAD;
   return pointInRect(x, y, x0, b.y, x1, y2);
 }
+function pointInTopCenterBand(b, x, y) {
+  const x0 = b.x + (b.width - SLIDER_W) / 2 - BAND_PAD;
+  const x1 = x0 + SLIDER_W + BAND_PAD * 2;
+  const y2 = b.y + BTN_Y0 + BTN_S + BAND_PAD;
+  return pointInRect(x, y, x0, b.y, x1, y2);
+}
 function isCursorInButtonBand() {
   if (!win || win.isDestroyed()) return false;
   const c = screen.getCursorScreenPoint();
   if (pointInLeftBand(win.getBounds(), c.x, c.y)) return true;
   if (pointInRightBand(win.getBounds(), c.x, c.y)) return true;
+  if (pointInTopCenterBand(win.getBounds(), c.x, c.y)) return true;
   return false;
 }
 
@@ -269,6 +282,23 @@ function makeCss() {
     .hmy-btn:active{transform:translateY(1px);}
     #hmy-lock-btn.on{background:rgba(90,100,120,0.75);}
     .hmy-btn *{pointer-events:none;}
+    /* top-center backdrop-opacity slider: thin track, round thumb, centered
+       on the window's top strip between the left band and right controls */
+    #hmy-bg-slider{position:fixed;top:${BTN_Y0 + (BTN_S - 10) / 2}px;
+         left:50%;width:${SLIDER_W}px;margin-left:${-SLIDER_W / 2}px;
+         height:10px;-webkit-appearance:none;appearance:none;background:transparent;
+         cursor:pointer!important;user-select:none;-webkit-app-region:no-drag;
+         z-index:2147483647;outline:none;}
+    #hmy-bg-slider::-webkit-slider-runnable-track{height:4px;border-radius:2px;
+         background:rgba(255,255,255,0.15);transition:background .15s ease;}
+    #hmy-bg-slider::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+         border-radius:50%;background:rgba(255,255,255,0.55);margin-top:-3px;
+         border:1px solid rgba(255,255,255,0.30);
+         box-shadow:0 1px 3px rgba(0,0,0,0.4);
+         transition:transform .08s ease,box-shadow .15s ease;}
+    #hmy-bg-slider:hover::-webkit-slider-runnable-track{background:rgba(255,255,255,0.28);}
+    #hmy-bg-slider:hover::-webkit-slider-thumb{background:rgba(255,255,255,0.85);}
+    #hmy-bg-slider:active::-webkit-slider-thumb{transform:scale(1.15);}
     /* API channel unavailable (no openai_translate.json): grey, inert */
     .hmy-btn.off{opacity:0.45;background:rgba(60,60,60,0.5);
                  border-color:rgba(255,255,255,0.15);cursor:default!important;}
@@ -328,6 +358,18 @@ function makeInitJs() {
       console.log('hmy: btn-close-click');
       window.desktopSubtitle.close();
     });
+    var bgSlider = document.createElement('input');
+    bgSlider.type = 'range';
+    bgSlider.id = 'hmy-bg-slider';
+    bgSlider.min = '0';
+    bgSlider.max = '60';
+    bgSlider.step = '5';
+    bgSlider.value = '0'; // applyBg() syncs the real value right after init
+    bgSlider.title = '背景透明度调节 (0-60%)';
+    bgSlider.addEventListener('input', function(){
+      console.log('hmy: bg-slider-input ' + bgSlider.value);
+      window.desktopSubtitle.setBgAlpha(parseInt(bgSlider.value, 10));
+    });
     document.body.appendChild(lock);
     document.body.appendChild(menuBtn);
     document.body.appendChild(langBtn);
@@ -335,6 +377,7 @@ function makeInitJs() {
     document.body.appendChild(modeBtn);
     document.body.appendChild(minBtn);
     document.body.appendChild(closeBtn);
+    document.body.appendChild(bgSlider);
     console.log('hmy: buttons injected');
 
     // ACCUMULATING subtitle flows (desktop window owns ALL rendering):
@@ -423,6 +466,11 @@ function makeInitJs() {
         if (window.__hmyLang === ev.lang) {
           var ty = segs[ev.seq];
           if (ty && ty.trEl) ty.trEl.textContent = ev.text;
+          // THE confirmed translation replaces the in-progress draft: clear
+          // it now (it survives finals, but not the real translation -- a
+          // leftover draft next to the confirmed rows is the old "final 都
+          // 出来了 partial 还在" state).
+          if (trDraft) trDraft.textContent = '';
         }
         return;
       }
@@ -450,9 +498,10 @@ function makeInitJs() {
         }
         trFlow.appendChild(trEl);
         if (trDraft) { trFlow.appendChild(trDraft); }
-        // draft translation cleared on final (same as the original partial
-        // line is cleared on final).
-        if (trDraft) trDraft.textContent = '';
+        // NOTE: the draft translation is KEPT here -- it must survive until
+        // the confirmed 'translation' for this final arrives and replaces it
+        // (clearing it now would leave an empty translation row for the whole
+        // API/MT round-trip window). The 'translation' handler clears it.
 
         var segObj = { srcEl: srcEl, trEl: trEl, timer: null };
         segs[seq] = segObj;
@@ -602,11 +651,42 @@ function applyMode(m) {
 function applyBg(alphaPct) {
   if (!BG_CHOICES.includes(alphaPct)) return;
   bg = alphaPct;
+  const a = (bg / 100).toFixed(2);
+  // The card spans the WHOLE top strip: it starts at the button row (top:2px,
+  // buttons stay above it thanks to their fixed positioning + z-index) and
+  // its padding-top keeps the text top just 8px below the buttons (2 + 40 =
+  // 42; buttons end at 34). The flows get a one-line min-height (em units
+  // follow the font size) so an EMPTY card keeps exactly the size of a
+  // one-line card -- the bottom edge no longer shrinks above the text line.
   const css = bg > 0
-    ? `#box{background:rgba(0,0,0,${(bg / 100).toFixed(2)})!important;
-         border-radius:14px!important;padding:8px 14px!important;}`
-    : `#box{background:transparent!important;border-radius:0!important;
-         padding:0!important;}`;
+    ? `#box{top:2px!important;padding:40px 14px 8px!important;
+         background:rgba(0,0,0,${a})!important;border-radius:14px!important;}
+       #hmy-txt-flow{min-height:1.35em!important;}
+       #hmy-tr-flow{min-height:1.25em!important;}`
+    : `#box{top:44px!important;padding:0!important;
+         background:transparent!important;border-radius:0!important;}
+       #hmy-txt-flow{min-height:0!important;}
+       #hmy-tr-flow{min-height:0!important;}`;
+  win.webContents.insertCSS(css).catch(() => {});
+  // keep the top-center slider in sync (any path that changes bg -- menu,
+  // slider, startup -- converges on the same value)
+  win.webContents
+    .executeJavaScript(
+      `(function(){var s=document.getElementById('hmy-bg-slider');
+        if(s){s.value=${bg};} else { window.__hmyBg=${bg}; }
+      })();`
+    )
+    .catch(() => {});
+}
+
+// Bold subtitle text (both flows): a layer-injected rule with !important
+// wins over defaults; switching off re-inserts the normal weight. Font
+// weight does not change line height, so fitHeight is unaffected.
+function applyBold(on) {
+  bold = !!on;
+  const css = bold
+    ? `#hmy-txt-flow,#hmy-tr-flow{font-weight:700!important;}`
+    : `#hmy-txt-flow,#hmy-tr-flow{font-weight:400!important;}`;
   win.webContents.insertCSS(css).catch(() => {});
 }
 
@@ -643,6 +723,12 @@ function showMenu() {
         label: f.label, type: "radio", checked: opts.font === f.family,
         click: () => applyFont(f.family),
       })),
+    },
+    {
+      label: "字幕粗体",
+      type: "checkbox",
+      checked: bold,
+      click: (i) => applyBold(i.checked),
     },
     {
       label: "翻译语言",
@@ -719,6 +805,7 @@ app.whenReady().then(() => {
   apiMode = apiAvailable;
   mode = MODES.includes(opts.mode) ? opts.mode : "both"; // (--mode arg if ever given)
   bg = BG_CHOICES.includes(opts.bg) ? opts.bg : 0;
+  bold = !!opts.bold;
 
   const { workArea } = screen.getPrimaryDisplay();
   const winW = Math.min(opts.width, workArea.width);
@@ -733,6 +820,7 @@ app.whenReady().then(() => {
   ipcMain.on("hmy:toggle-mode", () => { diag("IPC: toggle-mode"); applyMode(mode === "both" ? "tr" : "both"); });
   ipcMain.on("hmy:minimize", () => { diag("IPC: minimize"); if (win && !win.isDestroyed()) win.minimize(); });
   ipcMain.on("hmy:close", () => { diag("IPC: close"); app.quit(); });
+  ipcMain.on("hmy:set-bg", (_e, v) => { diag("IPC: set-bg " + v); applyBg(parseInt(v, 10)); });
   // Height-only auto-fit: the window WIDTH stays fixed (text wraps instead),
   // the HEIGHT follows the subtitle+translation content. The renderer polls
   // every 500ms, and we debounce with a threshold so this is strictly one-way
@@ -795,6 +883,7 @@ app.whenReady().then(() => {
     try { applyPassthrough(passthrough); } catch (e) { diag("applyPassthrough err " + e.message); }
     try { applyMode(mode); } catch (e) { diag("applyMode err " + e.message); }
     try { applyBg(bg); } catch (e) { diag("applyBg err " + e.message); }
+    try { applyBold(bold); } catch (e) { diag("applyBold err " + e.message); }
     try { setPageButtons(); } catch (e) { diag("setPageButtons err " + e.message); }
     diag("bootstrap done");
     // Push our channel+language to the server ONCE at startup so the UI and

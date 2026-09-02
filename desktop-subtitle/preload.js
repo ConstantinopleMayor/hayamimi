@@ -13,5 +13,6 @@ contextBridge.exposeInMainWorld("desktopSubtitle", {
   toggleMode: () => ipcRenderer.send("hmy:toggle-mode"),
   minimize: () => ipcRenderer.send("hmy:minimize"),
   close: () => ipcRenderer.send("hmy:close"),
+  setBgAlpha: (v) => ipcRenderer.send("hmy:set-bg", v),
   onModeChange: (cb) => ipcRenderer.on("hmy:mode", (_e, v) => cb(v)),
 });
