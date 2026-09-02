@@ -132,11 +132,23 @@ server).
   `partial` draft rides inline at the end of the flow while you speak.
 - Subtitle text flows top→bottom and the window **auto-fits its height**
   to the content (width is fixed — text wraps instead).
+- **Display mode toggle**: a button switches between **双语** (bilingual /
+  built-in: source + translation stacked in two rows, default) and **仅译文**
+  (translation only — the source flow is hidden); also in the settings menu.
+- **Adjustable backdrop**: the settings menu lets you set the subtitle-card
+  background opacity (0% = fully transparent, 15% / 30% / 45% / 60% = a
+  rounded black card behind the text; the text itself always stays opaque).
+  Optional `--bg 30` (and `--mode tr`) command-line args set the default.
 - Buttons pinned at the top-left corner:
   - **🔒 / 🔓** — toggle interactive drag vs click-through mode.
   - **⚙** — settings menu (font size, font family, translation language,
-    click-through, quit).
+    display mode, backdrop opacity, click-through, quit).
   - **EN / ZH / KO / OFF** — cycle the displayed translation language.
+  - **双语 / 译文** — toggle bilingual vs translation-only display.
+- Window controls pinned at the **top-right corner**: **─** minimizes the
+  window, **✕** quits the app.
+- In click-through mode the top-left button band AND the top-right window
+  controls stay clickable (everything else passes through).
 - Dragging is OS-native (`-webkit-app-region`), so the window moves without
   resizing or drifting its content.
 

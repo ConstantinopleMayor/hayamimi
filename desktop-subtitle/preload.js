@@ -10,5 +10,8 @@ contextBridge.exposeInMainWorld("desktopSubtitle", {
   showMenu: () => ipcRenderer.send("hmy:show-menu"),
   cycleLang: () => ipcRenderer.send("hmy:cycle-lang"),
   cycleApi: () => ipcRenderer.send("hmy:cycle-api"),
+  toggleMode: () => ipcRenderer.send("hmy:toggle-mode"),
+  minimize: () => ipcRenderer.send("hmy:minimize"),
+  close: () => ipcRenderer.send("hmy:close"),
   onModeChange: (cb) => ipcRenderer.on("hmy:mode", (_e, v) => cb(v)),
 });
