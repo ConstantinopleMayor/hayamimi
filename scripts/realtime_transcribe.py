@@ -291,14 +291,18 @@ def digits_consistent(src: str, out: str) -> bool:
     return all(run in out_runs for run in src_runs)
 
 
-def safe_translate(translator, text: str, src_lang: str = "ja") -> str:
+def safe_translate(translator, text: str, src_lang: str = "ja",
+                   record: bool = True) -> str:
     """Translate one line; fall back to the source when numbers got mangled.
 
     src_lang is the detected language of `text` -- the API translator needs it
     to build its prompt; the local MT translators ignore it (they are ja-fixed).
+
+    record=False marks an in-progress partial draft: the API translator keeps
+    it out of the rolling conversation context (drafts are not finished text).
     """
     if getattr(translator, "IS_API", False):
-        out = translator.translate(text, src_lang)
+        out = translator.translate(text, src_lang, record=record)
     else:
         out = translator.translate(text)
     if out != text and not digits_consistent(text, out):
@@ -539,7 +543,7 @@ class TranslationWorker:
                 self._maybe_publish(ev_type, lang, text, seq, partial,
                                     draft_epoch)
                 continue
-            out = safe_translate(tr, text, src_lang)
+            out = safe_translate(tr, text, src_lang, record=not partial)
             if out != text:  # fallback returns the source: nothing worth showing
                 if not partial:
                     print(f"[→{lang}] {out}", flush=True)

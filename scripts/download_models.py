@@ -201,10 +201,14 @@ def main():
         return
 
     # --- full multilingual routing ---
+    # Mandarin bilingual zh+en (vocab8358) -- the zh ASR model asr_engine.py
+    # routes to. NOT the 2025-10-07 fine-tune: that one is 四川话/川渝方言
+    # and shreds unseen English into single spaced letters ("d e p c k")
+    # with digits as Chinese words ("4" -> 四); it has been removed.
     download_and_extract_tarbz2(
-        f"{GITHUB_RELEASES}/{ASR_TAG}/sherpa-onnx-paraformer-zh-int8-2025-10-07.tar.bz2",
-        "sherpa-onnx-paraformer-zh-int8-2025-10-07",
-        "Paraformer-zh (zh ASR)")
+        f"{GITHUB_RELEASES}/{ASR_TAG}/sherpa-onnx-paraformer-zh-2024-03-09.tar.bz2",
+        "sherpa-onnx-paraformer-zh-2024-03-09",
+        "Paraformer-zh (zh ASR) -- Mandarin bilingual zh+en build")
 
     # IMPORTANT: must be the 2024-07-17 export. The newer 2025-09-09 export
     # was found broken during development (see docs/BENCHMARKS.md) -- do not

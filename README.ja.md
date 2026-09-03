@@ -106,6 +106,8 @@ python -m venv .venv
 `--minimal`を付けると日本語と英語だけの約1.1GB構成になります。
 各モデルのライセンスは`THIRD_PARTY_NOTICES.md`にまとめてあります。
 
+**中国語ルーティング**: `asr_engine.py`は`zh`を`sherpa-onnx-paraformer-zh-2024-03-09`（普通話のzh+enバイリンガル版、vocab8358）にルーティングします。英語は単語単位で出力され、中国語の数字はパイプラインがアラビア数字に復元します（百分之十七→17%）。`sherpa-onnx-paraformer-zh-int8-2025-10-07`（四川方言ファインチューン版）は英語を文字単位に分解し（"d e p c k"）、数字を漢字表記にするため使用しないでください。`download_models.py`が正しいモデルを取得します。
+
 ## CLIリファレンス
 
 フラグはすべて`scripts/realtime_transcribe.py`のものです。

@@ -22,13 +22,20 @@ import time
 import numpy as np
 import sherpa_onnx
 
+from zh_digit import restore_zh_digits
+
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 V3_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8")
 SV_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")
 OMNI_MODEL_DIR = os.path.join(MODELS_DIR, "omnilingual-300m-ctc-int8")
 WHISPER_TINY_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-whisper-tiny")
 RZ_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-zipformer-ja-en-reazonspeech-2025-01-17")
-PARA_ZH_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-paraformer-zh-int8-2025-10-07")
+# paraformer-zh-2024-03-09: Mandarin bilingual (zh+en, vocab8358) int8 build
+# -- fetched by scripts/download_models.py. The 2025-10-07 fine-tune was
+# 四川话/川渝方言 and shredded unseen English into single spaced letters
+# ("d e p c k") with digits as Chinese words ("4" -> 四); it has been
+# REMOVED, do not reinstall it.
+PARA_ZH_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-paraformer-zh-2024-03-09")
 
 # ReazonSpeech ja-en zipformer: on real broadcast Japanese it beats even
 # whisper-turbo (CER 8.6% vs 13.8%) at RTF 0.02. See docs/EVAL_REAL.md.
@@ -746,18 +753,21 @@ class RoutedASR:
         """
         if self.forced_lang is not None:
             rec, _ = self._route(self.forced_lang)
-            return self._replace(self._decode(rec, samples, sample_rate))
+            return self._replace(self._decode(rec, samples, sample_rate),
+                                 zh=self.forced_lang == "zh")
 
         if lang_hint is not None:
             # this utterance's language is confirmed: use its specialist
             rec, _ = self._route(lang_hint)
-            return self._replace(self._decode(rec, samples, sample_rate))
+            return self._replace(self._decode(rec, samples, sample_rate),
+                                 zh=lang_hint == "zh")
 
         sticky = self.last_lang
         if sticky in V3_LANGS and sticky != "en":
             # EU languages: SenseVoice can't probe these; trust the session
             rec, _ = self._route(sticky)
-            return self._replace(self._decode(rec, samples, sample_rate))
+            return self._replace(self._decode(rec, samples, sample_rate),
+                                 zh=sticky == "zh")
 
         # Before the early LID lands, never show the previous language's
         # guesswork (an English model romanizing Korean reads as garbage --
@@ -776,11 +786,18 @@ class RoutedASR:
                     return self._replace(rz_text)
             except ModelUnavailable:
                 pass
-        return self._replace(sv_text)
+        return self._replace(sv_text, zh="zh" in (sv_tag or ""))
 
-    def _replace(self, text: str) -> str:
+    def _replace(self, text: str, zh: bool = False) -> str:
+        """User dictionary (--replace), then -- for Chinese output only --
+        restore Chinese digit words to Arabic digits (zh_digit.py): the
+        Paraformer-zh family writes 百分之十七/三十五点八/版本四四零 where
+        FunASR's ITN would emit 17%/35.8/版本440. Never applied to ja/en/
+        ko/yue text (Japanese uses the same digit chars idiomatically)."""
         for wrong, right in self._replacements:
             text = text.replace(wrong, right)
+        if zh:
+            text = restore_zh_digits(text)
         return text
 
     def identify(self, samples: np.ndarray, sample_rate: int) -> str:
@@ -965,7 +982,7 @@ class RoutedASR:
                 if text2.strip():
                     lang, tier, text = corrected, tier2, text2
 
-        text = self._replace(text)
+        text = self._replace(text, lang == "zh")
         if lang == "ko" and text.strip() and self.ko_spacer is not None:
             try:
                 # SenseVoice emits a space between every token; Kiwi restores

@@ -80,6 +80,8 @@ python -m venv .venv
 
 `scripts/download_models.py` 下载约 3.1GB 预训练模型到 `models/`（git 忽略）。传 `--minimal` 为约 1.1GB 的 ja/en 精简安装（ReazonSpeech、whisper-tiny、Silero VAD、日语标点）。各模型的许可证见 `THIRD_PARTY_NOTICES.md`。
 
+**中文路由说明**：`asr_engine.py` 将 `zh` 路由到 `sherpa-onnx-paraformer-zh-2024-03-09`（普通话中英双语版，vocab8358）：英文按整词输出，中文数字由管线还原为阿拉伯数字（百分之十七 → 17%）。**切勿**换成 `sherpa-onnx-paraformer-zh-int8-2025-10-07`（四川话/川渝方言微调版）：它会把英文拆成单个字母（“d e p c k”）并把数字写成汉字（“4”→四）。`download_models.py` 会获取正确版本；数字还原由 `zh_digit.py` 完成。
+
 ## 桌面字幕窗（`desktop-subtitle/`）
 
 本分支新增了一个透明、始终置顶的**桌面字幕窗**，直接在屏幕上渲染 hayamimi 的 OBS 覆盖层 —— 无需 OBS。它位于 `desktop-subtitle/`（Electron 应用，与 Python 服务器相互独立）。
@@ -99,6 +101,7 @@ python -m venv .venv
   - **EN / ZH / KO / OFF** —— 循环切换要显示的翻译语言。
   - **双语 / 译文** —— 切换双语显示或仅译文显示。
 - 右上角固定窗口按钮：**─** 最小化窗口，**✕** 退出应用。
+- **翻译带上下文**：使用 API 翻译器时，每次请求会附带最近几条已确认的（原文，译文）对作为参考上下文——专有名词、术语与指代跨句保持一致。进行中的草稿**不进入**上下文；静默超过默认 60 秒（视为换话题）自动丢弃。可用 `openai_translate.json` 中的 `context_n`（默认 6，0 = 关闭）与 `context_timeout_s` 调节。
 - 点击穿透模式下，左上角按钮带、滑块带与右上角窗口按钮**仍保持可点击**（其余区域全部穿透）。
 - 拖拽采用系统原生 `-webkit-app-region`：**仅卡片区与顶部条可拖拽窗口**（卡片下方不可拖），且不显示十字光标。由于窗口紧贴卡片，卡片下方区域**位于窗口之外**——滚轮与点击在那里自然穿透到背后的应用。
 

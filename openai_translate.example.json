@@ -12,5 +12,7 @@
     "ko": "Korean",
     "yue": "Cantonese"
   },
-  "prompt": ""
+  "prompt": "",
+  "context_n": 6,
+  "context_timeout_s": 60
 }

@@ -114,6 +114,15 @@ python -m venv .venv
 (ReazonSpeech, whisper-tiny, Silero VAD, Japanese punctuation). See
 `THIRD_PARTY_NOTICES.md` for what each model's license commits you to.
 
+**Chinese routing**: `asr_engine.py` sends `zh` to
+`sherpa-onnx-paraformer-zh-2024-03-09` (the Mandarin bilingual zh+en build,
+vocab8358): English words come out whole, and Chinese digits are restored
+by the pipeline (百分之十七 -> 17%). Do NOT substitute the
+`sherpa-onnx-paraformer-zh-int8-2025-10-07` fine-tune (四川话/川渝方言): it
+shreds unseen English into single spaced letters ("d e p c k") and writes
+digits as Chinese words ("4" -> 四). `download_models.py` fetches the
+correct model; `zh_digit.py` performs the digit restoration.
+
 ## Desktop subtitle window (`desktop-subtitle/`)
 
 This fork adds a transparent, always-on-top **desktop subtitle window** that
@@ -159,6 +168,12 @@ server).
   - **双语 / 译文** — toggle bilingual vs translation-only display.
 - Window controls pinned at the **top-right corner**: **─** minimizes the
   window, **✕** quits the app.
+- **Context-aware translation**: with the API translator, each request
+  re-sends the last few confirmed (source, translation) pairs as reference
+  context — names, terminology and pronouns stay consistent across lines.
+  Partial drafts never enter it, and a long silence (default 60s, i.e. a
+  topic change) drops it. Tune with `context_n` (default 6, 0 = off) and
+  `context_timeout_s` in `openai_translate.json`.
 - In click-through mode the top-left button band, the slider band, and the
   top-right window controls stay clickable (everything else passes
   through).
