@@ -234,20 +234,12 @@ function makeCss() {
   const lx2 = BTN_X0 + (BTN_S + BTN_GAP) * 2;
   const lx3 = BTN_X0 + (BTN_S + BTN_GAP) * 3;
   const lx4 = BTN_X0 + (BTN_S + BTN_GAP) * 4;
-  // subtitle-card backdrop: only when bg > 0 does the block get a card.
-  // The card sits 12px inside the window on the left/right so its soft
-  // border shadow has room INSIDE the transparent window (transparent
-  // windows get no native DWM shadow). The top already has 44px of room
-  // (shadow renders fully); the bottom edge keeps the 4px auto-fit margin
-  // (subtitle windows usually sit at the screen bottom, where a bottom
-  // halo is pointless -- and a bigger margin below the card would swallow
-  // the scroll wheel again). At bg=0 there is no card and no shadow: the
-  // text floats directly on the desktop, unchanged.
+  // subtitle-card backdrop: only when bg > 0 does the block get a card
+  // (a card shadow attempt was undone and reverted -- window shadows only
+  // work with a native frame, so the card stays flush, no inset/shadow).
   const cardCss = opts.bg > 0
     ? `#box{background:rgba(0,0,0,${(opts.bg / 100).toFixed(2)})!important;
-         border-radius:14px!important;padding:8px 14px!important;
-         left:12px!important;right:12px!important;width:auto!important;
-         box-shadow:0 4px 16px rgba(0,0,0,0.45)!important;}
+         border-radius:14px!important;padding:8px 14px!important;}
        #hmy-txt-flow,#hmy-tr-flow{margin:0;padding:0;}`
     : "";
   return `
