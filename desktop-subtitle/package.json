@@ -4,9 +4,31 @@
   "description": "Transparent always-on-top desktop subtitle window for hayamimi's OBS overlay",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "electron-builder --win portable",
+    "dist:dir": "electron-builder --win dir"
+  },
+  "build": {
+    "appId": "com.hayamimi.desktop-subtitle",
+    "productName": "早耳字幕",
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "portable"
+    },
+    "portable": {
+      "artifactName": "早耳字幕-${version}.exe"
+    },
+    "npmRebuild": false
   },
   "devDependencies": {
-    "electron": "^37.0.0"
+    "electron": "^37.0.0",
+    "electron-builder": "^26.15.3"
   }
 }

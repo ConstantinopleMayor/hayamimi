@@ -86,6 +86,11 @@ python -m venv .venv
 
 本分支新增了一个透明、始终置顶的**桌面字幕窗**，直接在屏幕上渲染 hayamimi 的 OBS 覆盖层 —— 无需 OBS。它位于 `desktop-subtitle/`（Electron 应用，与 Python 服务器相互独立）。
 
+**免 Node 的 exe 一键版**：`desktop-subtitle/` 下执行 `npm run dist` 构建单文件 `早耳字幕-1.0.0.exe`（产物在 `dist/`）。**双击 exe ≈ 「启动早耳.bat + 停止早耳.bat」**：
+- 启动时探测 `http://127.0.0.1:8833/`：服务未运行时，从 exe 所在目录向上定位项目根，自动以隐藏窗口拉起服务器（`.venv\Scripts\python.exe scripts\realtime_transcribe.py --serve 8833 --translate api:zh`，日志 `%TEMP%\hayamimi-serve.log` / `.err.log`；无 OpenAI 兼容 API 时用 `早耳字幕.exe --serve-args "--translate zh"` 改走本地模型）；服务已在运行则直接复用。
+- **关闭字幕窗（✕ / Esc / 菜单「退出字幕窗」）= 自动停止转写服务器**（与「停止早耳.bat」同语义：只停命令行匹配 `realtime_transcribe` 的 python 进程，不影响其他 python 程序）。
+- 目标机器只需 Python 3.10+、ffmpeg 与模型（见「快速开始」）即可，**无需安装 Node.js/npm**。窗口启动默认：**中文（`--lang zh`）+ 双语显示（原文+译文，`--mode both`）**。
+
 **功能**
 
 - 在桌面上显示实时字幕（透明背景、无边框、始终置顶、有任务栏图标）。

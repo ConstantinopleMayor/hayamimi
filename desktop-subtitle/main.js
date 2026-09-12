@@ -32,7 +32,9 @@ const fs = require("fs");
 app.commandLine.appendSwitch("disable-background-networking");
 app.commandLine.appendSwitch("disable-component-update");
 
-const DIAG = path.join(__dirname, "diag.log");
+// Diag log lives in %TEMP%: __dirname points inside app.asar when packaged
+// (read-only), and the old location was deleted with the dev checkout anyway.
+const DIAG = path.join(app.getPath("temp"), "hayamimi-desktop-subtitle.log");
 let diagOpen = false;
 function diag(msg) {
   try {
@@ -182,7 +184,12 @@ let apiMode = false; // set true in whenReady when a config exists (matches the 
 // and model must be non-empty for the api: route to be usable.
 function detectApiConfig() {
   try {
-    const p = path.join(__dirname, "..", "openai_translate.json");
+    // Resolve openai_translate.json from the project root next to the exe
+    // (the server reads scripts/../openai_translate.json too). __dirname is
+    // inside app.asar when packaged, so walk up from the launch dir instead.
+    const root = findProjectRoot(launchDir());
+    if (!root) return false;
+    const p = path.join(root, "openai_translate.json");
     const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
     return !!(cfg && String(cfg.base_url || "").trim() && String(cfg.model || "").trim());
   } catch (_) {
@@ -208,6 +215,7 @@ function parseArgs() {
     size: DEFAULT_SIZE,
     font: "",
     lang: "zh", // match the .bat default translation (--translate zh)
+    serveArgs: "--translate api:zh", // autostart server args (--serve-args to override)
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -236,11 +244,98 @@ function parseArgs() {
     } else if (a === "--show") {
       const v = args[++i] || "both";
       if (["final", "partial", "both"].includes(v)) opts.show = v;
-    } else if (a === "--passthrough") opts.passthrough = true;
+    }     else if (a === "--passthrough") opts.passthrough = true;
     else if (a === "--url") opts.url = args[++i] || opts.url;
+    else if (a === "--serve-args") opts.serveArgs = args[++i] || opts.serveArgs;
   }
   if (!LANGS.includes(opts.lang)) opts.lang = "zh";
   return opts;
+}
+
+// ---------------------------------------------------------------------------
+// Server autostart: the packaged exe doubles as the 启动早耳.bat + 停止早耳.bat
+// pair. On startup, probe the transcribe server (8833). If it is not up,
+// spawn it from the hayamimi project root located by walking up from this
+// exe's directory; remember the pid so quitting the subtitle window stops
+// exactly the server we spawned (a server that was ALREADY running -- e.g.
+// started by 启动早耳.bat or another window instance -- is left alone).
+// ---------------------------------------------------------------------------
+const { spawn, execFileSync } = require("child_process");
+const net = require("net");
+
+let spawnedServerPid = null;
+
+function probeServer(timeoutMs, cb) {
+  const sock = net.connect({ host: "127.0.0.1", port: 8833 });
+  let done = false;
+  const finish = (ok) => {
+    if (done) return;
+    done = true;
+    sock.destroy();
+    cb(ok);
+  };
+  sock.setTimeout(timeoutMs, () => finish(false));
+  sock.once("connect", () => finish(true));
+  sock.once("error", () => finish(false));
+}
+
+// Directory the user actually launched the app from. electron-builder's
+// portable stub extracts to %TEMP% and re-points process.execPath at the
+// extraction dir, but it exposes the original location in the
+// PORTABLE_EXECUTABLE_DIR env var. Dev mode uses electron.exe directly.
+function launchDir() {
+  if (process.env.PORTABLE_EXECUTABLE_DIR) return process.env.PORTABLE_EXECUTABLE_DIR;
+  return path.dirname(process.execPath);
+}
+
+// Walk up from `fromDir` looking for the project root (scripts/realtime_transcribe.py
+// + .venv). Works for the packaged exe in desktop-subtitle/dist (3 levels up)
+// and for the dev checkout (electron.exe under node_modules, ~5 levels up).
+function findProjectRoot(fromDir) {
+  let dir = fromDir;
+  for (let i = 0; i < 10 && dir; i++) {
+    if (
+      fs.existsSync(path.join(dir, "scripts", "realtime_transcribe.py")) &&
+      fs.existsSync(path.join(dir, ".venv", "Scripts", "python.exe"))
+    )
+      return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  return null;
+}
+
+function autoStartServer(o) {
+  probeServer(1200, (up) => {
+    if (up) {
+      diag("server already up; not spawning");
+      return;
+    }
+    const root = findProjectRoot(launchDir());
+    if (!root) {
+      diag("project root not found near exe; skipping server autostart");
+      return;
+    }
+    const py = path.join(root, ".venv", "Scripts", "python.exe");
+    const args = [path.join("scripts", "realtime_transcribe.py"), "--serve", "8833"].concat(
+      String(o.serveArgs || "--translate api:zh").split(/\s+/).filter(Boolean)
+    );
+    try {
+      const outFd = fs.openSync(path.join(app.getPath("temp"), "hayamimi-serve.log"), "a");
+      const errFd = fs.openSync(path.join(app.getPath("temp"), "hayamimi-serve.err.log"), "a");
+      const child = spawn(py, args, {
+        cwd: root,
+        windowsHide: true,
+        stdio: ["ignore", outFd, errFd],
+      });
+      spawnedServerPid = child.pid;
+      diag("server spawned pid=" + child.pid + " args=" + args.join(" "));
+      child.on("exit", (code) => diag("spawned server exited code=" + code));
+    } catch (e) {
+      diag("server spawn FAILED: " + e.message);
+    }
+  });
 }
 
 function buildUrl(base, show) {
@@ -1015,6 +1110,7 @@ function showMenu() {
 app.whenReady().then(() => {
   opts = parseArgs();
   lang = opts.lang;
+  autoStartServer(opts); // exe-as-bat: spawn server if not already up (async)
 
   // API-translation availability: a usable openai_translate.json in the
   // project root (one directory above this app) enables the "API" channel
@@ -1153,6 +1249,31 @@ app.whenReady().then(() => {
   globalShortcut.register("Control+Alt+D", () => applyPassthrough(!passthrough));
   globalShortcut.register("Control+Alt+L", () => cycleLang());
   globalShortcut.register("Control+Alt+M", () => applyMode(mode === "both" ? "tr" : "both"));
+});
+
+app.on("before-quit", () => {
+  // Close the subtitle window == run 停止早耳.bat: stop the transcribe
+  // server unconditionally, whether we spawned it on startup or it was
+  // already running (someone started it first, then opened this window).
+  // Only processes whose command line matches "realtime_transcribe" are
+  // killed -- other pythons (MCP servers, etc.) are left alone.
+  // Synchronous execFileSync: an async spawn would still be starting the
+  // powershell when Electron exits, and the kill never lands (observed).
+  diag("before-quit: stopping transcribe servers (停止早耳.bat semantics)");
+  try {
+    execFileSync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-Command",
+        "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.CommandLine -match 'realtime_transcribe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+      ],
+      { windowsHide: true, stdio: "ignore", timeout: 8000 }
+    );
+    diag("before-quit: servers stopped");
+  } catch (e) {
+    diag("before-quit server kill FAILED: " + e.message);
+  }
 });
 
 app.on("will-quit", () => {

@@ -130,6 +130,25 @@ renders hayamimi's OBS overlay directly on your screen — no OBS required.
 It lives in `desktop-subtitle/` (an Electron app, separate from the Python
 server).
 
+**Node-free exe one-click version**: run `npm run dist` inside
+`desktop-subtitle/` to build the single-file `早耳字幕-1.0.0.exe` (output in
+`dist/`). Double-clicking the exe ≈ running 启动早耳.bat + 停止早耳.bat:
+- On startup it probes `http://127.0.0.1:8833/`; if the server is not
+  running, it locates the project root by walking up from the exe's folder
+  and spawns the server hidden (`.venv\Scripts\python.exe
+  scripts\realtime_transcribe.py --serve 8833 --translate api:zh`; logs to
+  `%TEMP%\hayamimi-serve.log` / `.err.log`). For machines without an
+  OpenAI-compatible endpoint, use
+  `早耳字幕.exe --serve-args "--translate zh"` to switch to the local
+  models. An already-running server is reused as-is.
+- **Closing the window (✕ / Esc / menu quit) stops the transcribe server
+  automatically** — the 停止早耳.bat semantics: only python processes whose
+  command line matches `realtime_transcribe` are stopped, other pythons are
+  untouched.
+- The target machine only needs Python 3.10+, ffmpeg and the models (see
+  Quickstart) — **no Node.js/npm required**. Startup defaults: **Chinese
+  (`--lang zh`) + bilingual display (source + translation, `--mode both`)**.
+
 **What it does**
 
 - Shows the live subtitles on your desktop (transparent background,
