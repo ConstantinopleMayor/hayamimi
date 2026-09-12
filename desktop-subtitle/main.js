@@ -41,7 +41,7 @@ function diag(msg) {
   } catch (_) {}
 }
 
-const DEFAULT_SIZE = 20;  // 20pt initial subtitle size
+const DEFAULT_SIZE = 24;  // 24pt initial subtitle size
 const LANGS = ["en", "zh", "ko", "off"];
 const LANG_LABEL = { en: "EN", zh: "ZH", ko: "KO", off: "OFF" };
 const SIZE_CHOICES = [12, 16, 20, 24, 32, 40, 48, 56, 64];
@@ -59,6 +59,64 @@ const FONT_CHOICES = [
   { label: "Georgia", family: "Georgia, serif" },
   { label: "Consolas 等宽", family: "Consolas, monospace" },
 ];
+
+// Subtitle text-style tiers (settings-menu radios; --text-* CLI options).
+// The base template in makeCss() carries the startup values; menu clicks
+// override them with insertCSS'd !important rules (later rules win).
+//  - shadow: drop-shadow tiers ("off" = none, "std" = the classic strong
+//    drop shadow, "heavy" = an even heavier shadow for bright video).
+//  - stroke (描边) / ink (重墨): bilibili-style OUTSIDE text outlines.
+//    NOT -webkit-text-stroke: that property strokes the glyph's CENTERLINE,
+//    so half the width paints OVER the letter interior (small font sizes end
+//    up with blacked-out strokes). bilibili's DOM renderer instead fakes the
+//    outline with offset, blur-free black text-shadow layers (8 directions
+//    at 1px for the standard fontborder=1 outline; the 重墨 fontborder=0
+//    mode adds larger offsets + a slight blur for a thick, rounded, heavy
+//    outside rim -- the CSS equivalent of Canvas strokeText + round lineJoin
+//    painted BEFORE the fill). Shadows always sit OUTSIDE the glyph, so the
+//    letter interior stays clean at any size.
+//  Stroke/ink are two thicknesses of the same outside-rim effect and stay
+//  mutually exclusive; the drop-shadow tier composes WITH the rim because
+//  both live in the same text-shadow property (textShadowList() below merges
+//  outline layers + drop layers into one list).
+//  - opacity: subtitle text opacity in percent (the backdrop is separate).
+const TEXT_SHADOW_CHOICES = [
+  { key: "off", label: "无", css: "" },
+  { key: "std", label: "标准", css: "0 0 2px #000,0 0 1px #000,1.5px 1.5px 0.8px #000" },
+  { key: "heavy", label: "增强", css: "0 0 5px #000,0 0 2.5px #000,2px 2px 1px #000" },
+];
+// 细描边: 8 directions at 0.15pt, no blur -- a hairline outside rim that
+// scales with the system DPI (pt units, like the font size/letter).
+const TEXT_STROKE_CHOICES = [
+  { key: "off", label: "无", css: "" },
+  {
+    key: "thin", label: "细描边",
+    css: "0.15pt 0 0 #000,-0.15pt 0 0 #000,0 0.15pt 0 #000,0 -0.15pt 0 #000," +
+      "0.15pt 0.15pt 0 #000,-0.15pt -0.15pt 0 #000,0.15pt -0.15pt 0 #000,-0.15pt 0.15pt 0 #000",
+  },
+];
+// 重墨: 8 directions at 0.4pt plus a 0.2pt blur-fill layer for rounded
+// corners (a clean bilibili-style outside rim -- no pixel steps).
+const TEXT_INK_CHOICES = [
+  { key: "off", label: "无", css: "" },
+  {
+    key: "on", label: "重墨",
+    css: "0.4pt 0 0 #000,-0.4pt 0 0 #000,0 0.4pt 0 #000,0 -0.4pt 0 #000," +
+      "0.4pt 0.4pt 0 #000,-0.4pt -0.4pt 0 #000,0.4pt -0.4pt 0 #000,-0.4pt 0.4pt 0 #000," +
+      "0 0 0.2pt #000",
+  },
+];
+const TEXT_OPACITY_CHOICES = [100, 90, 80, 70, 60]; // percent
+// Compose the FULL text-shadow list for a given style state: an outside-rim
+// tier (重墨 -> 描边 -> none; two thicknesses, mutually exclusive) followed
+// by the drop-shadow tier. Shared by makeCss() (startup opts) and the menu
+// apply functions (current globals), so both entry points render identically.
+function textShadowList(shadowKey, strokeKey, inkKey) {
+  const outline = inkKey === "on" ? TEXT_INK_CHOICES[1].css
+    : strokeKey === "thin" ? TEXT_STROKE_CHOICES[1].css : "";
+  const shadow = (TEXT_SHADOW_CHOICES.find((c) => c.key === shadowKey) || TEXT_SHADOW_CHOICES[1]).css;
+  return [outline, shadow].filter(Boolean).join(",");
+}
 
 // Button band geometry (top-left of the window). Same numbers in CSS.
 const BTN_X0 = 8;   // first button left
@@ -78,9 +136,11 @@ const MODE_LABEL = { both: "双语", tr: "译文" };
 
 // Subtitle-card background opacity levels (percent; 0 = fully transparent,
 // 30 = a soft black card). Text itself is ALWAYS opaque; only the backdrop
-// behind the source+translation block changes. 5-step granularity powers
-// both the settings-menu radios and the top-center slider.
-const BG_CHOICES = Array.from({ length: 13 }, (_, i) => i * 5); // 0..60 step 5
+// behind the source+translation block changes. The top-center slider is
+// 1%-stepped (0..60, fine tuning incl. the 1% startup default); the settings
+// menu keeps BG_MENU_CHOICES -- a few common tiers instead of 61 radios.
+const BG_CHOICES = Array.from({ length: 13 }, (_, i) => i * 5); // 5..60 step 5
+const BG_MENU_CHOICES = [0, 1, ...BG_CHOICES.filter((v) => v !== 0)]; // menu tiers
 // Backdrop slider + width slider, side by side, anchored to the LEFT edge of
 // the top strip (NOT centered): centering made the sliders drift when the
 // window width changed mid-drag (the thumb slid under the cursor -> jitter).
@@ -139,8 +199,12 @@ function parseArgs() {
     show: "both",
     mode: "both", // "both" = bilingual rows, "tr" = translation only
     passthrough: false,
-    bold: false, // bold subtitle text
-    bg: 0, // subtitle-card backdrop opacity in percent (0 = fully transparent)
+    bold: true, // bold subtitle text (startup default ON)
+    bg: 1, // subtitle-card backdrop opacity in percent (1% = a barely-there card)
+    textShadow: "std", // text-shadow tier: off / std / heavy (default std)
+    textStroke: "off", // thin outline (描边): off / thin (off; 重墨 wins when both on)
+    textInk: "on", // bilibili-style thick outline (重墨): off / on (default ON)
+    textOpacity: 100, // subtitle text opacity in percent
     size: DEFAULT_SIZE,
     font: "",
     lang: "zh", // match the .bat default translation (--translate zh)
@@ -158,7 +222,17 @@ function parseArgs() {
     } else if (a === "--bold") opts.bold = true;
     else if (a === "--bg") {
       const v = parseInt(args[++i], 10);
-      opts.bg = BG_CHOICES.includes(v) ? v : 0;
+      opts.bg = Number.isInteger(v) && v >= 0 && v <= 60 ? v : 1;
+    } else if (a === "--text-shadow") {
+      const v = args[++i] || "std";
+      opts.textShadow = TEXT_SHADOW_CHOICES.some((c) => c.key === v) ? v : "std";
+    } else if (a === "--text-stroke") {
+      opts.textStroke = (args[++i] || "off") === "thin" ? "thin" : "off";
+    } else if (a === "--text-ink") {
+      opts.textInk = (args[++i] || "on") === "on" ? "on" : "off";
+    } else if (a === "--text-opacity") {
+      const v = parseInt(args[++i], 10);
+      opts.textOpacity = TEXT_OPACITY_CHOICES.includes(v) ? v : 100;
     } else if (a === "--show") {
       const v = args[++i] || "both";
       if (["final", "partial", "both"].includes(v)) opts.show = v;
@@ -179,8 +253,12 @@ let opts = null;
 let passthrough = false;
 let lang = "zh"; // default matches the .bat (--translate zh)
 let mode = "both";  // "both" = bilingual rows, "tr" = translation only
-let bg = 0;         // subtitle-card backdrop opacity in percent
-let bold = false;   // bold subtitle text (source + translation flows)
+let bg = 1;         // subtitle-card backdrop opacity in percent (1% startup)
+let bold = true;    // bold subtitle text (source + translation flows; default ON)
+let textShadow = "std";   // text-shadow tier: off / std / heavy (default std)
+let textStroke = "off";   // thin outline (描边): off / thin (off; 重墨 wins when both on)
+let textInk = "on";       // thick bilibili outline (重墨): off / on (default ON)
+let textOpacity = 100;    // subtitle text opacity in percent
 let sizeKey = null;
 let fontKey = null;
 let pollTimer = null;
@@ -242,6 +320,15 @@ function makeCss() {
          border-radius:14px!important;padding:8px 14px!important;}
        #hmy-txt-flow,#hmy-tr-flow{margin:0;padding:0;}`
     : "";
+  // Parameterized text style -- startup values here; the settings menu
+  // overrides each dimension later via insertCSS'd !important rules (later
+  // rules win). textShadowList() merges the outside-rim tier (描边/重墨) with
+  // the drop-shadow tier into one text-shadow list (both live in the same
+  // property and compose). Opacity (percent) applies to both flows (the
+  // in-progress draft keeps its own extra 0.9 on top, so its final opacity
+  // is 0.9 * textOpacity).
+  const textShadow = textShadowList(opts.textShadow, opts.textStroke, opts.textInk);
+  const opacityCss = opts.textOpacity < 100 ? `opacity:${(opts.textOpacity / 100).toFixed(2)};` : "";
   return `
     /* ACCUMULATING subtitle flow (desktop window owns ALL rendering):
        confirmed finals flow left-to-right / wrap on lines (top-anchored),
@@ -260,7 +347,8 @@ function makeCss() {
     /* source-text flow: confirmed segments + trailing in-progress draft */
     #hmy-txt-flow{display:block;width:100%;box-sizing:border-box;
          font-size:${opts.size}px!important;color:#fff;
-         text-shadow:0 0 8px #000,0 0 4px #000,2px 2px 2px #000;
+         ${textShadow ? "text-shadow:" + textShadow + ";" : ""}
+         ${opacityCss}
          white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;
          line-height:1.35;}
     .hmy-txt-seg{display:inline;}
@@ -268,7 +356,8 @@ function makeCss() {
     /* translation flow: confirmed per-segment translations + trailing draft */
     #hmy-tr-flow{display:block;width:100%;box-sizing:border-box;
          font-size:${opts.size}px!important;color:#ffd75e;
-         text-shadow:0 0 6px #000,0 0 3px #000;
+         ${textShadow ? "text-shadow:" + textShadow + ";" : ""}
+         ${opacityCss}
          white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;
          line-height:1.25;}
     .hmy-tr-seg{display:inline;}
@@ -403,8 +492,8 @@ function makeInitJs() {
     bgSlider.id = 'hmy-bg-slider';
     bgSlider.min = '0';
     bgSlider.max = '60';
-    bgSlider.step = '5';
-    bgSlider.value = '0'; // applyBg() syncs the real value right after init
+    bgSlider.step = '1';
+    bgSlider.value = '1'; // the startup default; applyBg() re-syncs it after init
     bgSlider.title = '背景透明度调节 (0-60%)';
     bgSlider.addEventListener('input', function(){
       console.log('hmy: bg-slider-input ' + bgSlider.value);
@@ -706,7 +795,7 @@ function applyMode(m) {
 // The text itself is always opaque; a layer-injected rule with !important
 // wins over the server page's defaults, and a later rule always supersedes.
 function applyBg(alphaPct) {
-  if (!BG_CHOICES.includes(alphaPct)) return;
+  if (!Number.isInteger(alphaPct) || alphaPct < 0 || alphaPct > 60) return;
   bg = alphaPct;
   const a = (bg / 100).toFixed(2);
   // The card spans the WHOLE top strip: it starts at the button row (top:2px,
@@ -761,6 +850,44 @@ function applyBold(on) {
   win.webContents.insertCSS(css).catch(() => {});
 }
 
+// Re-apply the CURRENT text-style state as ONE complete text-shadow rule.
+// Called by every text-style menu radio: after the clicked tier is stored,
+// textShadowList() merges the outside rim (描边/重墨) with the drop shadow
+// (阴影) into a single list -- so choosing one tier never clobbers another
+// (the same insertCSS "never remove, later rule wins" pattern as the rest).
+function applyTextStyleSheet() {
+  const ts = textShadowList(textShadow, textStroke, textInk);
+  const decl = ts ? `text-shadow:${ts};` : "text-shadow:none;";
+  win.webContents.insertCSS(`#hmy-txt-flow,#hmy-tr-flow{${decl}}`).catch(() => {});
+}
+
+// Drop-shadow tier (off / std / heavy).
+function applyTextShadow(key) {
+  if (!TEXT_SHADOW_CHOICES.some((c) => c.key === key)) return;
+  textShadow = key;
+  applyTextStyleSheet();
+}
+
+// 描边 (thin, 1px rim) vs 重墨 (thick bilibili rim): two thicknesses of the
+// same outside-outline effect -- choosing one turns the other off.
+function applyTextStroke(key) {
+  textStroke = key === "thin" ? "thin" : "off";
+  if (textStroke === "thin") textInk = "off";
+  applyTextStyleSheet();
+}
+function applyTextInk(key) {
+  textInk = key === "on" ? "on" : "off";
+  if (textInk === "on") textStroke = "off";
+  applyTextStyleSheet();
+}
+
+// Subtitle text opacity in percent (the backdrop is a separate setting).
+function applyTextOpacity(pct) {
+  if (!TEXT_OPACITY_CHOICES.includes(pct)) return;
+  textOpacity = pct;
+  win.webContents.insertCSS(`#hmy-txt-flow,#hmy-tr-flow{opacity:${(pct / 100).toFixed(2)};}`).catch(() => {});
+}
+
 function applyFontSize(px) {
   opts.size = px;
   // webContents.insertCSS() returns a Promise<CSSKey>; storing the promise
@@ -802,6 +929,34 @@ function showMenu() {
       click: (i) => applyBold(i.checked),
     },
     {
+      label: "阴影",
+      submenu: TEXT_SHADOW_CHOICES.map((c) => ({
+        label: c.label, type: "radio", checked: textShadow === c.key,
+        click: () => applyTextShadow(c.key),
+      })),
+    },
+    {
+      label: "描边",
+      submenu: TEXT_STROKE_CHOICES.map((c) => ({
+        label: c.label, type: "radio", checked: textStroke === c.key,
+        click: () => applyTextStroke(c.key),
+      })),
+    },
+    {
+      label: "重墨",
+      submenu: TEXT_INK_CHOICES.map((c) => ({
+        label: c.label, type: "radio", checked: textInk === c.key,
+        click: () => applyTextInk(c.key),
+      })),
+    },
+    {
+      label: "文字透明度",
+      submenu: TEXT_OPACITY_CHOICES.map((p) => ({
+        label: p + "%", type: "radio", checked: textOpacity === p,
+        click: () => applyTextOpacity(p),
+      })),
+    },
+    {
       label: "翻译语言",
       submenu: LANGS.map((l) => ({
         label: { en: "英语 EN", zh: "中文 ZH", ko: "韩语 KO", off: "关闭 OFF" }[l],
@@ -838,11 +993,12 @@ function showMenu() {
     },
     {
       label: "背景透明度",
-      submenu: BG_CHOICES.map((a) => ({
+      submenu: BG_MENU_CHOICES.map((a) => ({
         label: a === 0 ? "纯透明（无背景）" : a + "%",
         type: "radio", checked: bg === a,
         click: () => applyBg(a),
       })),
+      // menu keeps common tiers; the top-center slider is 1%-stepped 0..60
     },
     {
       label: "点击穿透", type: "checkbox", checked: passthrough,
@@ -875,8 +1031,13 @@ app.whenReady().then(() => {
   // confusion. Without a config, apiAvailable=false -> apiMode=false -> local.
   apiMode = apiAvailable;
   mode = MODES.includes(opts.mode) ? opts.mode : "both"; // (--mode arg if ever given)
-  bg = BG_CHOICES.includes(opts.bg) ? opts.bg : 0;
+  bg = Number.isInteger(opts.bg) && opts.bg >= 0 && opts.bg <= 60 ? opts.bg : 1;
   bold = !!opts.bold;
+  textShadow = TEXT_SHADOW_CHOICES.some((c) => c.key === opts.textShadow) ? opts.textShadow : "std";
+  textStroke = opts.textStroke === "thin" ? "thin" : "off";
+  textInk = opts.textInk === "on" ? "on" : "off";
+  textOpacity = TEXT_OPACITY_CHOICES.includes(opts.textOpacity) ? opts.textOpacity : 100;
+  if (textInk === "on") textStroke = "off"; // 重墨/描边 share one property
 
   const { workArea } = screen.getPrimaryDisplay();
   const winW = Math.min(opts.width, workArea.width);
@@ -968,6 +1129,10 @@ app.whenReady().then(() => {
     try { applyMode(mode); } catch (e) { diag("applyMode err " + e.message); }
     try { applyBg(bg); } catch (e) { diag("applyBg err " + e.message); }
     try { applyBold(bold); } catch (e) { diag("applyBold err " + e.message); }
+    try { applyTextShadow(textShadow); } catch (e) { diag("applyTextShadow err " + e.message); }
+    try { applyTextStroke(textStroke); } catch (e) { diag("applyTextStroke err " + e.message); }
+    try { applyTextInk(textInk); } catch (e) { diag("applyTextInk err " + e.message); }
+    try { applyTextOpacity(textOpacity); } catch (e) { diag("applyTextOpacity err " + e.message); }
     try { setPageButtons(); } catch (e) { diag("setPageButtons err " + e.message); }
     diag("bootstrap done");
     // Push our channel+language to the server ONCE at startup so the UI and

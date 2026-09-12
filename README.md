@@ -149,17 +149,33 @@ server).
   itself always stays opaque). It spans the WHOLE top strip — the button
   row sits on top of the card, text starts 8px below the buttons — and an
   empty card keeps exactly one-line height, so the card never shrinks above
-  the text. Opacity is set with the **top-center slider** (0–60%, 5-step
-  granularity; also 13 levels in the settings menu). Optional `--bg 30`
-  (and `--mode tr`, `--bold`) command-line args set the default. The two
-  sliders (backdrop opacity + window width) sit side by side on the top
-  strip, **left-anchored** so they never drift while dragging.
+  the text. Opacity is set with the **top-center slider** (0–60%, 1-step
+  for fine tuning; the settings menu keeps a few common tiers). The startup
+  default is **1%** — a barely-there card. `--bg <0-60>` (`--mode tr`,
+  `--bold`) set startup defaults. The two sliders (backdrop opacity +
+  window width) sit side by side on the top strip, **left-anchored** so
+  they never drift while dragging.
 - **Window width**: a slider on the top strip adjusts the window width
   500–1200px (step 10); the text re-wraps and the height keeps
   auto-fitting. (This transparent/frameless window has no native resize
   handles, so the slider drives it.)
-- **Bold text**: `字幕粗体` checkbox in the settings menu (or `--bold`)
-  switches both flows to bold.
+- **Bold text**: on by default (`字幕粗体` checkbox in the settings menu
+  toggles it; `--bold` is a no-op since ON is the default).
+- **Text style**: four settings-menu radio groups (startup defaults via
+  CLI args) style both flows. Startup defaults: **bold**, **标准阴影**,
+  **重墨**（细描边 off — 与重墨互斥）:
+  - **阴影** shadow — 无 / 标准（default, `--text-shadow std`, 1px glow +
+    0.5px core + 1px 1px drop）/ 增强 (`heavy`)
+  - **描边** thin outline — 无（default）/ 细描边 (`--text-stroke thin`,
+    hairline 0.15pt outside rim via 8-direction offset shadows — bilibili's
+    DOM technique; shadows stay OUTSIDE the glyph, never paint over the
+    letter interior like `-webkit-text-stroke` does; mutually exclusive with
+    重墨)
+  - **重墨** bilibili-style thick outline — 无 / 重墨（default,
+    `--text-ink on`, 8-direction 0.3pt rim + 0.2pt corner blur; same
+    outside-shadow technique, mutually exclusive with 描边)
+  - **文字透明度** text opacity — 100（default）/90/80/70/60%
+    (`--text-opacity <pct>`)
 - Buttons pinned at the top-left corner:
   - **🔒 / 🔓** — toggle interactive drag vs click-through mode.
   - **⚙** — settings menu (font size, font family, bold text, translation
