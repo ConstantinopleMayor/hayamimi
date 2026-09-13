@@ -870,6 +870,49 @@ def build_translators(langs: str) -> dict:
     return out
 
 
+def apply_translation_spec(spec: str, worker: "TranslationWorker",
+                           get_refiner=None) -> None:
+    """"translate en,zh,ko" | "" / "off" -> hot-switch the worker's active
+    translators. Shared by the stdin command thread and by the HTTP
+    POST /api/translate endpoint (called from the desktop subtitle window),
+    so both paths can switch translation at runtime without a restart.
+
+    Also rebinds Refiner.translators (via get_refiner, resolved at call
+    time because the Refiner is constructed after the stdin thread and the
+    server callback are wired up, and may not exist at all with
+    --no-refine): the Refiner holds its own dict reference captured at
+    construction, so without this the refine pass keeps translating exactly
+    as configured when it STARTED -- turn translation on via the subtitle
+    window after booting with none, and refined (clean-book) paragraphs
+    would gain no translation line; turn it off and they would keep getting
+    one. Attribute assignment is one pointer store (atomic under the GIL)
+    and refine re-reads self.translators per call, so the swap takes
+    effect from the next group onward.
+    """
+    spec = (spec or "").strip().lower()
+
+    def _publish(trs: dict) -> None:
+        worker.set_langs(trs)
+        refiner = get_refiner() if get_refiner is not None else None
+        if refiner is not None:
+            refiner.translators = trs
+
+    if spec in ("", "off", "none", "0"):
+        _publish({})
+        print("[cmd] translation off", file=sys.stderr, flush=True)
+        return
+    print(f"[cmd] loading translators ({spec})...", file=sys.stderr, flush=True)
+    try:
+        tr = build_translators(spec)
+    except Exception as exc:
+        print(f"[cmd] failed: {exc}", file=sys.stderr, flush=True)
+        return
+    if tr:
+        _publish(tr)
+    else:
+        print("[cmd] no supported targets", file=sys.stderr, flush=True)
+
+
 # Queue sentinel for the "daemon thread(s) draining a Queue forever" workers
 # below (TranslationWorker, Refiner). They used to loop with no way out,
 # which meant the thread's frame held its owner -- and through the Refiner,
@@ -1670,28 +1713,10 @@ def main():
             translator_worker.set_langs(translators)
 
 
-    def apply_translation_spec(spec: str, worker: TranslationWorker) -> None:
-        """"translate en,zh,ko" | "" / "off" -> hot-switch the worker's active
-        translators. Shared by the stdin command thread and by the HTTP
-        POST /api/translate endpoint (called from the desktop subtitle window),
-        so both paths can switch translation at runtime without a restart.
-        """
-        spec = (spec or "").strip().lower()
-        if spec in ("", "off", "none", "0"):
-            worker.set_langs({})
-            print("[cmd] translation off", file=sys.stderr, flush=True)
-            return
-        print(f"[cmd] loading translators ({spec})...", file=sys.stderr, flush=True)
-        try:
-            tr = build_translators(spec)
-        except Exception as exc:
-            print(f"[cmd] failed: {exc}", file=sys.stderr, flush=True)
-            return
-        if tr:
-            worker.set_langs(tr)
-        else:
-            print("[cmd] no supported targets", file=sys.stderr, flush=True)
-
+    # Bound below (with --no-refine it stays None); the stdin thread and the
+    # POST /api/translate callback close over this name and may fire before
+    # the Refiner exists, so the cell must never be unbound.
+    refiner = None
 
     def hot_commands(worker: TranslationWorker):
         """Live stdin commands (run-time translation switch, no restart):
@@ -1705,7 +1730,8 @@ def main():
             if not line:
                 continue
             if line.startswith("translate "):
-                apply_translation_spec(line[len("translate "):], worker)
+                apply_translation_spec(line[len("translate "):], worker,
+                                       lambda: refiner)
             elif line in ("quit", "exit"):
                 print("[cmd] bye", file=sys.stderr, flush=True)
                 raise SystemExit(0)
@@ -1717,7 +1743,8 @@ def main():
     # (POST /api/translate). Both entry points use the same apply function.
     if server is not None:
         server.set_translate_callback(
-            lambda langs: apply_translation_spec(langs, translator_worker))
+            lambda langs: apply_translation_spec(langs, translator_worker,
+                                                 lambda: refiner))
 
     history = AudioHistory(SAMPLE_RATE)
     refiner = None if args.no_refine else Refiner(asr, history, SAMPLE_RATE, printer,

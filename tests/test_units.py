@@ -14,7 +14,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 from realtime_transcribe import (AudioHistory, PartialPrinter, PREROLL_S, Refiner,
-                                 digits_consistent, translate_by_sentence)
+                                 apply_translation_spec, digits_consistent,
+                                 translate_by_sentence)
 import asr_engine
 import translate_m2m
 
@@ -930,3 +931,43 @@ def test_empty_specialist_stays_empty_on_a_minimal_install():
     assert asked == ["omni"]
     assert result["text"] == ""
     assert result["tier"] == "rz"
+
+
+def test_hot_translate_switch_rebinds_the_refiner(monkeypatch):
+    """The desktop window's language button (POST /api/translate) and the
+    stdin "translate" command share apply_translation_spec. Both must
+    rebind Refiner.translators too: the Refiner used to hold the dict
+    captured at construction, so refining a clean-book paragraph kept
+    translating exactly as configured at startup -- turn translation on
+    after booting with none and refined lines gained no translation (and
+    the reverse leaked translations after "off")."""
+    import realtime_transcribe as rt
+
+    class _Worker:
+        def __init__(self):
+            self.langs = None
+
+        def set_langs(self, translators):
+            self.langs = translators
+
+    class _Refiner:
+        def __init__(self):
+            self.translators = {}
+
+    built = {"en": object()}
+    monkeypatch.setattr(rt, "build_translators", lambda spec: dict(built))
+    worker, refiner = _Worker(), _Refiner()
+
+    rt.apply_translation_spec("en", worker, lambda: refiner)
+    assert worker.langs == built
+    assert refiner.translators == built, "the refine pass must see the new target"
+
+    rt.apply_translation_spec("off", worker, lambda: refiner)
+    assert worker.langs == {}
+    assert refiner.translators == {}, "translation off must silence refine too"
+
+    # --no-refine / pre-construction race: no refiner object, no crash
+    rt.apply_translation_spec("en", worker, None)
+    assert worker.langs == built
+    rt.apply_translation_spec("en", worker, lambda: None)
+    assert worker.langs == built
