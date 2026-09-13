@@ -519,6 +519,12 @@ class RoutedASR:
         self._replacements = _load_replacements(replace_file)
         self._load_lock = threading.Lock()  # punct + registry bookkeeping
         self._model_locks = {name: threading.Lock() for name in _BUILDERS}
+        # close() bookkeeping. Set before ANY thread is started below (the
+        # preload thread at the end of this constructor) so _spawn_bg() and
+        # close() can never see them half-built.
+        self._closed = False
+        self._bg_threads: list[threading.Thread] = []
+        self._bg_lock = threading.Lock()  # guards _closed + _bg_threads
         self.last_lang = None  # sticky language from the most recent final
         self._unavailable: set[str] = set()  # models missing on disk (--minimal installs)
         self._pending_lang = None   # candidate new language awaiting confirmation
@@ -534,7 +540,95 @@ class RoutedASR:
         if preload:
             # pull the other tiers in on a daemon thread so the first
             # non-tier-0 utterance doesn't pay the ~2s model-load cost.
-            threading.Thread(target=self._preload_rest, daemon=True).start()
+            # Registered with _spawn_bg so close() can wait for it: this
+            # thread holds a reference to `self` for as long as it runs,
+            # and through self to every recognizer loaded so far, so a
+            # RoutedASR whose preload is still in flight is not
+            # collectable no matter what the caller drops.
+            self._spawn_bg(self._preload_rest)
+
+    def _spawn_bg(self, target, *args) -> "threading.Thread | None":
+        """Start a daemon worker and remember it, so close() can join it.
+
+        Every background thread this class starts keeps `self` alive (its
+        frame holds the bound method), and `self` keeps the sherpa-onnx
+        recognizers -- several GB of native allocation -- alive with it.
+        Untracked, those threads made a RoutedASR permanently
+        uncollectable. Tracking them here is what lets close() actually
+        end an engine's life.
+
+        Finished threads are pruned on every call so a long session's
+        per-utterance prefetches (identify()) don't grow this list without
+        bound. Returns None if the engine is already closed -- no new
+        background work is started after close().
+        """
+        with self._bg_lock:
+            if self._closed:
+                return None
+            self._bg_threads = [t for t in self._bg_threads if t.is_alive()]
+            thread = threading.Thread(target=target, args=args, daemon=True)
+            # started under the lock so close() can never join() a thread
+            # that has been registered but not yet started (join() on an
+            # unstarted Thread raises RuntimeError).
+            thread.start()
+            self._bg_threads.append(thread)
+            return thread
+
+    def close(self) -> None:
+        """End this engine's life: stop its background threads, then drop
+        every model it holds. Idempotent; safe to call from any thread.
+
+        Order matters, and the wait is deliberate:
+
+          1. mark closed, so _spawn_bg() starts nothing new and
+             _preload_rest() stops at its next tier boundary;
+          2. JOIN the background threads. A model load already inside
+             sherpa-onnx's C++ constructor cannot be interrupted, so
+             close() waits for it rather than pretending it isn't running
+             -- worst case one tier (~2s) -- and that makes step 3 the
+             only writer of self._models;
+          3. drop the recognizers, punctuator, ko_spacer and LID. This is
+             the step that actually returns the memory: with no Python
+             reference left, onnxruntime frees the native arenas on those
+             objects' destructors.
+
+        After this, transcribe()/partial()/identify() raise RuntimeError
+        rather than silently rebuilding what was just released (see
+        _check_open()); build a new RoutedASR to transcribe again. The
+        registry is left empty rather than repopulated, so
+        resident_models is [] and _evict_if_needed has nothing to do.
+        """
+        with self._bg_lock:
+            if self._closed:
+                return
+            self._closed = True
+            threads = self._bg_threads
+            self._bg_threads = []
+        for thread in threads:
+            thread.join()
+        # _load_lock is the same lock _get() takes around registry
+        # bookkeeping, so this cannot race a load that slipped in just
+        # before _closed was set.
+        with self._load_lock:
+            self._models.clear()
+            self._last_used.clear()
+            self._punct = None
+            self._punctuate = False     # stops the punct property rebuilding it
+            self._ko_spacer = None
+            self._ko_spacer_ok = False  # ditto for ko_spacer
+        self.lid = None
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise RuntimeError(
+                "this RoutedASR is closed (close() released its models); "
+                "build a new RoutedASR to transcribe again")
+
+    def __enter__(self) -> "RoutedASR":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     @staticmethod
     def _warn_hotwords_encodability(hotwords_file: str):
@@ -567,12 +661,20 @@ class RoutedASR:
                   f"will have no effect for these. Consider --replace instead.")
 
     def _preload_rest(self):
-        if self._punctuate:
+        # self._closed is re-read at every step so close() doesn't have to
+        # wait out the whole preload, only whatever single load is already
+        # inside sherpa-onnx's C++ constructor. A plain bool read needs no
+        # lock (one pointer store under the GIL).
+        if self._punctuate and not self._closed:
             self.punct  # first: ja finals need this almost immediately
+        if self._closed:
+            return
         self.ko_spacer  # cheap (~1s); fixes SenseVoice's over-split Korean
         silence = np.zeros(16000, dtype=np.float32)
         budget = None if self._max_resident is None else self._max_resident
         for name in _PRELOAD_ORDER:
+            if self._closed:
+                break
             if budget is not None and budget <= 0:
                 break
             try:
@@ -751,6 +853,7 @@ class RoutedASR:
         draft always routes straight to the forced language, same as
         transcribe(), with no LID/SenseVoice probing at all.
         """
+        self._check_open()
         if self.forced_lang is not None:
             rec, _ = self._route(self.forced_lang)
             return self._replace(self._decode(rec, samples, sample_rate),
@@ -806,8 +909,12 @@ class RoutedASR:
         Also kicks off a background prefetch of that language's model, so by
         the time the utterance finalizes the recognizer is already resident.
         """
+        self._check_open()
         lang = self._identify_lang(samples, sample_rate)
-        threading.Thread(target=self._route, args=(lang,), daemon=True).start()
+        # tracked (see _spawn_bg): short-lived, but it holds `self` while
+        # it loads a model, so close() has to be able to wait for it
+        # before dropping the registry out from under it.
+        self._spawn_bg(self._route, lang)
         return lang
 
     min_switch_s = 2.0  # a shorter utterance can't establish a new language
@@ -833,6 +940,7 @@ class RoutedASR:
                    live: bool = True) -> dict:
         """live=False (e.g. the refine pass re-decoding past audio) must not
         touch the sticky/pending language state of the live stream."""
+        self._check_open()
         if self.forced_lang is not None:
             # --mode single: no LID, no switch logic, ever.
             lang, lid_ms = self.forced_lang, 0.0

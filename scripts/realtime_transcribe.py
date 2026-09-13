@@ -375,6 +375,17 @@ def build_translators(langs: str) -> dict:
     return out
 
 
+# Queue sentinel for the "daemon thread(s) draining a Queue forever" workers
+# below (TranslationWorker, Refiner). They used to loop with no way out,
+# which meant the thread's frame held its owner -- and through the Refiner,
+# the RoutedASR and its multi-GB sherpa-onnx recognizers -- alive for the
+# life of the process. Nothing could be garbage collected. Enqueuing this
+# object tells the loop to return; because the queues are FIFO (the partial
+# draft queue is polled, newest-wins), everything submitted before the
+# sentinel still runs first.
+_WORKER_STOP = object()
+
+
 class TranslationWorker:
     """Async source->target translation of finalized lines (console display).
 
@@ -413,9 +424,9 @@ class TranslationWorker:
         self._translators = dict(translators)  # copy: never mutate in place
         self._server = server
         # finalized lines (priority) -- one FIFO
-        self._q: "queue.Queue[tuple]" = queue.Queue()
+        self._q: "queue.Queue" = queue.Queue()
         # partial drafts (best-effort) -- capacity 1, newest wins
-        self._partial_q: "queue.Queue[tuple]" = queue.Queue(maxsize=1)
+        self._partial_q: "queue.Queue" = queue.Queue(maxsize=1)
         self._last_partial_at = 0.0
         self._last_partial_text = ""
         # Draft staleness guard: every finalized line bumps this; a partial
@@ -425,8 +436,11 @@ class TranslationWorker:
         # finalized translation ("final translation on screen, partial still
         # lingered") -- the front-end can't tell a stale draft from a new one.
         self._final_epoch = 0
-        threading.Thread(target=self._final_loop, daemon=True).start()
-        threading.Thread(target=self._partial_loop, daemon=True).start()
+        self._closed = False
+        self._final_thread = threading.Thread(target=self._final_loop, daemon=True)
+        self._partial_thread = threading.Thread(target=self._partial_loop, daemon=True)
+        self._final_thread.start()
+        self._partial_thread.start()
 
     def set_langs(self, translators: dict):
         with self._lock:
@@ -436,6 +450,28 @@ class TranslationWorker:
 
     def submit(self, text: str, src_lang: str = "ja", seq: int | None = None):
         self.submit_final_locked(text, src_lang, seq)
+
+    def close(self) -> None:
+        """Stop both worker threads once everything already queued has been
+        translated. Idempotent.
+
+        Same reason Refiner.close() exists: these threads' frames hold
+        `self`, and through it the translator models, so an unterminated
+        worker keeps them alive for the life of the process.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._q.put(_WORKER_STOP)
+        self._partial_q.put(_WORKER_STOP)  # polled within ~50ms; never blocks long
+        self._final_thread.join()
+        self._partial_thread.join()
+
+    def __enter__(self) -> "TranslationWorker":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def submit_final_locked(self, text: str, src_lang: str = "ja",
                             seq: int | None = None):
@@ -448,7 +484,15 @@ class TranslationWorker:
         checks the epoch before publishing), and draining _partial_q frees
         any draft that has not even started yet -- so an API round-trip is
         never wasted on text a confirmed line has already replaced.
+
+        A no-op after close(): the workers are gone, so anything queued now
+        would sit unread forever. Unlike Refiner.maybe_refine() (which
+        raises, because losing refine text loses transcript content), a
+        dropped console translation of a line that was already printed in
+        its original language costs the user nothing at shutdown.
         """
+        if self._closed:
+            return
         with self._lock:
             self._final_epoch += 1
         # drop drafts that haven't started translating yet -- they belong to
@@ -493,6 +537,8 @@ class TranslationWorker:
         # before this draft's translation finishes, the draft is stale and its
         # result must not be published (a late partial_translation would
         # overwrite the just-shown confirmed translation).
+        if self._closed:
+            return False  # see submit_final_locked: drafts are best-effort
         with self._lock:
             epoch = self._final_epoch
         self._partial_q.put((text, src_lang or "ja", epoch))
@@ -505,7 +551,10 @@ class TranslationWorker:
         BLOCKS on the finalized queue: a draft's slow API round-trip can
         never delay or sit ahead of a confirmed line's translation."""
         while True:
-            text, src_lang, seq = self._q.get()
+            item = self._q.get()
+            if item is _WORKER_STOP:
+                return
+            text, src_lang, seq = item
             self._translate(text, src_lang, seq, partial=False)
 
     def _partial_loop(self):
@@ -515,10 +564,13 @@ class TranslationWorker:
         speaker is still talking, not after the VAD confirms the line."""
         while True:
             try:
-                ptext, plang, epoch = self._partial_q.get_nowait()
+                item = self._partial_q.get_nowait()
             except queue.Empty:
                 time.sleep(0.05)
                 continue
+            if item is _WORKER_STOP:
+                return
+            ptext, plang, epoch = item
             self._translate(ptext, plang, None, partial=True,
                             draft_epoch=epoch)
 
@@ -610,12 +662,52 @@ class Refiner:
         # out of chronological sequence. A single consumer thread draining a
         # Queue processes strictly in enqueue order, so this can't happen.
         self._task_queue: "queue.Queue" = queue.Queue()
+        self._closed = False
+        self._close_lock = threading.Lock()
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker_thread.start()
+
+    def close(self) -> None:
+        """Finish the queued refine work, stop the worker, close the
+        transcript file. Idempotent; safe to call from any thread.
+
+        This is the counterpart to the `_task_queue.join()` main()'s
+        finish() already relies on, and it drains exactly the same way:
+        the stop sentinel goes in at the BACK of the FIFO, so every group
+        queued before it is still decoded, printed, published and written
+        to the transcript before the worker returns. close() then waits
+        for the thread to actually end.
+
+        Why it has to exist at all: _worker_loop's frame holds `self`,
+        `self` holds the RoutedASR, and the RoutedASR holds several GB of
+        sherpa-onnx recognizers. A Refiner whose worker never returns is
+        therefore uncollectable no matter what its owner drops -- which is
+        how building one pipeline per clip in a test loop grew pytest's RSS
+        into the tens of GB upstream. Pair this with RoutedASR.close();
+        main() does, in that order.
+        """
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._task_queue.put(_WORKER_STOP)
+        self._worker_thread.join()
+        if self._transcript is not None:
+            self._transcript.close()
+            self._transcript = None
+
+    def __enter__(self) -> "Refiner":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def _worker_loop(self):
         while True:
             task = self._task_queue.get()
+            if task is _WORKER_STOP:
+                self._task_queue.task_done()
+                return
             try:
                 task()
             finally:
@@ -634,7 +726,10 @@ class Refiner:
         visually swallowing an en segment sandwiched between two ja ones
         into a "[refine/ja] ..." line. Refine groups now never cross a
         language boundary.
+
+        Raises RuntimeError after close() -- see maybe_refine().
         """
+        self._check_open()
         corrected = script_corrected_lang(lang, text)
         if self.spans:
             group_lang = script_corrected_lang(self.spans[-1][2], self.spans[-1][3])
@@ -644,7 +739,25 @@ class Refiner:
                 self.maybe_refine(seg_start, force=True, force_sync=False)
         self.spans.append((seg_start, seg_end, lang, text, speaker))
 
+    def _check_open(self) -> None:
+        """Refuse work on a closed Refiner, loudly.
+
+        A no-op would be the friendlier-looking choice, but every caller
+        here (run_stream/drain_segments' ingestion path, main()'s finish())
+        is submitting audio that is supposed to end up in the
+        console/SSE/transcript output -- silently dropping it would lose
+        transcript content with nothing to show for it. Worse, a
+        `force_sync=True` refine enqueued after close() would block its
+        caller forever on an Event no worker is left to set, so this turns
+        a deadlock into an immediate, traceable error.
+        """
+        if self._closed:
+            raise RuntimeError(
+                "this Refiner is closed (close() stopped its worker thread); "
+                "build a new Refiner for a new session")
+
     def maybe_refine(self, now_sample: int, force: bool = False, force_sync: bool | None = None):
+        self._check_open()
         if not self.spans:
             return
         first_start = self.spans[0][0]
@@ -1120,6 +1233,17 @@ def main():
         finish(SAMPLE_RATE)
     finally:
         print(f"\n=== session summary: {stats.summary()} ===")
+        # Release the pipeline explicitly, AFTER the summary print above so
+        # both report identical numbers -- Refiner.close() drains whatever
+        # refine work is still queued (the same drain finish() does) and
+        # asr.close() then frees the recognizers, so a caller that imports
+        # this module and calls main() in-process gets its memory back
+        # instead of holding it until the interpreter exits. Order matters:
+        # the refiner decodes through the engine, so it stops first.
+        if refiner is not None:
+            refiner.close()
+        translator_worker.close()
+        asr.close()
 
 
 if __name__ == "__main__":
