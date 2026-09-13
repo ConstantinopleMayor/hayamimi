@@ -662,7 +662,6 @@ function makeCss() {
     #hmy-mode-btn{left:${lx4}px;font-family:'Segoe UI',sans-serif;font-weight:600;
                   font-size:11px;}
     #hmy-audio-btn{left:${lx5}px;font-size:12px;}
-    #hmy-audio-btn.on{background:rgba(40,90,60,0.8);border-color:rgba(150,255,180,0.55);}
     /* top-right window controls: minimize (─) and close (✕) */
     #hmy-min-btn{right:${RBX + BTN_S + BTN_GAP}px;}
     #hmy-close-btn{right:${RBX}px;}
@@ -670,7 +669,6 @@ function makeCss() {
     .hmy-btn:hover{background:rgba(65,65,75,0.9);border-color:rgba(255,255,255,0.6);
                    box-shadow:0 2px 8px rgba(0,0,0,0.45);}
     .hmy-btn:active{transform:translateY(1px);}
-    #hmy-lock-btn.on{background:rgba(90,100,120,0.75);}
     .hmy-btn *{pointer-events:none;}
     /* top-center sliders (backdrop opacity + window width): thin track,
        round thumb, centered side by side on the window's top strip */
@@ -958,13 +956,12 @@ function setPageButtons() {
   // cannot be dragged) — 🔓 = unlocked, can drag/move the window.
   // (Previously it was inverted: passthrough showed 🔓 which was confusing.)
   const icon = passthrough ? "🔒" : "🔓";
-  const onClass = passthrough ? " on" : "";
   const label = LANG_LABEL[lang] || "EN";
   win.webContents
     .executeJavaScript(
       `(function(){
         var lock=document.getElementById('hmy-lock-btn');
-        if(lock){ lock.textContent=${JSON.stringify(icon)}; lock.className='hmy-btn${onClass}'; }
+        if(lock){ lock.textContent=${JSON.stringify(icon)}; lock.className='hmy-btn'; }
         var lp=document.getElementById('hmy-lang-btn');
         if(lp){ lp.textContent=${JSON.stringify(label)}; }
         var ap=document.getElementById('hmy-api-btn');
@@ -978,7 +975,7 @@ function setPageButtons() {
         var ab=document.getElementById('hmy-audio-btn');
         if(ab){
           ab.textContent = ${JSON.stringify(serverBusy ? "⏳" : (INPUT_LABEL[audioInput] || "🎤"))};
-          ab.className = 'hmy-btn' + (${JSON.stringify(audioInput === "mic" ? "" : " on")});
+          ab.className = 'hmy-btn';
           ab.title = ${JSON.stringify(inputTitle())};
         }
       })();`
