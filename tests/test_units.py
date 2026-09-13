@@ -350,7 +350,7 @@ def test_partial_forced_lang_routes_directly_without_lid_or_sv_probe():
             assert rec == "ko-recognizer"
             return "raw text"
 
-        def _replace(self, text):
+        def _replace(self, text, zh=False):
             return text
 
         def _get(self, name):
@@ -546,7 +546,7 @@ def test_transcribe_bootstrap_too_short_decodes_but_does_not_seed_last_lang():
         def _decode(self, rec, samples, sample_rate):
             return "hi there"
 
-        def _replace(self, text):
+        def _replace(self, text, zh=False):
             return text
 
     stub = _Stub()
@@ -588,7 +588,7 @@ def test_transcribe_bootstrap_zh_yue_reuses_single_sv_probe_decode():
 
         _sv_probe = asr_engine.RoutedASR._sv_probe
 
-        def _replace(self, text):
+        def _replace(self, text, zh=False):
             return text
 
     stub = _Stub()
@@ -705,7 +705,7 @@ def test_refine_reuses_sv_probe_text_for_ko_yue_instead_of_redecoding():
             self.decode_full_calls += 1
             return ("코리안 텍스트 refine 예시입니다", "<|ko|>0.9")
 
-        def _replace(self, text):
+        def _replace(self, text, zh=False):
             return text
 
         def transcribe(self, buf, sr, known_lang=None, live=False):
