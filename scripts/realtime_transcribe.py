@@ -631,10 +631,12 @@ PARTIAL_EVERY_S = 0.5   # decode a draft this often (in audio time) during speec
 # of the utterance. It must be >= the VAD's max_speech_duration
 # (default --max-speech 12.0 s) or the leading part of a long sentence
 # silently vanishes from the draft while the speaker is still talking
-# ("前面的内容消失"). 14 s keeps every section of any segment that the VAD
-# can emit (<=12 s) present in the draft; raise it if you also raise
-# --max-speech.
-PARTIAL_WINDOW_S = 14.0
+# ("前面的内容消失", user report: --max-speech 14 s still produced a
+# scrolling/truncated draft because the VAD tail-silence extends the
+# segment past the window). 60 s covers a 60 s max-speech segment in full;
+# decode cost is unchanged -- the window only caps what is cut from the
+# SEGMENT's tail, it never extends the audio below the VAD's own length.
+PARTIAL_WINDOW_S = 60.0
 
 
 class PartialPrinter:
