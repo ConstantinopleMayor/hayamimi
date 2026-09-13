@@ -123,7 +123,7 @@ python -m venv .venv
 
 ![桌面字幕窗](docs/images/desktop-subtitle.png)
 
-透明、始终置顶的字幕窗，把 hayamimi 的实时字幕直接渲染在桌面上 —— 无需打开 OBS。原文与译文同屏两行，广播字幕风格（粗体、柔和阴影、B 站弹幕式描边）。启动默认：中文、双语显示、24pt。
+透明、始终置顶的字幕窗，把 hayamimi 的实时字幕直接渲染在桌面上 —— 无需打开 OBS。原文与译文同屏两行，广播字幕风格（粗体、柔和阴影、B 站弹幕式描边）。启动默认：不翻译（语言按钮可切换 EN/ZH/KO）、双语显示、24pt。
 
 **最快方式（免 Node.js）**：从 [GitHub Releases](https://github.com/ConstantinopleMayor/hayamimi/releases) 下载 `hayamimi-subtitle-0.3.0-win-x64.zip`，解压到 `hayamimi/` 项目目录内（如 `desktop-subtitle\`），双击 `早耳字幕\早耳字幕.exe`。exe 就是一站式启动器：
 

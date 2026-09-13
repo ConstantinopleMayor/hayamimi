@@ -16,9 +16,10 @@ rem     Requires a usable openai_translate.json in the project root
 rem     (copy openai_translate.example.json and fill base_url/model).
 rem     The subtitle window's API/Local button also switches channels.
 rem Leave empty (set "TRANSLATE=") to turn translation off.
-rem Default below = API zh (uses openai_translate.json). If you have no
-rem API config, change it to "--translate zh" for the local model.
-set "TRANSLATE=--translate api:zh"
+rem Default below = OFF. Set it to "--translate api:zh" to instead use the
+rem OpenAI-compatible API (requires openai_translate.json in the project
+rem root), or "--translate zh" for the local model.
+set "TRANSLATE="
 
 echo ============================================
 echo   hayamimi - realtime subtitles

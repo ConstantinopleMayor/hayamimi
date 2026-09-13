@@ -173,8 +173,8 @@ text stays unpunctuated, never lost).
 A transparent, always-on-top subtitle window that renders hayamimi's live
 captions straight onto your desktop — no OBS needed. The source line and
 its translation appear together, styled like broadcast captions (bold text,
-soft shadow, bilibili-style outline). Startup defaults: Chinese, bilingual
-display, 24pt.
+soft shadow, bilibili-style outline). Startup defaults: translation OFF
+(cycle the language button to EN/ZH/KO), bilingual display, 24pt.
 
 **Quickest start (no Node.js needed)**: download
 `hayamimi-subtitle-0.3.0-win-x64.zip` from [GitHub

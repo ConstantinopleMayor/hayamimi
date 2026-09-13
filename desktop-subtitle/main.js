@@ -231,9 +231,9 @@ function parseArgs() {
     textOpacity: 100, // subtitle text opacity in percent
     size: DEFAULT_SIZE,
     font: "",
-    lang: "zh", // match the .bat default translation (--translate zh)
+    lang: "off", // default: no translation (button cycles EN/ZH/KO/OFF)
     input: "mic", // capture source for the autostarted server (--input to override)
-    serveArgs: "--translate api:zh", // autostart server args (--serve-args to override)
+    serveArgs: "", // autostart server args (--serve-args to override); empty = no translation
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -345,7 +345,7 @@ function autoStartServer(o) {
 // serveArgs' --translate pair is replaced with translateSpec(lang), omitted
 // when the button is OFF.
 function serverSpawnArgs(applyButtonState) {
-  const raw = String((opts && opts.serveArgs) || "--translate api:zh").split(/\s+/).filter(Boolean);
+  const raw = String((opts && opts.serveArgs) || "").split(/\s+/).filter(Boolean);
   const kept = [];
   for (let i = 0; i < raw.length; i++) {
     const a = raw[i];
@@ -512,7 +512,7 @@ function buildUrl(base, show) {
 let win = null;
 let opts = null;
 let passthrough = false;
-let lang = "zh"; // default matches the .bat (--translate zh)
+let lang = "off"; // default: no translation (button cycles EN/ZH/KO/OFF)
 let audioInput = "mic"; // capture source (mic/speaker/mix); switching restarts the server
 let serverBusy = false; // audio-source restart in flight: button shows ⏳, re-entry blocked
 let mode = "both";  // "both" = bilingual rows, "tr" = translation only
@@ -1300,12 +1300,12 @@ app.whenReady().then(() => {
   apiAvailable = detectApiConfig();
   if (apiAvailable) { diag("api config present: API channel enabled"); }
   else { diag("no usable openai_translate.json: API channel disabled"); }
-  // Default the CHANNEL to whatever the launcher does: the .bat starts the
-  // server with --translate api:zh when a config exists, so the API channel
-  // must be active in the UI from the start too -- otherwise the button says
-  // 本地 while the server actually translates via the API (which accepts ANY
-  // source language), which is exactly the "本地 mode translated non-Japanese"
-  // confusion. Without a config, apiAvailable=false -> apiMode=false -> local.
+  // Default the CHANNEL to whatever the launcher does: translation now
+  // starts OFF (the .bat defaults to empty --translate and so does this
+  // window), so the channel preference only matters once the user turns
+  // translation on. With a usable config the API channel is the default
+  // (matches the documented api:zh launcher setup); without one,
+  // apiAvailable=false -> apiMode=false -> local.
   apiMode = apiAvailable;
   mode = MODES.includes(opts.mode) ? opts.mode : "both"; // (--mode arg if ever given)
   bg = Number.isInteger(opts.bg) && opts.bg >= 0 && opts.bg <= 60 ? opts.bg : 1;
