@@ -147,7 +147,7 @@ const BG_MENU_CHOICES = [0, 1, ...BG_CHOICES.filter((v) => v !== 0)]; // menu ti
 // the top strip (NOT centered): centering made the sliders drift when the
 // window width changed mid-drag (the thumb slid under the cursor -> jitter).
 // Fixed left anchor keeps their screen position stable while dragging.
-const SLIDER_X0 = 176;              // first slider's left (after the 5-button band)
+const SLIDER_X0 = 208;              // first slider's left (after the 6-button band)
 const SLIDER_W = 120;               // single slider width
 const SLIDER_GAP = 20;              // gap between the two sliders
 // Window-width slider range (px). Native edge-drag resize is unavailable on
@@ -168,9 +168,26 @@ const MIN_WIN_H = BTN_Y0 + BTN_S + BAND_PAD + 8; // 48px
 // the native resize border, so it was removed entirely.)
 
 // API/本地 translation channel toggle button sits to the RIGHT of the
-// language button; the display-mode button sits next to it. The pass-through
-// keep-clickable band counts 5 buttons now.
-const NBUTTONS = 5;
+// language button; the display-mode button sits next to it, and the audio
+// source button (🎤/🔊/🎤🔊) right of the mode button. The pass-through
+// keep-clickable band counts 6 buttons now.
+const NBUTTONS = 6;
+
+// Audio capture source, fixed at server STARTUP (realtime_transcribe.py picks
+// the backend from --input), so switching it RESTARTS the server:
+// kill -> respawn with the new --input -> the page's EventSource reconnects
+// on its own. speaker/mix need Windows WASAPI loopback (pip install
+// soundcard); mic works everywhere.
+const INPUTS = ["mic", "speaker", "mix"];
+const INPUT_LABEL = { mic: "🎤", speaker: "🔊", mix: "🎤🔊" };
+const INPUT_NAME = { mic: "麦克风", speaker: "系统音频", mix: "麦克风+系统音频" };
+// Audio button tooltip. The 当前 part must follow audioInput, so
+// setPageButtons() re-applies it after every switch (the injected title was
+// a one-time snapshot -- the "still says 麦克风 after switching" bug).
+function inputTitle() {
+  if (serverBusy) return "正在重启识别引擎…";
+  return "切换音频源 (当前: " + (INPUT_NAME[audioInput] || "麦克风") + "): 🎤麦克风 → 🔊系统音频 → 🎤🔊两者，引擎重启约15-30秒";
+}
 
 // True when a usable openai_translate.json exists next to this app (i.e. the
 // server can serve `api:` targets). Keeps the API button inert otherwise.
@@ -215,6 +232,7 @@ function parseArgs() {
     size: DEFAULT_SIZE,
     font: "",
     lang: "zh", // match the .bat default translation (--translate zh)
+    input: "mic", // capture source for the autostarted server (--input to override)
     serveArgs: "--translate api:zh", // autostart server args (--serve-args to override)
   };
   for (let i = 0; i < args.length; i++) {
@@ -246,7 +264,10 @@ function parseArgs() {
       if (["final", "partial", "both"].includes(v)) opts.show = v;
     }     else if (a === "--passthrough") opts.passthrough = true;
     else if (a === "--url") opts.url = args[++i] || opts.url;
-    else if (a === "--serve-args") opts.serveArgs = args[++i] || opts.serveArgs;
+    else if (a === "--input") {
+      const v = args[++i] || "mic";
+      opts.input = INPUTS.includes(v) ? v : "mic";
+    } else if (a === "--serve-args") opts.serveArgs = args[++i] || opts.serveArgs;
   }
   if (!LANGS.includes(opts.lang)) opts.lang = "zh";
   return opts;
@@ -312,30 +333,175 @@ function autoStartServer(o) {
       diag("server already up; not spawning");
       return;
     }
-    const root = findProjectRoot(launchDir());
-    if (!root) {
-      diag("project root not found near exe; skipping server autostart");
+    spawnServer(false);
+  });
+}
+
+// Spawn argv for the transcribe server. serveArgs (the user's --serve-args
+// string) always loses any --input pair: the exe's own --input / the audio
+// button state (audioInput) is the single source of truth. When
+// applyButtonState is true (restart triggered by the audio button) the
+// current translation button state also wins over the launcher default:
+// serveArgs' --translate pair is replaced with translateSpec(lang), omitted
+// when the button is OFF.
+function serverSpawnArgs(applyButtonState) {
+  const raw = String((opts && opts.serveArgs) || "--translate api:zh").split(/\s+/).filter(Boolean);
+  const kept = [];
+  for (let i = 0; i < raw.length; i++) {
+    const a = raw[i];
+    const spaceForm = a === "--input" || (applyButtonState && a === "--translate");
+    const eqForm = a.startsWith("--input=") || (applyButtonState && a.startsWith("--translate="));
+    if (spaceForm || eqForm) {
+      if (spaceForm && raw[i + 1] && !raw[i + 1].startsWith("--")) i++; // eat the value
+      continue;
+    }
+    kept.push(a);
+  }
+  const args = [path.join("scripts", "realtime_transcribe.py"), "--serve", "8833"];
+  if (audioInput !== "mic") args.push("--input", audioInput);
+  if (applyButtonState) {
+    const spec = translateSpec(lang);
+    if (spec) args.push("--translate", spec);
+  }
+  return args.concat(kept);
+}
+
+function spawnServer(applyButtonState) {
+  const root = findProjectRoot(launchDir());
+  if (!root) {
+    diag("project root not found near exe; skipping server autostart");
+    return false;
+  }
+  const py = path.join(root, ".venv", "Scripts", "python.exe");
+  const args = serverSpawnArgs(applyButtonState);
+  try {
+    const outFd = fs.openSync(path.join(app.getPath("temp"), "hayamimi-serve.log"), "a");
+    const errFd = fs.openSync(path.join(app.getPath("temp"), "hayamimi-serve.err.log"), "a");
+    const child = spawn(py, args, {
+      cwd: root,
+      windowsHide: true,
+      stdio: ["ignore", outFd, errFd],
+    });
+    spawnedServerPid = child.pid;
+    diag("server spawned pid=" + child.pid + " args=" + args.join(" "));
+    child.on("exit", (code) => diag("spawned server exited code=" + code));
+    return true;
+  } catch (e) {
+    diag("server spawn FAILED: " + e.message);
+    return false;
+  }
+}
+
+// Stop every transcribe server python -- 停止早耳.bat semantics:
+// unconditional, only command lines matching "realtime_transcribe" are
+// killed (other pythons, e.g. MCP servers, are left alone). Shared by
+// before-quit and the audio-source restart. Synchronous execFileSync: an
+// async spawn would still be starting the powershell when Electron exits,
+// and the kill never lands (observed).
+function serverKillSync() {
+  try {
+    execFileSync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-Command",
+        "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.CommandLine -match 'realtime_transcribe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+      ],
+      { windowsHide: true, stdio: "ignore", timeout: 8000 }
+    );
+    diag("server kill: transcribe servers stopped");
+  } catch (e) {
+    diag("server kill FAILED: " + e.message);
+  }
+}
+
+// Switch the capture source: kill the server, wait for the port to free,
+// respawn with the new --input (+ current button translation state), then
+// replay the translation spec over HTTP once the API answers. The overlay
+// page never reloads (the EventSource in it just reconnects); subtitles
+// pause while the engine reloads its models (~15-30 s).
+function restartServerForInput(next) {
+  if (serverBusy) {
+    diag("restart: already in progress; ignoring " + next);
+    return;
+  }
+  if (!INPUTS.includes(next) || next === audioInput) return;
+  const prev = audioInput;
+  diag("restart: audio source " + prev + " -> " + next);
+  audioInput = next;
+  serverBusy = true;
+  setPageButtons();
+  serverKillSync();
+  const freed = Date.now() + 15000;
+  const waitDown = () => probeServer(800, (up) => {
+    if (!up) return reviveServer(prev);
+    if (Date.now() > freed) {
+      diag("restart: port never freed; keeping " + prev);
+      audioInput = prev;
+      serverBusy = false;
+      setPageButtons();
       return;
     }
-    const py = path.join(root, ".venv", "Scripts", "python.exe");
-    const args = [path.join("scripts", "realtime_transcribe.py"), "--serve", "8833"].concat(
-      String(o.serveArgs || "--translate api:zh").split(/\s+/).filter(Boolean)
-    );
-    try {
-      const outFd = fs.openSync(path.join(app.getPath("temp"), "hayamimi-serve.log"), "a");
-      const errFd = fs.openSync(path.join(app.getPath("temp"), "hayamimi-serve.err.log"), "a");
-      const child = spawn(py, args, {
-        cwd: root,
-        windowsHide: true,
-        stdio: ["ignore", outFd, errFd],
-      });
-      spawnedServerPid = child.pid;
-      diag("server spawned pid=" + child.pid + " args=" + args.join(" "));
-      child.on("exit", (code) => diag("spawned server exited code=" + code));
-    } catch (e) {
-      diag("server spawn FAILED: " + e.message);
-    }
+    setTimeout(waitDown, 500);
   });
+  waitDown();
+}
+
+function reviveServer(prev) {
+  if (!spawnServer(true)) {
+    audioInput = prev;
+    serverBusy = false;
+    setPageButtons();
+    return;
+  }
+  const back = Date.now() + 90000; // int8 300M model + workers can take a while
+  const waitUp = () => probeServer(800, (up) => {
+    if (up) {
+      serverBusy = false;
+      setPageButtons();
+      diag("restart: server back up; replaying translation state");
+      replayTranslation(10);
+      return;
+    }
+    if (Date.now() > back) {
+      serverBusy = false;
+      setPageButtons();
+      diag("restart: server did not come back within 90s");
+      return;
+    }
+    setTimeout(waitUp, 700);
+  });
+  waitUp();
+}
+
+// The server's /api/translate callback is registered while models load, so
+// early POSTs fail or answer ok:false -- retry until it acks. The respawn
+// already carries --translate; this is the belt confirming button == server.
+function replayTranslation(attempts) {
+  const spec = translateSpec(lang);
+  fetch(`http://localhost:${SERVER_PORT}/api/translate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ langs: spec }),
+  })
+    .then((r) => r.json())
+    .then((j) => {
+      if (j && j.ok) { diag("restart: translation replayed (" + (spec || "off") + ")"); return; }
+      if (attempts > 1) setTimeout(() => replayTranslation(attempts - 1), 2000);
+    })
+    .catch(() => {
+      if (attempts > 1) setTimeout(() => replayTranslation(attempts - 1), 2000);
+      else diag("restart: translation replay FAILED (server unreachable?)");
+    });
+}
+
+function cycleAudioInput() {
+  if (process.platform !== "win32") {
+    diag("audio switch needs Windows WASAPI loopback; staying on mic");
+    return;
+  }
+  const i = INPUTS.indexOf(audioInput);
+  restartServerForInput(INPUTS[(i + 1) % INPUTS.length]);
 }
 
 function buildUrl(base, show) {
@@ -347,6 +513,8 @@ let win = null;
 let opts = null;
 let passthrough = false;
 let lang = "zh"; // default matches the .bat (--translate zh)
+let audioInput = "mic"; // capture source (mic/speaker/mix); switching restarts the server
+let serverBusy = false; // audio-source restart in flight: button shows ⏳, re-entry blocked
 let mode = "both";  // "both" = bilingual rows, "tr" = translation only
 let bg = 1;         // subtitle-card backdrop opacity in percent (1% startup)
 let bold = true;    // bold subtitle text (source + translation flows; default ON)
@@ -407,6 +575,7 @@ function makeCss() {
   const lx2 = BTN_X0 + (BTN_S + BTN_GAP) * 2;
   const lx3 = BTN_X0 + (BTN_S + BTN_GAP) * 3;
   const lx4 = BTN_X0 + (BTN_S + BTN_GAP) * 4;
+  const lx5 = BTN_X0 + (BTN_S + BTN_GAP) * 5;
   // subtitle-card backdrop: only when bg > 0 does the block get a card
   // (a card shadow attempt was undone and reverted -- window shadows only
   // work with a native frame, so the card stays flush, no inset/shadow).
@@ -492,6 +661,8 @@ function makeCss() {
                  font-size:11px;}
     #hmy-mode-btn{left:${lx4}px;font-family:'Segoe UI',sans-serif;font-weight:600;
                   font-size:11px;}
+    #hmy-audio-btn{left:${lx5}px;font-size:12px;}
+    #hmy-audio-btn.on{background:rgba(40,90,60,0.8);border-color:rgba(150,255,180,0.55);}
     /* top-right window controls: minimize (─) and close (✕) */
     #hmy-min-btn{right:${RBX + BTN_S + BTN_GAP}px;}
     #hmy-close-btn{right:${RBX}px;}
@@ -572,6 +743,11 @@ function makeInitJs() {
       console.log('hmy: btn-mode-click');
       window.desktopSubtitle.toggleMode();
     });
+    var audioBtn = mkBtn('hmy-audio-btn', '${INPUT_LABEL[audioInput] || "🎤"}', ${JSON.stringify(inputTitle())});
+    audioBtn.addEventListener('click', function(){
+      console.log('hmy: btn-audio-click');
+      window.desktopSubtitle.cycleInput();
+    });
     var minBtn = mkBtn('hmy-min-btn', '─', '最小化窗口');
     minBtn.addEventListener('click', function(){
       console.log('hmy: btn-min-click');
@@ -611,6 +787,7 @@ function makeInitJs() {
     document.body.appendChild(langBtn);
     document.body.appendChild(apiBtn);
     document.body.appendChild(modeBtn);
+    document.body.appendChild(audioBtn);
     document.body.appendChild(minBtn);
     document.body.appendChild(closeBtn);
     document.body.appendChild(bgSlider);
@@ -798,6 +975,12 @@ function setPageButtons() {
         }
         var md=document.getElementById('hmy-mode-btn');
         if(md){ md.textContent = ${JSON.stringify(MODE_LABEL[mode])}; }
+        var ab=document.getElementById('hmy-audio-btn');
+        if(ab){
+          ab.textContent = ${JSON.stringify(serverBusy ? "⏳" : (INPUT_LABEL[audioInput] || "🎤"))};
+          ab.className = 'hmy-btn' + (${JSON.stringify(audioInput === "mic" ? "" : " on")});
+          ab.title = ${JSON.stringify(inputTitle())};
+        }
       })();`
     )
     .catch(() => {});
@@ -1110,6 +1293,7 @@ function showMenu() {
 app.whenReady().then(() => {
   opts = parseArgs();
   lang = opts.lang;
+  audioInput = opts.input; // before autoStartServer: serverSpawnArgs reads it
   autoStartServer(opts); // exe-as-bat: spawn server if not already up (async)
 
   // API-translation availability: a usable openai_translate.json in the
@@ -1146,6 +1330,7 @@ app.whenReady().then(() => {
   ipcMain.on("hmy:cycle-lang", () => { diag("IPC: cycle-lang"); cycleLang(); });
   ipcMain.on("hmy:cycle-api", () => { diag("IPC: cycle-api"); cycleApi(); });
   ipcMain.on("hmy:toggle-mode", () => { diag("IPC: toggle-mode"); applyMode(mode === "both" ? "tr" : "both"); });
+  ipcMain.on("hmy:cycle-input", () => { diag("IPC: cycle-input"); cycleAudioInput(); });
   ipcMain.on("hmy:minimize", () => { diag("IPC: minimize"); if (win && !win.isDestroyed()) win.minimize(); });
   ipcMain.on("hmy:close", () => { diag("IPC: close"); app.quit(); });
   ipcMain.on("hmy:set-bg", (_e, v) => { diag("IPC: set-bg " + v); applyBg(parseInt(v, 10)); });
@@ -1257,23 +1442,8 @@ app.on("before-quit", () => {
   // already running (someone started it first, then opened this window).
   // Only processes whose command line matches "realtime_transcribe" are
   // killed -- other pythons (MCP servers, etc.) are left alone.
-  // Synchronous execFileSync: an async spawn would still be starting the
-  // powershell when Electron exits, and the kill never lands (observed).
   diag("before-quit: stopping transcribe servers (停止早耳.bat semantics)");
-  try {
-    execFileSync(
-      "powershell",
-      [
-        "-NoProfile",
-        "-Command",
-        "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.CommandLine -match 'realtime_transcribe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
-      ],
-      { windowsHide: true, stdio: "ignore", timeout: 8000 }
-    );
-    diag("before-quit: servers stopped");
-  } catch (e) {
-    diag("before-quit server kill FAILED: " + e.message);
-  }
+  serverKillSync();
 });
 
 app.on("will-quit", () => {

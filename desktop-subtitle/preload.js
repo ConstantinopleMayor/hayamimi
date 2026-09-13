@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld("desktopSubtitle", {
   cycleLang: () => ipcRenderer.send("hmy:cycle-lang"),
   cycleApi: () => ipcRenderer.send("hmy:cycle-api"),
   toggleMode: () => ipcRenderer.send("hmy:toggle-mode"),
+  cycleInput: () => ipcRenderer.send("hmy:cycle-input"),
   minimize: () => ipcRenderer.send("hmy:minimize"),
   close: () => ipcRenderer.send("hmy:close"),
   setBgAlpha: (v) => ipcRenderer.send("hmy:set-bg", v),

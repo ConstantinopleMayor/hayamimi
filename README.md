@@ -196,6 +196,7 @@ Quickstart) — the exe replaces only the Node/Electron part.
 | ⚙ | settings menu: font, size, language, display mode, text style, backdrop, quit |
 | EN / ZH / KO / OFF | cycle the displayed translation language |
 | 双语 / 译文 | bilingual vs translation-only display |
+| 🎤 / 🔊 / 🎤🔊 | cycle the audio source (button right of 双语/译文): mic → speaker loopback → mic+speaker mix. Switching restarts the engine (~15–30 s of paused subtitles); 🔊/🎤🔊 are Windows-only |
 | API / 本地 | switch the translation channel |
 | top sliders | backdrop opacity (0–60%) and window width |
 | ─ / ✕ | minimize / quit |
