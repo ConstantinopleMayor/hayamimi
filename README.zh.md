@@ -88,7 +88,7 @@ python -m venv .venv
 
 透明、始终置顶的字幕窗，把 hayamimi 的实时字幕直接渲染在桌面上 —— 无需打开 OBS。原文与译文同屏两行，广播字幕风格（粗体、柔和阴影、B 站弹幕式描边）。启动默认：中文、双语显示、24pt。
 
-**最快方式（免 Node.js）**：从 [GitHub Releases](https://github.com/ConstantinopleMayor/hayamimi/releases) 下载 `早耳字幕-0.3.0-win.zip`，解压到 `hayamimi/` 项目目录内（如 `desktop-subtitle\`），双击 `早耳字幕\早耳字幕.exe`。exe 就是一站式启动器：
+**最快方式（免 Node.js）**：从 [GitHub Releases](https://github.com/ConstantinopleMayor/hayamimi/releases) 下载 `hayamimi-subtitle-0.3.0-win-x64.zip`，解压到 `hayamimi/` 项目目录内（如 `desktop-subtitle\`），双击 `早耳字幕\早耳字幕.exe`。exe 就是一站式启动器：
 
 - 启动时探测 `http://127.0.0.1:8833/`：服务器没在跑就自动定位项目根并以隐藏窗口拉起（日志 `%TEMP%\hayamimi-serve.log`）；已在运行则直接复用。
 - **关闭字幕窗（✕ / Esc / 菜单「退出字幕窗」）自动停止转写服务器** —— 只停命令行匹配 `realtime_transcribe` 的 python 进程，不影响其他 python 程序。

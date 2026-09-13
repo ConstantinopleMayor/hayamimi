@@ -128,7 +128,7 @@ soft shadow, bilibili-style outline). Startup defaults: Chinese, bilingual
 display, 24pt.
 
 **Quickest start (no Node.js needed)**: download
-`早耳字幕-0.3.0-win.zip` from [GitHub
+`hayamimi-subtitle-0.3.0-win-x64.zip` from [GitHub
 Releases](https://github.com/ConstantinopleMayor/hayamimi/releases),
 extract it somewhere inside the `hayamimi/` project folder (e.g.
 `desktop-subtitle\`), and double-click `早耳字幕\早耳字幕.exe`. The exe is

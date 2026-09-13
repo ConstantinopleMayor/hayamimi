@@ -19,7 +19,8 @@
       "output": "dist"
     },
     "win": {
-      "target": "zip"
+      "target": "zip",
+      "artifactName": "hayamimi-subtitle-${version}-win-${arch}.${ext}"
     },
     "npmRebuild": false
   },
