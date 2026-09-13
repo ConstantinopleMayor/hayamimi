@@ -592,6 +592,11 @@ def test_transcribe_bootstrap_zh_yue_reuses_single_sv_probe_decode():
         # keeps checking whatever the real guard checks.
         _closed = False
         _check_open = asr_engine.RoutedASR._check_open
+        # postprocessing order (ITN -> ko spacer -> punct -> --replace last)
+        # reads these on the stub surface; None disables each stage.
+        _itn_overrides = asr_engine.itn_cjk.EMPTY_OVERRIDES
+        ko_spacer = None
+        punct = None
 
         def _decode_full(self, rec, samples, sample_rate):
             nonlocal call_count
@@ -889,6 +894,7 @@ def _omni_safety_net_stub(omni_available: bool):
         # keeps checking whatever the real guard checks.
         _closed = False
         _check_open = asr_engine.RoutedASR._check_open
+        _itn_overrides = asr_engine.itn_cjk.EMPTY_OVERRIDES
         ko_spacer = None
         punct = None
 

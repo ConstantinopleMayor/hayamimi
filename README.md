@@ -159,6 +159,13 @@ python -m venv .venv
 substituting a different zh model breaks this — see
 `docs/ASR_MODELS.md`.
 
+Final zh output runs a fixed postprocessing chain, same as ja:
+CJK kanji-numeral ITN (`scripts/itn_cjk.py`, ja/zh/yue) → punctuation
+restoration (ja `punct_ja.py` / zh `punct_zh.py`, the sherpa-onnx
+CT-Transformer int8 model ~72MB, fetched by `download_models.py`) →
+user `--replace` last. A missing punct model degrades quietly (final
+text stays unpunctuated, never lost).
+
 ## Desktop subtitle window (`desktop-subtitle/`)
 
 ![desktop subtitle](docs/images/desktop-subtitle.png)

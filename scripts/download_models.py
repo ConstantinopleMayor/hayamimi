@@ -233,6 +233,16 @@ def main():
         "sherpa-onnx-paraformer-zh-2024-03-09",
         "Paraformer-zh (zh ASR) -- Mandarin bilingual zh+en build")
 
+    # Chinese/English punctuation (CT-Transformer, int8): only model.int8.onnx
+    # is needed by punct_zh.py; the fp32 export (model.onnx, ~281MB) exists
+    # upstream but we intentionally skip it.
+    extract_members_only(
+        f"{GITHUB_RELEASES}/punctuation-models/"
+        "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8.tar.bz2",
+        "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8",
+        {"model.int8.onnx"},
+        "Chinese/English punctuation (CT-Transformer zh-en, int8 only)")
+
     # IMPORTANT: must be the 2024-07-17 export. The newer 2025-09-09 export
     # was found broken during development (see docs/BENCHMARKS.md) -- do not
     # substitute it.

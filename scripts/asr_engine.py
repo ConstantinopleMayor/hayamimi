@@ -22,6 +22,7 @@ import time
 import numpy as np
 import sherpa_onnx
 
+import itn_cjk
 from zh_digit import restore_zh_digits
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
@@ -512,11 +513,13 @@ class RoutedASR:
         self._max_resident = max_resident
         self._punctuate = punctuate
         self._punct = None
+        self._punct_zh = None
         self._ko_spacer = None
         self._ko_spacer_ok = True
         self._hotwords_file = hotwords_file
         self._warn_hotwords_encodability(hotwords_file)
         self._replacements = _load_replacements(replace_file)
+        self._itn_overrides = itn_cjk.EMPTY_OVERRIDES
         self._load_lock = threading.Lock()  # punct + registry bookkeeping
         self._model_locks = {name: threading.Lock() for name in _BUILDERS}
         # close() bookkeeping. Set before ANY thread is started below (the
@@ -697,6 +700,21 @@ class RoutedASR:
                     except Exception:
                         self._punctuate = False  # missing model/deps: degrade quietly
         return self._punct
+
+    @property
+    def punct_zh(self):
+        """Chinese/English punctuation restorer (CT-Transformer ONNX);
+        None if unavailable."""
+        if self._punct_zh is None and self._punctuate:
+            with self._load_lock:
+                if self._punct_zh is None:
+                    try:
+                        from punct_zh import PunctuatorZh
+
+                        self._punct_zh = PunctuatorZh()
+                    except Exception:
+                        self._punctuate = False  # missing model/deps: degrade quietly
+        return self._punct_zh
 
     @property
     def ko_spacer(self):
@@ -903,6 +921,41 @@ class RoutedASR:
             text = restore_zh_digits(text)
         return text
 
+    def set_replacements(self, mapping: dict) -> None:
+        """Replace the postprocessing find/replace dictionary at runtime.
+
+        Thread-safe via a single atomic swap: the incoming dict is
+        converted to a tuple of pairs and assigned wholesale, so any
+        in-flight _replace() call sees either the old list or the new one,
+        never a partially-updated one (plain attribute assignment is a
+        single pointer store under the GIL -- no lock needed). Callers pass
+        the FULL desired mapping; this is a replace, not a merge, matching
+        how the --replace file is loaded once at init.
+
+        User replacements are always applied LAST in the postprocessing
+        order -- see the docstring in itn_cjk.py and the ordering comment
+        in transcribe() -- so this can override anything ITN or
+        punctuation restoration produced.
+        """
+        self._replacements = tuple(mapping.items())
+
+    def set_itn_overrides(self, exclude: set | None = None,
+                          force: dict | None = None) -> None:
+        """Replace the user-level CJK ITN overrides at runtime.
+
+        Same atomic-swap pattern as set_replacements: a fresh itn_cjk
+        override snapshot is built and assigned in one step. `exclude` is
+        ADDED to itn_cjk's built-in idiom/proper-noun exclusions (never
+        replaces them); `force` mappings win over rule-based ITN output
+        for any matching literal text. Precedence overall: user
+        force/exclude > built-in ITN rules > punctuation > user
+        --replace/set_replacements (applied last of all).
+        """
+        self._itn_overrides = itn_cjk.ITNOverrides(
+            exclude=frozenset(exclude or ()),
+            force=dict(force or {}),
+        )
+
     def identify(self, samples: np.ndarray, sample_rate: int) -> str:
         """Public LID hook so callers can identify the language mid-utterance.
 
@@ -1098,7 +1151,13 @@ class RoutedASR:
                 if text2.strip():
                     lang, tier, text = corrected, tier2, text2
 
-        text = self._replace(text, lang == "zh")
+        # Fixed postprocessing order (see itn_cjk.py's module docstring):
+        #   CJK ITN -> punctuation restore (ja/zh) -> user --replace, applied
+        # LAST so it can always override anything the earlier stages produced.
+        if lang in itn_cjk.APPLICABLE_LANGS and text.strip():
+            overrides = self._itn_overrides
+            text = itn_cjk.convert(text, lang, exclude=overrides.exclude,
+                                   force=overrides.force)
         if lang == "ko" and text.strip() and self.ko_spacer is not None:
             try:
                 # SenseVoice emits a space between every token; Kiwi restores
@@ -1111,6 +1170,15 @@ class RoutedASR:
                 text = self.punct.restore(text)
             except Exception:
                 pass  # a punctuation failure must never lose the transcription
+        if lang == "zh" and text.strip() and self.punct_zh is not None:
+            try:
+                # Paraformer-zh emits no punctuation; restore 、。？！ like
+                # SenseVoice's partial drafts do (user report: finals lost
+                # the punctuation the 0-2s draft had).
+                text = self.punct_zh.restore(text)
+            except Exception:
+                pass  # a punctuation failure must never lose the transcription
+        text = self._replace(text, lang == "zh")
         decode_ms = (time.perf_counter() - t0) * 1000
 
         if live and text.strip() and not suppress_bootstrap_seed:

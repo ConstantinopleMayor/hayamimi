@@ -61,6 +61,10 @@ _RE = re.compile(
 _PCT_RE = re.compile(
     r"百分之([" + _NUM_CHARS + r"]+)(?:点([" + _FRAC_CHARS + r"]+))?"
 )
+# itn_cjk runs BEFORE zh_digit (postprocessing order: ITN -> punct ->
+# --replace last), so a "百分之" that already went through itn_cjk carries
+# ARABIC digits (百分之17, 百分之3.5): both forms must collapse to "17%".
+_PCT_AR_RE = re.compile(r"百分之(\d+)(?:\.(\d+))?")
 
 
 def _parse_int(s: str) -> int:
@@ -206,11 +210,19 @@ def _repl(m: re.Match) -> str:
     return prefix + num + (unit or "")
 
 
+def _pct_ar_repl(m: re.Match) -> str:
+    main, frac = m.group(1), m.group(2)
+    if frac:
+        return f"{main}.{frac}%"
+    return f"{main}%"
+
+
 def restore_zh_digits(text: str) -> str:
     """Restore Chinese digit phrases to Arabic digits (conservative)."""
     if not text or not re.search("[" + _NUM_CHARS + "]", text):
         return text
     s = _PCT_RE.sub(_pct_repl, text)
+    s = _PCT_AR_RE.sub(_pct_ar_repl, s)  # itn_cjk may have pre-converted to Arabic
     return _RE.sub(_repl, s)
 
 
