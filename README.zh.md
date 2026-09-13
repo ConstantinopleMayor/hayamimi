@@ -28,6 +28,7 @@ English README → [README.md](README.md) / 日本語版 → [README.ja.md](READ
 | 热词/用户词典 | `--hotwords` 向解码注入专有名词偏好（当前对 ja 路由无效，见 Limitations）；`--replace` 做事后查找替换，全路由生效 |
 | OBS 覆盖层 + 仪表盘 | `--serve` 启动本地 HTTP 服务器，提供浏览器源覆盖层与实时仪表盘 |
 | 网络音频输入 | `--input ws` 接受经 WebSocket 传来的麦克风音频（手机、ESP32/stackchan 等），走同一流水线，包括仪表盘/覆盖层 |
+| 扬声器回环输入 | `--input speaker` 转写电脑正在外放的声音（WASAPI 回环，仅限 Windows，无需声卡"立体声混音"设置）；`--input mix` 把麦克风与外放混成一路（如会议转写） |
 | 内存有界 | LRU 模型淘汰策略让常驻模型保持在可配置上限内（默认总内存 <2GB） |
 | 纯 CPU | 所有模型均经 sherpa-onnx 以量化 ONNX 运行；无需 GPU 或 PyTorch |
 
@@ -52,6 +53,34 @@ English README → [README.md](README.md) / 日本語版 → [README.ja.md](READ
 
 协议：连接 `/ingest`，发送一条 JSON 文本帧（`{"sr": 16000, "format": "pcm_s16le", "channels": 1}`），然后以二进制帧串流原始 `pcm_s16le` 音频。服务器会重采样非 16kHz 音频，以仪表盘 SSE 流相同的 partial/final/translation/refine JSON 事件应答，客户端可据此自行显示字幕。同一时刻只接受一个音频生产客户端；`scripts/ws_mic_client.py` 是无依赖参考客户端（按实时节奏串流一个 wav 文件），也可作为手机/ESP32 实现模板。
 
+## 扬声器（系统外放）回环输入
+
+`--input speaker` 不采集麦克风，而是转写电脑音频输出上正在播放的内容——
+通话对面的声音、视频等；`--input mix` 则把麦克风与外放声音混成一路转写，
+适合会议记录（你的声音 + 通话声音一起出字幕）：
+
+```bash
+.venv\Scripts\python scripts\realtime_transcribe.py --input speaker
+.venv\Scripts\python scripts\realtime_transcribe.py --input mix
+```
+
+底层是 `soundcard` 包的 WASAPI 回环：直接挂到渲染端点上，和传统"立体声
+混音"录音设备不同，无需在 Windows 声音设置里手动启用，声卡驱动不提供
+"立体声混音"也能用。**仅限 Windows**（其他平台暂未接入回环路径）。
+
+`mix` 按采集时间戳对齐（约 48ms 容差）后再相加并截幅到 [-1, 1]，以麦克风
+时钟为主；解码跟不上时两边队列都丢旧数据、尽快追平实时。扬声器采集失败
+会在 stderr 报告并退化为纯麦克风；麦克风失败则终止整路。注意这是**单路
+混合转写**，不做分轨，也没有声学回声消除——请戴耳机，避免通话声音被
+录到两次。
+
+两种模式默认都用系统的默认输入/输出设备。有多块声卡/麦克风时，
+`--list-audio-devices` 可列出全部设备，再用 `--mic-device NAME` /
+`--speaker-device NAME`（子串匹配）指定。远程桌面会话里，本机物理麦克风
+通常根本无法打开（Windows 禁止跨会话访问）——请在 RDP 客户端开启麦克风
+重定向（`mstsc`：显示选项 > 本地资源 > 远程音频 > 记录 > "从这台计算机
+录音"），或直接在本机控制台运行 hayamimi。
+
 ## 环境要求
 
 Python 3.10+，系统中可调用 ffmpeg。已在 **Windows 11** 上开发与测试；macOS/Linux 预期可用（运行时均跨平台），但尚未端到端 CI 验证 —— 欢迎反馈。
@@ -72,6 +101,12 @@ python -m venv .venv
 # 麦克风实时转写
 .venv/Scripts/python scripts/realtime_transcribe.py     # Windows
 .venv/bin/python scripts/realtime_transcribe.py          # macOS/Linux
+
+# 改转电脑外放的声音（通话、视频）-- 仅限 Windows
+.venv\Scripts\python scripts\realtime_transcribe.py --input speaker
+
+# 麦克风 + 外放一起转写（如会议记录）
+.venv\Scripts\python scripts\realtime_transcribe.py --input mix
 
 # 带仪表盘 + OBS 覆盖层
 .venv/Scripts/python scripts/realtime_transcribe.py --serve
@@ -177,7 +212,10 @@ npm run dist           # 重新构建发行 zip 到 dist/
 |---|---|---|
 | `--wav PATH` | 麦克风输入 | 改从 16kHz 单声道 WAV 文件模拟流式输入 |
 | `--no-realtime` | 关 | 搭配 `--wav` 时不按实时节奏播（快速批处理） |
-| `--input {mic,wav,ws}` | mic 或 wav | 音频来源；`ws` 接受网络音频 |
+| `--input {mic,wav,ws,speaker,mix}` | mic 或 wav | 音频来源；`ws` 接受网络音频；`speaker` 转写电脑外放（WASAPI 回环，仅 Windows）；`mix` 麦克风+外放混成一路 |
+| `--mic-device NAME` | 系统默认输入 | `--input mic`/`mix` 所用输入设备的子串匹配；设备列表见 `--list-audio-devices` |
+| `--speaker-device NAME` | 系统默认输出 | `--input speaker`/`mix` 所用输出设备的子串匹配；设备列表见 `--list-audio-devices` |
+| `--list-audio-devices` | 关 | 列出全部音频设备后退出 |
 | `--serve [PORT]` | 关，8833 | 启动仪表盘 + OBS 覆盖层 |
 | `--translate [LANGS]` | 关，en | 把识别出的行翻译成这些逗号分隔的语言。普通代码走本地模型（en 走 FuguMT ja->en；其余任意 M2M-100 目标代码如 zh/ko/es/fr，模型词表支持即可）；`api:zh` / `api:en,ko` / 裸 `api` 走 `openai_translate.json`（或 `--api-config`）配置的 OpenAI 兼容端点，翻译任意源语言 |
 | `--speakers` | 关 | 以 S1/S2/... 标记话语说话人 |
