@@ -1,6 +1,6 @@
 # hayamimi (早耳)
 
-[![tests](https://github.com/oboroge0/hayamimi/actions/workflows/test.yml/badge.svg)](https://github.com/oboroge0/hayamimi/actions/workflows/test.yml) [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![release](https://img.shields.io/github/v/release/oboroge0/hayamimi)](https://github.com/oboroge0/hayamimi/releases)
+[![tests](https://github.com/ConstantinopleMayor/hayamimi/actions/workflows/test.yml/badge.svg)](https://github.com/ConstantinopleMayor/hayamimi/actions/workflows/test.yml) [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![release](https://img.shields.io/github/v/release/ConstantinopleMayor/hayamimi)](https://github.com/ConstantinopleMayor/hayamimi/releases)
 
 **CPUだけで動くリアルタイム多言語音声認識。** GPUもクラウドAPIも使わず、メモリ2GB未満で、
 ライブ字幕からブラウザ表示、話者ラベル、翻訳字幕まで動きます。
@@ -51,8 +51,6 @@ CPUだけでリアルタイム音声認識をやろうとすると、普通はWh
 - **`http://localhost:8833/transcript`**: 清書トランスクリプトだけを流すページ。
 
 ![dashboard](docs/images/dashboard.png)
-
-🎬 **[デモ動画を見る](https://github.com/oboroge0/hayamimi/releases/download/v0.1.0/hayamimi_demo.mp4)**: 実際の4言語音声（日英韓中）を文字起こししたときの記録を、そのまま再生した動画です。
 
 ## ネットワーク音声入力
 

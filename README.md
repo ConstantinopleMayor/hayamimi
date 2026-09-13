@@ -1,6 +1,6 @@
 # hayamimi (早耳)
 
-[![tests](https://github.com/oboroge0/hayamimi/actions/workflows/test.yml/badge.svg)](https://github.com/oboroge0/hayamimi/actions/workflows/test.yml) [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![release](https://img.shields.io/github/v/release/oboroge0/hayamimi)](https://github.com/oboroge0/hayamimi/releases)
+[![tests](https://github.com/ConstantinopleMayor/hayamimi/actions/workflows/test.yml/badge.svg)](https://github.com/ConstantinopleMayor/hayamimi/actions/workflows/test.yml) [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![release](https://img.shields.io/github/v/release/ConstantinopleMayor/hayamimi)](https://github.com/ConstantinopleMayor/hayamimi/releases)
 
 **Real-time, multilingual speech-to-text on CPU only.** Live subtitles, a
 browser dashboard, speaker labels, and on-the-fly translation -- no GPU, no
@@ -59,8 +59,6 @@ same clips, while running at 10-50x realtime on a 6-core desktop CPU.
 
 ![dashboard](docs/images/dashboard.png)
 
-🎬 **[Watch the demo video](https://github.com/oboroge0/hayamimi/releases/download/v0.1.0/hayamimi_demo.mp4)** — real 4-language audio (ja/en/ko/zh) transcribed live, replayed frame-accurately from a captured session.
-
 ## Network audio input
 
 `--input ws` runs a WebSocket ingest endpoint instead of reading the local
@@ -114,134 +112,81 @@ python -m venv .venv
 (ReazonSpeech, whisper-tiny, Silero VAD, Japanese punctuation). See
 `THIRD_PARTY_NOTICES.md` for what each model's license commits you to.
 
-**Chinese routing**: `asr_engine.py` sends `zh` to
-`sherpa-onnx-paraformer-zh-2024-03-09` (the Mandarin bilingual zh+en build,
-vocab8358): English words come out whole, and Chinese digits are restored
-by the pipeline (百分之十七 -> 17%). Do NOT substitute the
-`sherpa-onnx-paraformer-zh-int8-2025-10-07` fine-tune (四川话/川渝方言): it
-shreds unseen English into single spaced letters ("d e p c k") and writes
-digits as Chinese words ("4" -> 四). `download_models.py` fetches the
-correct model; `zh_digit.py` performs the digit restoration.
+**Chinese routing**: `zh` goes to the Mandarin bilingual paraformer build
+(English words stay whole, Chinese digits are restored to numerals);
+substituting a different zh model breaks this — see
+`docs/ASR_MODELS.md`.
 
 ## Desktop subtitle window (`desktop-subtitle/`)
 
-This fork adds a transparent, always-on-top **desktop subtitle window** that
-renders hayamimi's OBS overlay directly on your screen — no OBS required.
-It lives in `desktop-subtitle/` (an Electron app, separate from the Python
-server).
+![desktop subtitle](docs/images/desktop-subtitle.png)
 
-**Node-free exe one-click version**: run `npm run dist` inside
-`desktop-subtitle/` to build the single-file `早耳字幕-1.0.0.exe` (output in
-`dist/`). Double-clicking the exe ≈ running 启动早耳.bat + 停止早耳.bat:
+A transparent, always-on-top subtitle window that renders hayamimi's live
+captions straight onto your desktop — no OBS needed. The source line and
+its translation appear together, styled like broadcast captions (bold text,
+soft shadow, bilibili-style outline). Startup defaults: Chinese, bilingual
+display, 24pt.
+
+**Quickest start (no Node.js needed)**: download
+`早耳字幕-0.3.0-win.zip` from [GitHub
+Releases](https://github.com/ConstantinopleMayor/hayamimi/releases),
+extract it somewhere inside the `hayamimi/` project folder (e.g.
+`desktop-subtitle\`), and double-click `早耳字幕\早耳字幕.exe`. The exe is
+the whole launcher in one file:
+
 - On startup it probes `http://127.0.0.1:8833/`; if the server is not
-  running, it locates the project root by walking up from the exe's folder
-  and spawns the server hidden (`.venv\Scripts\python.exe
-  scripts\realtime_transcribe.py --serve 8833 --translate api:zh`; logs to
-  `%TEMP%\hayamimi-serve.log` / `.err.log`). For machines without an
-  OpenAI-compatible endpoint, use
-  `早耳字幕.exe --serve-args "--translate zh"` to switch to the local
-  models. An already-running server is reused as-is.
+  running it locates the project root and starts the server hidden (logs
+  to `%TEMP%\hayamimi-serve.log`). An already-running server is reused.
 - **Closing the window (✕ / Esc / menu quit) stops the transcribe server
-  automatically** — the 停止早耳.bat semantics: only python processes whose
-  command line matches `realtime_transcribe` are stopped, other pythons are
-  untouched.
-- The target machine only needs Python 3.10+, ffmpeg and the models (see
-  Quickstart) — **no Node.js/npm required**. Startup defaults: **Chinese
-  (`--lang zh`) + bilingual display (source + translation, `--mode both`)**.
+  again** — only `realtime_transcribe` python processes are touched, other
+  python programs are left alone.
+- Without an OpenAI-compatible translation endpoint, launch with
+  `早耳字幕.exe --serve-args "--translate zh"` to use the local MT models.
 
-**What it does**
+The machine still needs Python 3.10+, ffmpeg and the models (see
+Quickstart) — the exe replaces only the Node/Electron part.
 
-- Shows the live subtitles on your desktop (transparent background,
-  frameless, always on top, has a taskbar icon).
-- **Accumulating subtitle flow**: confirmed finals ACK accumulate on the
-  screen (several share the same line set, wrapping together), and each
-  confirmed segment — source plus its translation — keeps its own **8s
-  lifetime** before it is removed instantly (no fade). The in-progress
-  `partial` draft rides inline at the end of the flow while you speak.
-- Subtitle text flows top→bottom and the window **auto-fits its height**
-  to the content (a tiny 4px bottom margin; the window really hugs the
-  card — no dead scroll-swallowing strip below it).
-- **Display mode toggle**: a button switches between **双语** (bilingual /
-  built-in: source + translation stacked in two rows, default) and **仅译文**
-  (translation only — the source flow is hidden); also in the settings menu.
-- **Adjustable backdrop**: a rounded black card behind the text (the text
-  itself always stays opaque). It spans the WHOLE top strip — the button
-  row sits on top of the card, text starts 8px below the buttons — and an
-  empty card keeps exactly one-line height, so the card never shrinks above
-  the text. Opacity is set with the **top-center slider** (0–60%, 1-step
-  for fine tuning; the settings menu keeps a few common tiers). The startup
-  default is **1%** — a barely-there card. `--bg <0-60>` (`--mode tr`,
-  `--bold`) set startup defaults. The two sliders (backdrop opacity +
-  window width) sit side by side on the top strip, **left-anchored** so
-  they never drift while dragging.
-- **Window width**: a slider on the top strip adjusts the window width
-  500–1200px (step 10); the text re-wraps and the height keeps
-  auto-fitting. (This transparent/frameless window has no native resize
-  handles, so the slider drives it.)
-- **Bold text**: on by default (`字幕粗体` checkbox in the settings menu
-  toggles it; `--bold` is a no-op since ON is the default).
-- **Text style**: four settings-menu radio groups (startup defaults via
-  CLI args) style both flows. Startup defaults: **bold**, **标准阴影**,
-  **重墨**（细描边 off — 与重墨互斥）:
-  - **阴影** shadow — 无 / 标准（default, `--text-shadow std`, 1px glow +
-    0.5px core + 1px 1px drop）/ 增强 (`heavy`)
-  - **描边** thin outline — 无（default）/ 细描边 (`--text-stroke thin`,
-    hairline 0.15pt outside rim via 8-direction offset shadows — bilibili's
-    DOM technique; shadows stay OUTSIDE the glyph, never paint over the
-    letter interior like `-webkit-text-stroke` does; mutually exclusive with
-    重墨)
-  - **重墨** bilibili-style thick outline — 无 / 重墨（default,
-    `--text-ink on`, 8-direction 0.3pt rim + 0.2pt corner blur; same
-    outside-shadow technique, mutually exclusive with 描边)
-  - **文字透明度** text opacity — 100（default）/90/80/70/60%
-    (`--text-opacity <pct>`)
-- Buttons pinned at the top-left corner:
-  - **🔒 / 🔓** — toggle interactive drag vs click-through mode.
-  - **⚙** — settings menu (font size, font family, bold text, translation
-    language, display mode, backdrop opacity, click-through, quit).
-  - **EN / ZH / KO / OFF** — cycle the displayed translation language.
-  - **双语 / 译文** — toggle bilingual vs translation-only display.
-- Window controls pinned at the **top-right corner**: **─** minimizes the
-  window, **✕** quits the app.
-- **Context-aware translation**: with the API translator, each request
-  re-sends the last few confirmed (source, translation) pairs as reference
-  context — names, terminology and pronouns stay consistent across lines.
-  Partial drafts never enter it, and a long silence (default 60s, i.e. a
-  topic change) drops it. Tune with `context_n` (default 6, 0 = off) and
-  `context_timeout_s` in `openai_translate.json`.
-- In click-through mode the top-left button band, the slider band, and the
-  top-right window controls stay clickable (everything else passes
-  through).
-- Dragging is OS-native (`-webkit-app-region`): only the card and the top
-  strip drag the window (nothing below the card); no crosshair cursor is
-  shown. Because the window hugs the card, the area below it lies OUTSIDE
-  the window — the scroll wheel and clicks there fall through to the app
-  behind naturally.
+**In the window**
 
-**Setup & run**
+| Control | Action |
+|---|---|
+| 🔒 / 🔓 | toggle click-through (draggable vs pass-through) |
+| ⚙ | settings menu: font, size, language, display mode, text style, backdrop, quit |
+| EN / ZH / KO / OFF | cycle the displayed translation language |
+| 双语 / 译文 | bilingual vs translation-only display |
+| API / 本地 | switch the translation channel |
+| top sliders | backdrop opacity (0–60%) and window width |
+| ─ / ✕ | minimize / quit |
+| `Ctrl+Alt+D` / `Ctrl+Alt+L` / `Ctrl+Alt+M` | click-through / language / display mode |
+| `Esc` | quit (also stops the server) |
+
+- Confirmed lines accumulate on screen (each lives ~8s) with the
+  in-progress draft updating inline while you speak; the window auto-fits
+  its height to the text.
+- Text style — shadow, thin outline, bilibili-style thick outline (重墨),
+  text opacity, bold — is adjustable in the settings menu, and every
+  option has a matching CLI flag (`--text-shadow`, `--text-stroke`,
+  `--text-ink`, `--text-opacity`, `--bold`, `--bg`, `--mode`, `--lang`,
+  `--size`).
+- With the API translator, each request carries the last few confirmed
+  (source, translation) pairs as context, so names and terminology stay
+  consistent across lines (`context_n` / `context_timeout_s` in
+  `openai_translate.json`).
+
+**Developer mode** (needs Node.js):
 
 ```bash
 cd desktop-subtitle
-npm install            # installs Electron (devDependency)
-npm start              # opens the subtitle window
+npm install            # installs Electron + electron-builder
+npm start              # run from source
+npm run dist           # rebuild the release zip into dist/
 ```
 
-The server must be running with `--serve` (see Quickstart). The window loads
-`http://localhost:8833/` by default.
+The window loads `http://localhost:8833/` by default; the server must be
+running with `--serve` (see Quickstart) — or just let the exe start it.
 
-**Keyboard shortcuts**
-
-| Key | Action |
-|---|---|
-| `Ctrl+Alt+D` | toggle click-through |
-| `Ctrl+Alt+L` | cycle translation language |
-| `Esc` | quit the subtitle window |
-
-**Windows one-click launcher** (`desktop-subtitle/启动早耳.bat`)
-
-Double-click it and it starts (or re-uses) the hayamimi server with
-`--translate zh` by default, then opens the subtitle window. A matching
-`desktop-subtitle/停止早耳.bat` stops both.
+`desktop-subtitle/启动早耳.bat` + `停止早耳.bat` do the same server
+start/stop via scripts instead of the exe.
 
 ## Runtime translation hot-switch (no restart)
 
@@ -256,10 +201,8 @@ translated to **while the server is already running**:
    hot-swaps the active translators. This is exactly what the subtitle
    window's **EN/ZH/KO/OFF** button uses.
 
-Under the hood: `TranslationWorker` gained `set_langs()` (thread-safe swaps,
-no stale iteration), and `main()` always starts an empty worker so a later
-hot-switch works without a restart. Translators are still lazy-loaded on
-first use, so the first `translate ...` takes a few seconds to load models.
+Translators are lazy-loaded on first use, so the first `translate ...`
+takes a few seconds to load models.
 
 ## OpenAI-compatible API translation (`api:` targets)
 
@@ -304,12 +247,8 @@ The subtitle window's **API / 本地** button toggles the channel: when set to
 plain codes (local MT). Without a usable `openai_translate.json` the API
 button is greyed out and behavior is unchanged.
 
-Implementation notes: `scripts/translate_api.py` uses only the standard
-library (`urllib.request`) so no new dependency is required. The API
-translator is marked `IS_API = True`; the worker only feeds it lines whose
-detected source language it should translate, and never lets local ja-fixed
-translators touch non-ja source lines. Any API failure/timeout returns the
-source line unchanged (same non-blank guarantee as the local translators).
+Any API failure or timeout returns the source line unchanged — the same
+non-blank guarantee the local translators give.
 
 ## CLI reference
 
@@ -330,12 +269,12 @@ All flags are on `scripts/realtime_transcribe.py`:
 | `--serve [PORT]` | off, 8833 | serve the dashboard + OBS overlay at `http://localhost:PORT` |
 | `--no-refine` | off | disable the second-pass re-decode of utterance groups |
 | `--transcript PATH` | none | append refined transcript lines to this file |
-| `--hotwords PATH` | none | hotword list (one per line) to bias decoding toward proper nouns -- **currently has no effect on the ja tier** (ReazonSpeech's byte-level BPE tokens.txt can't encode them; a startup warning tells you how many failed). Use `--replace` for ja proper nouns instead |
+| `--hotwords PATH` | none | hotword list (one per line) to bias decoding toward proper nouns; currently no effect on the ja tier (use `--replace` there) |
 | `--replace PATH` | none | user dictionary: `wrong=right` per line, applied to all output |
-| `--lang-switch-guard SEC` | 2.0 | treat a new-language detection shorter than this as noise: it can never count toward confirming a switch (see `--lid-switch-confirm`) and it suppresses the omnilingual fallback on an empty decode (`0` disables) |
-| `--lid-switch-confirm N` | 2 | consecutive new-language detections (each >= `--lang-switch-guard` long) required before the session actually switches language; raise for stickier single-language sessions |
+| `--lang-switch-guard SEC` | 2.0 | ignore language detections shorter than this as noise (`0` disables) |
+| `--lid-switch-confirm N` | 2 | consecutive new-language detections needed before the session switches; raise for stickier sessions |
 | `--speakers` | off | label utterances with speaker ids (S1, S2, ...) |
-| `--translate [LANGS]` | off, `en` | translate the detected line to these comma-separated languages. Plain codes use the local models (`en` = FuguMT ja->en; any other M2M-100 target code like `zh`, `ko`, `es`, `fr` is accepted if the model's vocabulary supports it); `api:zh`, `api:en,ko` or bare `api` route through the OpenAI-compatible endpoint configured in `openai_translate.json` (or `--api-config`) and translate ANY detected source language. Local targets outside `zh`/`ko`/`es` print a quality-not-measured note, see docs/TRANSLATE_M2M.md |
+| `--translate [LANGS]` | off, `en` | translate the detected line to these comma-separated languages. Plain codes use the local models (en = FuguMT, others = M2M-100); `api:zh` / bare `api` route through the OpenAI-compatible endpoint in `openai_translate.json` and translate ANY source language |
 
 ## Architecture
 
