@@ -141,3 +141,18 @@ def test_zh_punct_model_golden_skip_if_missing():
         pytest.skip("zh punct model not downloaded (download_models.py)")
     out = p.restore("我们都是木头人不会说话不会动")
     assert "，" in out and out.endswith("。")
+
+
+def test_zh_replace_runs_digit_and_space_normalization():
+    # _replace's zh branch is the shared zh tail for finals AND drafts
+    # (partial() calls _replace directly): after the user dictionary and
+    # zh_digit, zh_space collapses Paraformer's ASCII token spacing.
+    class _Stub:
+        _replacements = ()
+
+    out = asr_engine.RoutedASR._replace(
+        _Stub(), "升级到了4 . 1 flash小一和g r m 5 . 3的状态似乎", zh=True)
+    assert out == "升级到了4.1flash小一和grm5.3的状态似乎"
+    # and zh=False (the ja/ko/en/yue path) must NOT touch the spacing
+    out_en = asr_engine.RoutedASR._replace(_Stub(), "released in 2024", zh=False)
+    assert out_en == "released in 2024"

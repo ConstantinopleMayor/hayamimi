@@ -163,8 +163,12 @@ Final zh output runs a fixed postprocessing chain, same as ja:
 CJK kanji-numeral ITN (`scripts/itn_cjk.py`, ja/zh/yue) → punctuation
 restoration (ja `punct_ja.py` / zh `punct_zh.py`, the sherpa-onnx
 CT-Transformer int8 model ~72MB, fetched by `download_models.py`) →
-user `--replace` last. A missing punct model degrades quietly (final
-text stays unpunctuated, never lost).
+user `--replace` last, whose zh branch also restores Chinese digit words
+(`zh_digit.py`) and collapses Paraformer's ASCII token spacing
+(`zh_space.py`: letters read out one by one come back glued — `g r m` →
+`grm`, `4 . 1` → `4.1`; multi-letter English words keep their spaces).
+A missing punct model degrades quietly (final text stays unpunctuated,
+never lost).
 
 ## Desktop subtitle window (`desktop-subtitle/`)
 

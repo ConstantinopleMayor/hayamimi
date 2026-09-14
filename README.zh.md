@@ -117,7 +117,7 @@ python -m venv .venv
 
 **中文路由说明**：`zh` 路由到普通话中英双语 paraformer 模型（英文按整词输出、中文数字自动还原为阿拉伯数字）；请勿替换成其他 zh 模型，会破坏该行为 —— 详见 `docs/ASR_MODELS.md`。
 
-中文 final 输出走与日语相同的固定后处理链：CJK 汉字数字 ITN（`scripts/itn_cjk.py`，ja/zh/yue）→ 标点恢复（ja 用 `punct_ja.py`；zh 用 `punct_zh.py`，sherpa-onnx CT-Transformer int8 模型约 72MB，随 `download_models.py` 下载）→ 用户 `--replace` 最后生效。标点模型缺失时安静降级（final 文本保持无标点，绝不被丢弃）。
+中文 final 输出走与日语相同的固定后处理链：CJK 汉字数字 ITN（`scripts/itn_cjk.py`，ja/zh/yue）→ 标点恢复（ja 用 `punct_ja.py`；zh 用 `punct_zh.py`，sherpa-onnx CT-Transformer int8 模型约 72MB，随 `download_models.py` 下载）→ 用户 `--replace` 最后生效（其 zh 分支还会做数字恢复 `zh_digit.py` 与 ASCII 空格归一化 `zh_space.py`：逐字母读出的 `g r m`→`grm`、`4 . 1`→`4.1`，多字母英文单词之间的空格保留）。标点模型缺失时安静降级（final 文本保持无标点，绝不被丢弃）。
 
 ## 桌面字幕窗（`desktop-subtitle/`）
 

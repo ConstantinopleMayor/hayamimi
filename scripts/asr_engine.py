@@ -24,6 +24,7 @@ import sherpa_onnx
 
 import itn_cjk
 from zh_digit import restore_zh_digits
+from zh_space import normalize_zh_spaces
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 V3_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8")
@@ -913,12 +914,16 @@ class RoutedASR:
         """User dictionary (--replace), then -- for Chinese output only --
         restore Chinese digit words to Arabic digits (zh_digit.py): the
         Paraformer-zh family writes 百分之十七/三十五点八/版本四四零 where
-        FunASR's ITN would emit 17%/35.8/版本440. Never applied to ja/en/
-        ko/yue text (Japanese uses the same digit chars idiomatically)."""
+        FunASR's ITN would emit 17%/35.8/版本440 -- and normalize its
+        ASCII token spacing (zh_space.py): letters read out one by one
+        come back as "g l m" -> "glm", "4 . 1" -> "4.1". Never applied to
+        ja/en/ko/yue text (Japanese uses the same digit chars
+        idiomatically)."""
         for wrong, right in self._replacements:
             text = text.replace(wrong, right)
         if zh:
             text = restore_zh_digits(text)
+            text = normalize_zh_spaces(text)
         return text
 
     def set_replacements(self, mapping: dict) -> None:
@@ -1153,7 +1158,8 @@ class RoutedASR:
 
         # Fixed postprocessing order (see itn_cjk.py's module docstring):
         #   CJK ITN -> punctuation restore (ja/zh) -> user --replace, applied
-        # LAST so it can always override anything the earlier stages produced.
+        # LAST so it can always override anything the earlier stages produced
+        # (the zh branch of _replace also runs zh_digit + zh_space).
         if lang in itn_cjk.APPLICABLE_LANGS and text.strip():
             overrides = self._itn_overrides
             text = itn_cjk.convert(text, lang, exclude=overrides.exclude,
