@@ -35,11 +35,16 @@ if (-not $serverUp) {
 }
 
 # ---- 2. Electron 桌面字幕窗（默认可交互模式）----
-# 优先用打包版 dist\win-unpacked\*.exe（文件名含中文，故用通配符匹配）；
-# 没有打包版时回退到开发用的 node_modules electron。
+# 优先用打包版 exe：先找扁平布局 desktop-subtitle\*.exe（整合包用的就是这种），
+# 再找旧布局 dist\win-unpacked\*.exe；都没有时回退到开发用的 node_modules
+# electron。文件名含中文，故一律用通配符匹配。
 Write-Host "[2/2] 启动桌面字幕窗 ..."
-$packaged = Get-ChildItem (Join-Path $overlay 'dist\win-unpacked\*.exe') -ErrorAction SilentlyContinue |
+$packaged = Get-ChildItem (Join-Path $overlay '*.exe') -ErrorAction SilentlyContinue |
     Select-Object -First 1
+if (-not $packaged) {
+    $packaged = Get-ChildItem (Join-Path $overlay 'dist\win-unpacked\*.exe') -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+}
 if ($packaged) {
     Start-Process -FilePath $packaged.FullName
 } else {

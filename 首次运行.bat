@@ -44,7 +44,8 @@ if errorlevel 1 (echo   [!] kiwipiepy missing - Korean spacing fix disabled) els
 
 echo.
 echo Done. Now double-click the subtitle exe:
-echo   desktop-subtitle\dist\win-unpacked\*.exe
+echo   desktop-subtitle\*.exe
+echo (or the launcher .bat next to it)
 echo ============================================
 pause
 exit /b 0

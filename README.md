@@ -183,9 +183,10 @@ soft shadow, bilibili-style outline). Startup defaults: translation OFF
 **Quickest start (no Node.js needed)**: download
 `hayamimi-subtitle-0.3.2-win-x64.zip` from [GitHub
 Releases](https://github.com/ConstantinopleMayor/hayamimi/releases),
-extract it somewhere inside the `hayamimi/` project folder (e.g.
-`desktop-subtitle\`), and double-click `早耳字幕\早耳字幕.exe`. The exe is
-the whole launcher in one file:
+extract its contents **directly into** `hayamimi\desktop-subtitle\` (e.g.
+with 7-Zip: "Extract here" while that folder is the target), then
+double-click `desktop-subtitle\早耳字幕.exe`. The exe is the whole launcher
+in one file:
 
 - On startup it probes `http://127.0.0.1:8833/`; if the server is not
   running it locates the project root and starts the server hidden (logs

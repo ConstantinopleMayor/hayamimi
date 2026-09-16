@@ -47,11 +47,16 @@ if errorlevel 1 (
 )
 
 rem --- 2. desktop subtitle window ---
-rem Prefer the packaged exe in dist\win-unpacked (its filename is non-ASCII,
-rem hence the wildcard: this file must stay pure ASCII). Falls back to the
-rem dev-checkout electron when the packaged build is absent.
+rem Look for the packaged exe in TWO shapes (the wildcard is needed because the
+rem filename is non-ASCII while this file must stay pure ASCII):
+rem   a) desktop-subtitle\*.exe              <- flat packaged layout (portable zip)
+rem   b) desktop-subtitle\dist\win-unpacked\*.exe  <- older/nested layout
+rem Falls back to the dev checkout's electron when neither exists.
 set "SUBTITLE_EXE="
-for %%F in ("%OVERLAY%\dist\win-unpacked\*.exe") do set "SUBTITLE_EXE=%%~fF"
+for %%F in ("%OVERLAY%\*.exe") do set "SUBTITLE_EXE=%%~fF"
+if not defined SUBTITLE_EXE (
+    for %%F in ("%OVERLAY%\dist\win-unpacked\*.exe") do set "SUBTITLE_EXE=%%~fF"
+)
 if defined SUBTITLE_EXE (
     echo [2/2] Starting desktop subtitle window (packaged exe)...
     start "" "%SUBTITLE_EXE%"

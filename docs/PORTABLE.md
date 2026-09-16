@@ -12,12 +12,19 @@ hayamimi/
   .venv/                       runtime dependencies (~609 MiB)
   models/                      FULL runtime model set (~3.1 GiB)
   scripts/  docs/  README*  LICENSE  THIRD_PARTY_NOTICES.md  requirements.txt
-  desktop-subtitle/
-    dist/win-unpacked/         packaged Electron app (the exe is the launcher)
+  desktop-subtitle/            the packaged app FLAT: the exe, its dlls,
+                                locales/ and resources/ sit directly here
+                                (no dist/win-unpacked nesting)
+    早耳字幕.exe                  the exe is the launcher
     启动早耳.bat / 停止早耳.bat   portable launchers (paths derived from %~dp0)
   首次运行.bat                   first-run setup (re-points .venv, checks deps)
   使用说明.txt                   end-user notes (zh)
 ```
+
+The flat layout works because the exe only walks UP looking for the project
+root (see below) -- it does not care how deep it sits. `启动早耳.bat` and
+`start_desktop_subtitle.ps1` look for the packaged exe in both shapes
+(`desktop-subtitle\*.exe`, then the legacy `desktop-subtitle\dist\win-unpacked\*.exe`).
 
 The exe doubles as the launcher: it probes `127.0.0.1:8833`, walks up from its
 own directory to find `scripts/realtime_transcribe.py` + `.venv/Scripts/python.exe`
@@ -54,26 +61,37 @@ own interpreter is used and nothing outside the folder is consulted.
 
 ## Building / refreshing the package
 
-1. Make sure the packaged app zip for the target version exists (CI builds it on
-   the tag; it can also come from a local `npm run dist` in `desktop-subtitle/`).
-2. Run the packaging script (staging copy + extraction + zip), which:
-   copies `python/` (the uv standalone CPython), the repo `.venv`, the full
-   `models/`, `scripts/`, `docs/` and the root meta files; extracts the app zip
-   into `desktop-subtitle/dist/win-unpacked/`; adds `首次运行.bat` +
-   `使用说明.txt`; then zips the stage as `hayamimi-portable-<version>.zip`.
-3. No 7-Zip is required: `zipfile` (Zip64) or the bundled `tar.exe` work. The
-   models are int8 ONNX, which barely compresses.
+`scripts/make_portable_package.py` does the whole job (committed, so a rebuild
+is one command):
 
-## Verification (2026-09-16, v0.3.2)
+```bash
+cd desktop-subtitle && npm run dist    # produce the app zip (or use the release asset)
+cd .. && python scripts/make_portable_package.py
+#   --app-zip PATH   point at a downloaded release zip instead of a local build
+#   --keep-stage     keep the unzipped staging tree
+```
+
+It copies the bundled interpreter (auto-detected from `.venv/pyvenv.cfg`'s
+`home`), the repo `.venv`, the full `models/`, `scripts/`, `docs/` and the root
+meta files; extracts the app zip **flat** into `desktop-subtitle/`; adds
+`首次运行.bat` + `使用说明.txt`; verifies nothing dev-only slipped in; then
+writes `hayamimi-portable-<version>.zip` next to the repo and prints its size
+and SHA-256. No 7-Zip is required (`zipfile` with Zip64); the int8 ONNX models
+barely compress (~4.06 GiB -> ~2.95 GiB).
+
+## Verification (2026-09-16, v0.3.2, flat layout)
 
 Built: `D:\AGI\hayamimi-portable-0.3.2.zip`
-`2.95 GiB`, SHA-256 `c47cdf26960e84b98a9d91530727048a38056c90f7b962fe4600c5a7956fe908`
-(staged tree: 6558 files, 4.06 GiB).
+`2.95 GiB`, SHA-256 `f2c9564ff5bb854e9abd1698d53a3d8cdb55bae3f412c381052a4d89a7a3f32a`
+(staged tree: 6560 files, 4.06 GiB). An earlier build of the same version used
+the nested `dist/win-unpacked/` layout (SHA `c47cdf26...`); the flat one above
+supersedes it.
 
 Extracted to `C:\hayamimi-test` (a stand-in for a fresh machine) and:
 
 1. `zipfile.testzip()` -> `None` (archive intact), including the non-ASCII
-   `早耳字幕.exe` entry.
+   `早耳字幕.exe` entry; the exe lands in `desktop-subtitle/` directly and no
+   `dist/win-unpacked` exists.
 2. `首次运行.bat` -> rewrote `pyvenv.cfg`; dependency self-check reported
    `python 3.12.13`, `prefix C:\hayamimi-test\hayamimi\.venv`,
    `base C:\hayamimi-test\hayamimi\python`, `OK soundcard`, `OK kiwipiepy`.
