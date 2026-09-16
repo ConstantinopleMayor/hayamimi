@@ -181,7 +181,7 @@ soft shadow, bilibili-style outline). Startup defaults: translation OFF
 (cycle the language button to EN/ZH/KO), bilingual display, 24pt.
 
 **Quickest start (no Node.js needed)**: download
-`hayamimi-subtitle-0.3.0-win-x64.zip` from [GitHub
+`hayamimi-subtitle-0.3.2-win-x64.zip` from [GitHub
 Releases](https://github.com/ConstantinopleMayor/hayamimi/releases),
 extract it somewhere inside the `hayamimi/` project folder (e.g.
 `desktop-subtitle\`), and double-click `早耳字幕\早耳字幕.exe`. The exe is
@@ -203,16 +203,22 @@ Quickstart) — the exe replaces only the Node/Electron part.
 
 | Control | Action |
 |---|---|
-| 🔒 / 🔓 | toggle click-through (draggable vs pass-through) |
-| ⚙ | settings menu: font, size, language, display mode, text style, backdrop, quit |
+| padlock (MDL2) | toggle click-through (draggable vs pass-through) |
+| pin (MDL2) | title-bar auto-hide: armed = the bar fades away when the pointer leaves the window (the window loses that row); pinned = the bar always stays |
+| gear (MDL2) | settings menu: font, size, language, display mode, text style, backdrop, quit |
 | EN / ZH / KO / OFF | cycle the displayed translation language |
 | 双语 / 译文 | bilingual vs translation-only display |
-| 🎤 / 🔊 / 🎤🔊 | cycle the audio source (button right of 双语/译文): mic → speaker loopback → mic+speaker mix. Switching restarts the engine (~15–30 s of paused subtitles); 🔊/🎤🔊 are Windows-only |
+| mic / speaker / mic+speaker (MDL2) | cycle the audio source (button right of 双语/译文): mic → speaker loopback → mic+speaker mix. Switching restarts the engine (~15–30 s of paused subtitles); speaker/mix are Windows-only |
 | API / 本地 | switch the translation channel |
 | top sliders | backdrop opacity (0–60%) and window width |
-| ─ / ✕ | minimize / quit |
+| bar / cross (MDL2) | minimize / quit |
 | `Ctrl+Alt+D` / `Ctrl+Alt+L` / `Ctrl+Alt+M` | click-through / language / display mode |
 | `Esc` | quit (also stops the server) |
+
+All icons are Segoe MDL2 Assets glyphs, so the whole row is tinted by one
+accent colour (see `main.js`); nothing carries an outline. The title bar
+auto-hides by default (`--no-bar-autohide` keeps it pinned), and while it is
+hidden the window is fully click-through.
 
 - Confirmed lines accumulate on screen (each lives ~8s) with the
   in-progress draft updating inline while you speak; the window auto-fits

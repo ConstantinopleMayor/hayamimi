@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("desktopSubtitle", {
   getPosition: () => ipcRenderer.invoke("hmy:get-pos"),
   setPosition: (x, y) => ipcRenderer.send("hmy:set-pos", Math.round(x), Math.round(y)),
   togglePassthrough: () => ipcRenderer.send("hmy:toggle-passthrough"),
+  togglePin: () => ipcRenderer.send("hmy:toggle-pin"),
   resize: (w, h) => ipcRenderer.send("hmy:resize", Math.round(w), Math.round(h)),
   showMenu: () => ipcRenderer.send("hmy:show-menu"),
   cycleLang: () => ipcRenderer.send("hmy:cycle-lang"),
@@ -17,4 +18,5 @@ contextBridge.exposeInMainWorld("desktopSubtitle", {
   setBgAlpha: (v) => ipcRenderer.send("hmy:set-bg", v),
   setWidth: (v) => ipcRenderer.send("hmy:set-width", v),
   onModeChange: (cb) => ipcRenderer.on("hmy:mode", (_e, v) => cb(v)),
+  onBarVisible: (cb) => ipcRenderer.on("hmy:bar", (_e, v) => cb(v)),
 });

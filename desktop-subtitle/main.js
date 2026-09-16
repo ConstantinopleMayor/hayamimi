@@ -126,7 +126,7 @@ const BTN_Y0 = 8;   // top
 const BTN_S = 26;   // button size
 const BTN_GAP = 6;  // gap between buttons
 const BAND_PAD = 6; // pass-through keep-clickable band padding
-// Top-right window buttons: minimize (─) and close (✕), anchored to the right.
+// Top-right window buttons: minimize (MDL2 E921) and close (E8BB), anchored to the right.
 const RBX = 8;      // right-most button's right offset
 const RBTN_W = BTN_S * 2 + BTN_GAP; // total width of the two right buttons
 
@@ -147,31 +147,33 @@ const BG_MENU_CHOICES = [0, 1, ...BG_CHOICES.filter((v) => v !== 0)]; // menu ti
 // the top strip (NOT centered): centering made the sliders drift when the
 // window width changed mid-drag (the thumb slid under the cursor -> jitter).
 // Fixed left anchor keeps their screen position stable while dragging.
-const SLIDER_X0 = 208;              // first slider's left (after the 6-button band)
+const SLIDER_X0 = 240;              // first slider's left (after the 7-button band)
 const SLIDER_W = 120;               // single slider width
 const SLIDER_GAP = 20;              // gap between the two sliders
 // Window-width slider range (px). Native edge-drag resize is unavailable on
 // this transparent/frameless window (no resize handles), so the width slider
-// drives setBounds() instead. 500 keeps a readable minimum; 1200 covers
-// wide monitors (the creation default stays 900).
-const WIN_W_MIN = 500;
+// drives setBounds() instead. 560 keeps a readable minimum AND keeps the
+// 7-button band + two sliders clear of the top-right window controls; 1200
+// covers wide monitors (the creation default stays 900).
+const WIN_W_MIN = 560;
 const WIN_W_MAX = 1200;
 // Defensive window-height floor (auto-fit may report any value, but the
-// window must never collapse below the top strip). In normal rendering the
-// reported height is always >= 48px (the card keeps a one-line min-height,
-// and even the transparent empty state reports offsetTop 44 + 4 margin), so
-// this floor never actually clips content -- it only guards extreme failures.
-const MIN_WIN_H = BTN_Y0 + BTN_S + BAND_PAD + 8; // 48px
+// window must never collapse below the top strip). The card chrome alone
+// (6px top inset + 36px padding-top + 8px bottom padding + 12px shadow
+// margin) is 62px, so a smaller window could not even show the frame; in
+// normal rendering a one-line card measures ~90px, so this floor never
+// actually clips content -- it only guards extreme failures.
+const MIN_WIN_H = 66;
 // (setShape was tried to clip mouse events below the card, but with
 // resizable:true the window truly fits the content, so the area below the
 // card is OUTSIDE the window -- no clipping needed; setShape only killed
 // the native resize border, so it was removed entirely.)
 
-// API/本地 translation channel toggle button sits to the RIGHT of the
-// language button; the display-mode button sits next to it, and the audio
-// source button (🎤/🔊/🎤🔊) right of the mode button. The pass-through
-// keep-clickable band counts 6 buttons now.
-const NBUTTONS = 6;
+// Button row (left to right): lock | pin | settings | lang | API | mode |
+// audio. The pin button (right of the lock) toggles the title-bar auto-hide:
+// armed = the bar fades away when the cursor leaves the window, pinned = the
+// bar stays. The pass-through keep-clickable band counts 7 buttons now.
+const NBUTTONS = 7;
 
 // Audio capture source, fixed at server STARTUP (realtime_transcribe.py picks
 // the backend from --input), so switching it RESTARTS the server:
@@ -179,14 +181,36 @@ const NBUTTONS = 6;
 // on its own. speaker/mix need Windows WASAPI loopback (pip install
 // soundcard); mic works everywhere.
 const INPUTS = ["mic", "speaker", "mix"];
-const INPUT_LABEL = { mic: "🎤", speaker: "🔊", mix: "🎤🔊" };
+// Icon glyphs: the WHOLE set is Segoe MDL2 Assets (see the CSS rule), a
+// MONOCHROME Windows icon font, so every glyph follows the CSS `color` --
+// that is what lets the entire row be tinted alike (white, grey, peach...).
+//   E72E locked / E785 unlocked / E713 settings gear / E720 mic /
+//   E767 speaker / E72C refresh (server restart in flight) /
+//   E718 pin armed / E840 pinned / E921 minimize / E8BB close
+// Mix is TWO glyphs side by side: MDL2 advances are exactly 1em, so under
+// the `.two` 12px rule they measure 24px -- still inside the 26px box
+// (at 16px they would be 32px and overflow, hence the smaller rule).
+const ICON = {
+  mic: "\uE720", speaker: "\uE767", mix: "\uE720\uE767",
+  locked: "\uE72E", unlocked: "\uE785", gear: "\uE713", busy: "\uE72C",
+  pin: "\uE718", pinned: "\uE840",
+  min: "\uE921", close: "\uE8BB",
+};
 const INPUT_NAME = { mic: "麦克风", speaker: "系统音频", mix: "麦克风+系统音频" };
 // Audio button tooltip. The 当前 part must follow audioInput, so
 // setPageButtons() re-applies it after every switch (the injected title was
 // a one-time snapshot -- the "still says 麦克风 after switching" bug).
 function inputTitle() {
   if (serverBusy) return "正在重启识别引擎…";
-  return "切换音频源 (当前: " + (INPUT_NAME[audioInput] || "麦克风") + "): 🎤麦克风 → 🔊系统音频 → 🎤🔊两者，引擎重启约15-30秒";
+  return "切换音频源 (当前: " + (INPUT_NAME[audioInput] || "麦克风") + "): 麦克风 → 🔊系统音频 → 🔊两者，引擎重启约15-30秒";
+}
+// Title-bar auto-hide button. Tooltip follows the CURRENT state, so
+// setPageButtons() re-applies it after every toggle (same pattern as
+// inputTitle()).
+function pinTitle() {
+  return barAutohide
+    ? "标题栏自动隐藏（点击常驻，不再自动隐藏）"
+    : "标题栏已常驻（点击恢复自动隐藏）";
 }
 
 // True when a usable openai_translate.json exists next to this app (i.e. the
@@ -234,6 +258,7 @@ function parseArgs() {
     lang: "off", // default: no translation (button cycles EN/ZH/KO/OFF)
     input: "mic", // capture source for the autostarted server (--input to override)
     serveArgs: "", // autostart server args (--serve-args to override); empty = no translation
+    barAutohide: true, // title bar fades away when the cursor leaves the window
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -268,6 +293,8 @@ function parseArgs() {
       const v = args[++i] || "mic";
       opts.input = INPUTS.includes(v) ? v : "mic";
     } else if (a === "--serve-args") opts.serveArgs = args[++i] || opts.serveArgs;
+    else if (a === "--no-bar-autohide") opts.barAutohide = false;
+    else if (a === "--bar-autohide") opts.barAutohide = true;
   }
   if (!LANGS.includes(opts.lang)) opts.lang = "zh";
   return opts;
@@ -514,7 +541,7 @@ let opts = null;
 let passthrough = false;
 let lang = "off"; // default: no translation (button cycles EN/ZH/KO/OFF)
 let audioInput = "mic"; // capture source (mic/speaker/mix); switching restarts the server
-let serverBusy = false; // audio-source restart in flight: button shows ⏳, re-entry blocked
+let serverBusy = false; // audio-source restart in flight: the audio button shows the hourglass icon, re-entry blocked
 let mode = "both";  // "both" = bilingual rows, "tr" = translation only
 let bg = 1;         // subtitle-card backdrop opacity in percent (1% startup)
 let bold = true;    // bold subtitle text (source + translation flows; default ON)
@@ -562,10 +589,52 @@ function isCursorInButtonBand() {
   return false;
 }
 
+// --- title-bar auto-hide --------------------------------------------------
+// The bar fades out once the cursor leaves the window. To leave the subtitle
+// text perfectly still, the window is ALSO shifted down by exactly the amount
+// its content collapses (BAR_H == the card's 36px -> 6px top padding), so the
+// card's top edge moves down while its bottom edge and the text stay put.
+const BAR_H = 30;               // px collapsed/restored per toggle
+const BAR_HIDE_DELAY_MS = 350;  // grace period, no flicker when grazing an edge
+let barAutohide = true;         // false via --no-bar-autohide or the pin button
+let barVisible = true;          // last value pushed to the renderer
+let outsideSince = 0;           // timestamp the cursor left (0 = currently inside)
+
+function isCursorInWindow() {
+  if (!win || win.isDestroyed()) return false;
+  const c = screen.getCursorScreenPoint();
+  const b = win.getBounds();
+  return pointInRect(c.x, c.y, b.x, b.y, b.x + b.width, b.y + b.height);
+}
+
+function refreshBarVisibility() {
+  if (!win || win.isDestroyed()) return;
+  const inside = isCursorInWindow();
+  if (inside || !barAutohide) outsideSince = 0;
+  else if (!outsideSince) outsideSince = Date.now();
+  let visible = true;
+  if (barAutohide && !inside) visible = (Date.now() - outsideSince) < BAR_HIDE_DELAY_MS;
+  if (visible === barVisible) return;
+  barVisible = visible;
+  const b = win.getBounds();
+  const dy = BAR_H;
+  win.setBounds({
+    x: b.x,
+    y: visible ? b.y - dy : b.y + dy,
+    width: b.width,
+    height: visible ? b.height + dy : b.height - dy,
+  });
+  win.webContents.send("hmy:bar", visible);
+  diag("bar " + (visible ? "shown" : "hidden"));
+}
+
 function refreshMouseMode() {
   if (!win || win.isDestroyed()) return;
+  refreshBarVisibility();
   if (!passthrough) win.setIgnoreMouseEvents(false);
-  else win.setIgnoreMouseEvents(!isCursorInButtonBand(), { forward: true });
+  // in pass-through mode the button band stays clickable ONLY while the bar
+  // is visible: a hidden bar must never swallow clicks for invisible buttons
+  else win.setIgnoreMouseEvents(!(barVisible && isCursorInButtonBand()), { forward: true });
 }
 
 function makeCss() {
@@ -576,12 +645,19 @@ function makeCss() {
   const lx3 = BTN_X0 + (BTN_S + BTN_GAP) * 3;
   const lx4 = BTN_X0 + (BTN_S + BTN_GAP) * 4;
   const lx5 = BTN_X0 + (BTN_S + BTN_GAP) * 5;
-  // subtitle-card backdrop: only when bg > 0 does the block get a card
-  // (a card shadow attempt was undone and reverted -- window shadows only
-  // work with a native frame, so the card stays flush, no inset/shadow).
+  const lx6 = BTN_X0 + (BTN_S + BTN_GAP) * 6;
+  // subtitle-card backdrop: the bg slider only changes the card FILL. The
+  // frame (1px border + soft shadow) and the window insets that make that
+  // shadow VISIBLE live in the base #box rule below and in applyBg(): an
+  // outside shadow is clipped the moment the card touches the window edge
+  // (that is what killed the earlier attempt, which was an OS window shadow
+  // -- impossible on a transparent frameless window).
+  // NOTE: this variable is currently unused (applyBg() applies the card at
+  // runtime); kept in sync so a future re-interpolation cannot resurrect the
+  // old padding.
   const cardCss = opts.bg > 0
     ? `#box{background:rgba(0,0,0,${(opts.bg / 100).toFixed(2)})!important;
-         border-radius:14px!important;padding:8px 14px!important;}
+         padding:36px 8px 8px!important;}
        #hmy-txt-flow,#hmy-tr-flow{margin:0;padding:0;}`
     : "";
   // Parameterized text style -- startup values here; the settings menu
@@ -602,8 +678,23 @@ function makeCss() {
        is removed when it expires. The same happens for translations below.
        The server's native overlay script still writes #final-line /
        #partial-line -- hide them; we render our own flow. */
-    #box{top:44px!important;bottom:auto!important;text-align:left!important;
-         max-width:100%;white-space:normal;box-sizing:border-box;}
+    /* card frame: 1px outline + soft OUTSIDE shadow, always present (the bg
+       slider only changes the FILL). The card starts ABOVE the button row,
+       so the frame encloses the whole title bar; the ghost buttons have no
+       visible box, so the icons keep their visual padding inside the frame.
+       The 6px insets are what make the outside shadow visible at all -- it
+       is clipped the moment the card touches the window edge (that is what
+       killed the earlier attempt, which was an OS window shadow: impossible
+       on a transparent frameless window; a CSS box-shadow works, it just
+       needs this room, plus the bottom margin in fitHeight()).
+       The padding pair keeps the TEXT pixel-identical to the old layout
+       where the card sat below the band (6+36 == 2+40, 6+8 == 0+14). */
+    #box{top:6px!important;bottom:auto!important;left:6px!important;
+         right:6px!important;text-align:left!important;
+         max-width:100%;white-space:normal;box-sizing:border-box;
+         padding:36px 8px 8px!important;border-radius:14px!important;
+         border:1px solid rgba(255,255,255,0.22)!important;
+         box-shadow:0 0 7px rgba(0,0,0,0.55)!important;}
     #final-line,#partial-line{display:none!important;}
     /* translation-only mode: hide the whole source flow (confirmed segments
        and its in-progress draft); only the translation flow stays visible */
@@ -643,29 +734,60 @@ function makeCss() {
     /* (no cursor:move anywhere: the drag regions stay visually quiet -- the
        default arrow shows everywhere, and buttons keep their pointer) */
     /* buttons: no-drag => clickable even inside the drag region.
-       Modern look: rounded, dark translucent, subtle hover lift. */
+       Ghost look: no fill/border at rest, one flat accent colour for the
+       glyph (icons and labels alike), no outline/shadow; hovering reveals
+       the translucent pill + border. */
     .hmy-btn{position:fixed;top:${BTN_Y0}px;width:${BTN_S}px;height:${BTN_S}px;
              display:flex;align-items:center;justify-content:center;
-             font-size:13px;line-height:1;background:rgba(0,0,0,0.55);
-             color:#fff; /* white text on the dark button */
-             border:1px solid rgba(255,255,255,0.30);border-radius:8px;
+             font-size:13px;line-height:1;background:transparent;
+color:#d68c27; /* same opencode theme family, LIGHT-mode orange: a step
+                darker/amber than the dark-mode peach #fab283, so it holds
+                up on white backdrops too (and still pops on dark video).
+                The icons are monochrome MDL2 glyphs, so they
+                inherit this just like the text labels do. NO outline/shadow
+                at all: any rim/glow only muddied the edges (a blurred glow
+                read as "out of focus", a dark rim ghosted thin strokes). */
+             border:1px solid transparent;border-radius:8px;
              cursor:pointer!important;user-select:none;
              -webkit-app-region:no-drag;z-index:2147483647;
-             font-family:'Segoe UI Symbol','Segoe UI',sans-serif;
+             font-family:'Segoe UI',sans-serif;
              transition:background .15s ease,border-color .15s ease,
-                        transform .08s ease,box-shadow .15s ease;}
+                        transform .08s ease,box-shadow .15s ease,
+                        opacity .18s ease;}
+    /* icon buttons: Segoe MDL2 Assets at 16px -- a monochrome Windows icon
+       font, so every glyph follows the CSS color property (that is how the
+       whole row is tinted alike). MDL2 ships ONE weight and its gear/mic are
+       thin-line glyphs, so -webkit-text-stroke in currentColor adds body
+       without changing the hue (the mix pair takes a lighter 0.2px, see the
+       .two rule below). */
+    #hmy-lock-btn,#hmy-pin-btn,#hmy-menu-btn,#hmy-audio-btn{
+        font-family:'Segoe MDL2 Assets',sans-serif;font-size:16px;
+        -webkit-text-stroke:0.35px currentColor;}
+    /* mix = TWO glyphs: they only fit the 26px box at 12px, and they take a
+       LIGHTER stroke (0.2px) so two bold glyphs side by side stay readable */
+    #hmy-audio-btn.two{font-size:12px;-webkit-text-stroke:0.2px currentColor;}
+    /* window controls keep their Segoe MDL2 text glyphs (E921 bar / E8BB
+       cross -- monochrome, so they follow the colour too); 12px because
+       those glyphs are full-bleed and read a size larger. */
+    #hmy-min-btn,#hmy-close-btn{
+        font-family:'Segoe MDL2 Assets',sans-serif;font-size:12px;
+        -webkit-text-stroke:0.35px currentColor;}
     #hmy-lock-btn{left:${lx0}px;}
-    #hmy-menu-btn{left:${lx1}px;}
-    #hmy-lang-btn{left:${lx2}px;font-family:'Segoe UI',sans-serif;font-weight:600;}
-    #hmy-api-btn{left:${lx3}px;font-family:'Segoe UI',sans-serif;font-weight:600;
-                 font-size:11px;}
-    #hmy-mode-btn{left:${lx4}px;font-family:'Segoe UI',sans-serif;font-weight:600;
-                  font-size:11px;}
-    #hmy-audio-btn{left:${lx5}px;font-size:12px;}
-    /* top-right window controls: minimize (─) and close (✕) */
+    #hmy-pin-btn{left:${lx1}px;}
+    #hmy-menu-btn{left:${lx2}px;}
+    /* text labels: 12px is the largest that keeps 双语 inside the 26px box */
+    #hmy-lang-btn{left:${lx3}px;font-family:'Segoe UI',sans-serif;font-weight:700;
+                  font-size:12px;}
+    #hmy-api-btn{left:${lx4}px;font-family:'Segoe UI',sans-serif;font-weight:700;
+                 font-size:12px;}
+    #hmy-mode-btn{left:${lx5}px;font-family:'Segoe UI',sans-serif;font-weight:700;
+                  font-size:12px;}
+    #hmy-audio-btn{left:${lx6}px;}
+    /* top-right window controls: minimize (E921) and close (E8BB) */
     #hmy-min-btn{right:${RBX + BTN_S + BTN_GAP}px;}
     #hmy-close-btn{right:${RBX}px;}
     #hmy-close-btn:hover{background:rgba(220,60,60,0.85);border-color:rgba(255,120,120,0.6);}
+    /* hover reveals the translucent pill (the ghost buttons' affordance) */
     .hmy-btn:hover{background:rgba(65,65,75,0.9);border-color:rgba(255,255,255,0.6);
                    box-shadow:0 2px 8px rgba(0,0,0,0.45);}
     .hmy-btn:active{transform:translateY(1px);}
@@ -676,25 +798,38 @@ function makeCss() {
          left:${SLIDER_X0}px;width:${SLIDER_W}px;
          height:10px;-webkit-appearance:none;appearance:none;background:transparent;
          cursor:pointer!important;user-select:none;-webkit-app-region:no-drag;
+         transition:opacity .18s ease;
          z-index:2147483647;outline:none;}
     #hmy-w-slider{position:fixed;top:${BTN_Y0 + (BTN_S - 10) / 2}px;
          left:${SLIDER_X0 + SLIDER_W + SLIDER_GAP}px;width:${SLIDER_W}px;
          height:10px;-webkit-appearance:none;appearance:none;background:transparent;
          cursor:pointer!important;user-select:none;-webkit-app-region:no-drag;
+         transition:opacity .18s ease;
          z-index:2147483647;outline:none;}
     #hmy-bg-slider::-webkit-slider-runnable-track,#hmy-w-slider::-webkit-slider-runnable-track{height:4px;border-radius:2px;
          background:rgba(255,255,255,0.15);transition:background .15s ease;}
     #hmy-bg-slider::-webkit-slider-thumb,#hmy-w-slider::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
-         border-radius:50%;background:rgba(255,255,255,0.55);margin-top:-3px;
+         border-radius:50%;background:rgba(255,255,255,0.85);margin-top:-3px;
          border:1px solid rgba(255,255,255,0.30);
-         box-shadow:0 1px 3px rgba(0,0,0,0.4);
+         box-shadow:0 1px 3px rgba(0,0,0,0.8),0 0 2px rgba(0,0,0,0.9);
          transition:transform .08s ease,box-shadow .15s ease;}
     #hmy-bg-slider:hover::-webkit-slider-runnable-track,#hmy-w-slider:hover::-webkit-slider-runnable-track{background:rgba(255,255,255,0.28);}
     #hmy-bg-slider:hover::-webkit-slider-thumb,#hmy-w-slider:hover::-webkit-slider-thumb{background:rgba(255,255,255,0.85);}
     #hmy-bg-slider:active::-webkit-slider-thumb,#hmy-w-slider:active::-webkit-slider-thumb{transform:scale(1.15);}
-    /* API channel unavailable (no openai_translate.json): grey, inert */
-    .hmy-btn.off{opacity:0.45;background:rgba(60,60,60,0.5);
-                 border-color:rgba(255,255,255,0.15);cursor:default!important;}
+    /* API channel unavailable (no openai_translate.json): dimmed, inert */
+    .hmy-btn.off{opacity:0.45;background:transparent;
+                 border-color:transparent;cursor:default!important;}
+    /* --- title-bar auto-hide (decided by the main process, see
+       refreshBarVisibility()) -------------------------------------------
+       The bar FADES OUT and its row COLLAPSES: #box loses exactly the
+       36px -> 6px top padding, so the window really becomes one row shorter.
+       The main process shifts the window down by the same 30px at the same
+       time, which keeps the subtitle text and the card's bottom edge exactly
+       where they were (no jump when the pointer crosses the window). */
+    html.hmy-bar-off .hmy-btn,
+    html.hmy-bar-off #hmy-bg-slider,
+    html.hmy-bar-off #hmy-w-slider{opacity:0;pointer-events:none;}
+    html.hmy-bar-off #box{padding-top:6px!important;}
   `;
 }
 
@@ -716,12 +851,17 @@ function makeInitJs() {
       d.title = title;
       return d;
     }
-    var lock = mkBtn('hmy-lock-btn', '🔒', '点击切换穿透');
+    var lock = mkBtn('hmy-lock-btn', ${JSON.stringify(passthrough ? ICON.locked : ICON.unlocked)}, '点击切换穿透');
     lock.addEventListener('click', function(){
       console.log('hmy: btn-lock-click');
       window.desktopSubtitle.togglePassthrough();
     });
-    var menuBtn = mkBtn('hmy-menu-btn', '⚙', '打开设置菜单');
+    var pinBtn = mkBtn('hmy-pin-btn', ${JSON.stringify(opts.barAutohide !== false ? ICON.pin : ICON.pinned)}, ${JSON.stringify(pinTitle())});
+    pinBtn.addEventListener('click', function(){
+      console.log('hmy: btn-pin-click');
+      window.desktopSubtitle.togglePin();
+    });
+    var menuBtn = mkBtn('hmy-menu-btn', ${JSON.stringify(ICON.gear)}, '打开设置菜单');
     menuBtn.addEventListener('click', function(){
       console.log('hmy: btn-menu-click');
       window.desktopSubtitle.showMenu();
@@ -741,17 +881,18 @@ function makeInitJs() {
       console.log('hmy: btn-mode-click');
       window.desktopSubtitle.toggleMode();
     });
-    var audioBtn = mkBtn('hmy-audio-btn', '${INPUT_LABEL[audioInput] || "🎤"}', ${JSON.stringify(inputTitle())});
+    var audioBtn = mkBtn('hmy-audio-btn', ${JSON.stringify(ICON[audioInput] || ICON.mic)}, ${JSON.stringify(inputTitle())});
+    audioBtn.className = ${JSON.stringify(audioInput === "mix" ? "hmy-btn two" : "hmy-btn")};
     audioBtn.addEventListener('click', function(){
       console.log('hmy: btn-audio-click');
       window.desktopSubtitle.cycleInput();
     });
-    var minBtn = mkBtn('hmy-min-btn', '─', '最小化窗口');
+    var minBtn = mkBtn('hmy-min-btn', ${JSON.stringify(ICON.min)}, '最小化窗口');
     minBtn.addEventListener('click', function(){
       console.log('hmy: btn-min-click');
       window.desktopSubtitle.minimize();
     });
-    var closeBtn = mkBtn('hmy-close-btn', '✕', '退出字幕窗');
+    var closeBtn = mkBtn('hmy-close-btn', ${JSON.stringify(ICON.close)}, '退出字幕窗');
     closeBtn.addEventListener('click', function(){
       console.log('hmy: btn-close-click');
       window.desktopSubtitle.close();
@@ -764,6 +905,22 @@ function makeInitJs() {
     bgSlider.step = '1';
     bgSlider.value = '1'; // the startup default; applyBg() re-syncs it after init
     bgSlider.title = '背景透明度调节 (0-60%)';
+    // Only a press ON the thumb may start a drag: a native <input type=range>
+    // jumps the value when ANYWHERE on the track is pressed, which made these
+    // two sliders easy to knock out of place by accident. Pressing the thumb
+    // itself is left untouched, so the native drag (with pointer capture, i.e.
+    // dragging on past the element's edge) still works exactly as before.
+    // Tolerance = thumb radius (5px) + 4px slack.
+    function lockTrack(el){
+      el.addEventListener('mousedown', function(ev){
+        var r = el.getBoundingClientRect();
+        var mn = parseFloat(el.min), mx = parseFloat(el.max), v = parseFloat(el.value);
+        var thumb = 10; // ::-webkit-slider-thumb width, see the CSS
+        var cx = r.left + (v - mn) / (mx - mn) * (r.width - thumb) + thumb / 2;
+        if (Math.abs(ev.clientX - cx) > 9) ev.preventDefault();
+      });
+    }
+    lockTrack(bgSlider);
     bgSlider.addEventListener('input', function(){
       console.log('hmy: bg-slider-input ' + bgSlider.value);
       window.desktopSubtitle.setBgAlpha(parseInt(bgSlider.value, 10));
@@ -771,16 +928,18 @@ function makeInitJs() {
     var wSlider = document.createElement('input');
     wSlider.type = 'range';
     wSlider.id = 'hmy-w-slider';
-    wSlider.min = '500';
+    wSlider.min = '560';
     wSlider.max = '1200';
     wSlider.step = '10';
     wSlider.value = '900'; // equals the window's creation width
-    wSlider.title = '窗口宽度调节 (500-1200px)';
+    wSlider.title = '窗口宽度调节 (560-1200px)';
+    lockTrack(wSlider);
     wSlider.addEventListener('input', function(){
       console.log('hmy: w-slider-input ' + wSlider.value);
       window.desktopSubtitle.setWidth(parseInt(wSlider.value, 10));
     });
     document.body.appendChild(lock);
+    document.body.appendChild(pinBtn);
     document.body.appendChild(menuBtn);
     document.body.appendChild(langBtn);
     document.body.appendChild(apiBtn);
@@ -791,6 +950,16 @@ function makeInitJs() {
     document.body.appendChild(bgSlider);
     document.body.appendChild(wSlider);
     console.log('hmy: buttons injected');
+
+    // --- title-bar auto-hide: the main process polls the cursor (40ms) and
+    // pushes the wanted state; it also collapses the window by one row after
+    // shifting it down by the same amount, so here we only fade + collapse
+    // the padding (see html.hmy-bar-off in makeCss).
+    if (window.desktopSubtitle.onBarVisible) {
+      window.desktopSubtitle.onBarVisible(function(on){
+        document.documentElement.classList.toggle('hmy-bar-off', !on);
+      });
+    }
 
     // ACCUMULATING subtitle flows (desktop window owns ALL rendering):
     //   #hmy-txt-flow   source text: confirmed segments inline, the current
@@ -839,11 +1008,12 @@ function makeInitJs() {
     function fitHeight() {
       var box = document.getElementById('box');
       if (!box) return;
-      // bottom margin 4px (was 16px): a larger transparent strip below the
-      // card swallowed scroll-wheel events while the window was interactive
-      // and made the window look taller than the card. 4px keeps a tiny
-      // breathing room without an observable dead zone.
-      var h = box.offsetTop + box.offsetHeight + 4; // rows + tiny bottom margin
+      // bottom margin 12px: the card's outside shadow extends ~7px below the
+      // card (no y-offset, blur 7) and the window edge would clip it -- and
+      // that shadow is what keeps the box findable. Well under the old 16px
+      // value, which made the transparent strip below the card swallow
+      // scroll-wheel events.
+      var h = box.offsetTop + box.offsetHeight + 12; // rows + shadow room
       window.desktopSubtitle.resize(0, h);
     }
     setInterval(fitHeight, 500);
@@ -952,10 +1122,11 @@ function makeInitJs() {
 
 function setPageButtons() {
   if (!win || win.isDestroyed()) return;
-  // Icon semantics: 🔒 = window is LOCKED in place (click-through/passthrough,
-  // cannot be dragged) — 🔓 = unlocked, can drag/move the window.
-  // (Previously it was inverted: passthrough showed 🔓 which was confusing.)
-  const icon = passthrough ? "🔒" : "🔓";
+  // Icon semantics: the CLOSED padlock = window is LOCKED in place
+  // (click-through/passthrough, cannot be dragged) -- the OPEN padlock =
+  // unlocked, can drag/move the window. (Previously inverted: passthrough
+  // showed the open padlock, which was confusing.)
+  const icon = passthrough ? ICON.locked : ICON.unlocked;
   const label = LANG_LABEL[lang] || "EN";
   win.webContents
     .executeJavaScript(
@@ -974,9 +1145,14 @@ function setPageButtons() {
         if(md){ md.textContent = ${JSON.stringify(MODE_LABEL[mode])}; }
         var ab=document.getElementById('hmy-audio-btn');
         if(ab){
-          ab.textContent = ${JSON.stringify(serverBusy ? "⏳" : (INPUT_LABEL[audioInput] || "🎤"))};
-          ab.className = 'hmy-btn';
+          ab.textContent = ${JSON.stringify(serverBusy ? ICON.busy : (ICON[audioInput] || ICON.mic))};
+          ab.className = ${JSON.stringify(audioInput === "mix" ? "hmy-btn two" : "hmy-btn")};
           ab.title = ${JSON.stringify(inputTitle())};
+        }
+        var pb=document.getElementById('hmy-pin-btn');
+        if(pb){
+          pb.textContent = ${JSON.stringify(barAutohide ? ICON.pin : ICON.pinned)};
+          pb.title = ${JSON.stringify(pinTitle())};
         }
       })();`
     )
@@ -1073,19 +1249,19 @@ function applyBg(alphaPct) {
   if (!Number.isInteger(alphaPct) || alphaPct < 0 || alphaPct > 60) return;
   bg = alphaPct;
   const a = (bg / 100).toFixed(2);
-  // The card spans the WHOLE top strip: it starts at the button row (top:2px,
-  // buttons stay above it thanks to their fixed positioning + z-index) and
-  // its padding-top keeps the text top just 8px below the buttons (2 + 40 =
-  // 42; buttons end at 34). The flows get a one-line min-height (em units
-  // follow the font size) so an EMPTY card keeps exactly the size of a
-  // one-line card -- the bottom edge no longer shrinks above the text line.
+  // The card encloses the whole title bar (frame from 6px) and keeps that
+  // frame (border + shadow) in BOTH modes -- only the FILL follows the
+  // slider. The padding pair keeps the text where it always was (see the
+  // base #box rule). The flows get a one-line min-height (em units follow
+  // the font size) so an EMPTY card keeps exactly the size of a one-line
+  // card -- the bottom edge no longer shrinks above the text line.
   const css = bg > 0
-    ? `#box{top:2px!important;padding:40px 14px 8px!important;
-         background:rgba(0,0,0,${a})!important;border-radius:14px!important;}
+    ? `#box{top:6px!important;padding:36px 8px 8px!important;
+         background:rgba(0,0,0,${a})!important;}
        #hmy-txt-flow{min-height:1.35em!important;}
        #hmy-tr-flow{min-height:1.25em!important;}`
-    : `#box{top:44px!important;padding:0!important;
-         background:transparent!important;border-radius:0!important;}
+    : `#box{top:6px!important;padding:36px 8px 8px!important;
+         background:transparent!important;}
        #hmy-txt-flow{min-height:0!important;}
        #hmy-tr-flow{min-height:0!important;}`;
   win.webContents.insertCSS(css).catch(() => {});
@@ -1315,6 +1491,7 @@ app.whenReady().then(() => {
   textInk = opts.textInk === "on" ? "on" : "off";
   textOpacity = TEXT_OPACITY_CHOICES.includes(opts.textOpacity) ? opts.textOpacity : 100;
   if (textInk === "on") textStroke = "off"; // 重墨/描边 share one property
+  barAutohide = opts.barAutohide !== false; // --no-bar-autohide keeps the bar pinned
 
   const { workArea } = screen.getPrimaryDisplay();
   const winW = Math.min(opts.width, workArea.width);
@@ -1324,6 +1501,13 @@ app.whenReady().then(() => {
 
   ipcMain.on("hmy:show-menu", () => { diag("IPC: show-menu"); showMenu(); });
   ipcMain.on("hmy:toggle-passthrough", () => { diag("IPC: toggle-passthrough"); applyPassthrough(!passthrough); });
+  ipcMain.on("hmy:toggle-pin", () => {
+    // pin button: armed (auto-hide) <-> pinned (bar never hides)
+    barAutohide = !barAutohide;
+    diag("IPC: toggle-pin -> barAutohide=" + barAutohide);
+    refreshMouseMode();
+    setPageButtons();
+  });
   ipcMain.on("hmy:cycle-lang", () => { diag("IPC: cycle-lang"); cycleLang(); });
   ipcMain.on("hmy:cycle-api", () => { diag("IPC: cycle-api"); cycleApi(); });
   ipcMain.on("hmy:toggle-mode", () => { diag("IPC: toggle-mode"); applyMode(mode === "both" ? "tr" : "both"); });
@@ -1412,6 +1596,9 @@ app.whenReady().then(() => {
     try { applyTextInk(textInk); } catch (e) { diag("applyTextInk err " + e.message); }
     try { applyTextOpacity(textOpacity); } catch (e) { diag("applyTextOpacity err " + e.message); }
     try { setPageButtons(); } catch (e) { diag("setPageButtons err " + e.message); }
+    // push the CURRENT title-bar state: the poll only sends on change, so a
+    // page that loads while the bar should be hidden needs this first push
+    try { win.webContents.send("hmy:bar", barVisible); } catch (e) { diag("bar push err " + e.message); }
     diag("bootstrap done");
     // Push our channel+language to the server ONCE at startup so the UI and
     // the server agree from the very beginning. The .bat may have started the

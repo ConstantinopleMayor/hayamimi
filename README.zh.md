@@ -125,7 +125,7 @@ python -m venv .venv
 
 透明、始终置顶的字幕窗，把 hayamimi 的实时字幕直接渲染在桌面上 —— 无需打开 OBS。原文与译文同屏两行，广播字幕风格（粗体、柔和阴影、B 站弹幕式描边）。启动默认：不翻译（语言按钮可切换 EN/ZH/KO）、双语显示、24pt。
 
-**最快方式（免 Node.js）**：从 [GitHub Releases](https://github.com/ConstantinopleMayor/hayamimi/releases) 下载 `hayamimi-subtitle-0.3.0-win-x64.zip`，解压到 `hayamimi/` 项目目录内（如 `desktop-subtitle\`），双击 `早耳字幕\早耳字幕.exe`。exe 就是一站式启动器：
+**最快方式（免 Node.js）**：从 [GitHub Releases](https://github.com/ConstantinopleMayor/hayamimi/releases) 下载 `hayamimi-subtitle-0.3.2-win-x64.zip`，解压到 `hayamimi/` 项目目录内（如 `desktop-subtitle\`），双击 `早耳字幕\早耳字幕.exe`。exe 就是一站式启动器：
 
 - 启动时探测 `http://127.0.0.1:8833/`：服务器没在跑就自动定位项目根并以隐藏窗口拉起（日志 `%TEMP%\hayamimi-serve.log`）；已在运行则直接复用。
 - **关闭字幕窗（✕ / Esc / 菜单「退出字幕窗」）自动停止转写服务器** —— 只停命令行匹配 `realtime_transcribe` 的 python 进程，不影响其他 python 程序。
@@ -137,16 +137,19 @@ python -m venv .venv
 
 | 控件 | 作用 |
 |---|---|
-| 🔒 / 🔓 | 切换点击穿透（可拖拽 / 穿透） |
-| ⚙ | 设置菜单：字体、字号、语言、显示模式、文字样式、背景、退出 |
+| 锁形图标（MDL2） | 切换点击穿透（可拖拽 / 穿透） |
+| 图钉图标（MDL2） | 标题栏自动隐藏：未钉住＝鼠标离开窗口后整行淡出（窗口随之少一行）；钉住＝标题栏常驻 |
+| 齿轮图标（MDL2） | 设置菜单：字体、字号、语言、显示模式、文字样式、背景、退出 |
 | EN / ZH / KO / OFF | 循环切换显示的翻译语言 |
 | 双语 / 译文 | 双语与仅译文切换 |
-| 🎤 / 🔊 / 🎤🔊 | 循环切换音频源（双语/译文右侧按钮）：麦克风 → 系统音频（外放回环）→ 麦克风+系统音频混流。切换会重启识别引擎（字幕暂停约 15–30 秒）；🔊/🎤🔊 仅 Windows |
+| 麦克风 / 喇叭 / 两者（MDL2） | 循环切换音频源（双语/译文右侧按钮）：麦克风 → 系统音频（外放回环）→ 麦克风+系统音频混流。切换会重启识别引擎（字幕暂停约 15–30 秒）；系统音频/混流仅 Windows |
 | API / 本地 | 切换翻译通道 |
 | 顶部滑块 | 背景卡片透明度（0–60%）与窗口宽度 |
-| ─ / ✕ | 最小化 / 退出 |
+| 横条 / 叉（MDL2） | 最小化 / 退出 |
 | `Ctrl+Alt+D` / `Ctrl+Alt+L` / `Ctrl+Alt+M` | 点击穿透 / 语言 / 显示模式 |
 | `Esc` | 退出（同时停服务器） |
+
+图标全部取自 Segoe MDL2 Assets 字形，因此整行由**同一个主题色**统一着色（见 `main.js`），且不带描边。标题栏默认自动隐藏（`--no-bar-autohide` 可常驻）；隐藏期间窗口完全穿透。
 
 - 确认的字幕行在屏上累积（每行约保持 8 秒），进行中的草稿在说话时行内更新；窗口高度自动贴合内容。
 - 文字样式 —— 阴影、细描边、B 站弹幕式粗描边（重墨）、文字透明度、粗体 —— 在设置菜单选择，每项均有对应 CLI 参数（`--text-shadow`、`--text-stroke`、`--text-ink`、`--text-opacity`、`--bold`、`--bg`、`--mode`、`--lang`、`--size`）。
