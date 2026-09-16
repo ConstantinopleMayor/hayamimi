@@ -5,7 +5,7 @@ $env:PYTHONUTF8 = 1
 [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
-$project = "D:\AGI\hayamimi"
+$project = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $overlay = "$project\desktop-subtitle"
 $log = "$env:TEMP\hayamimi_serve.log"
 $err = "$env:TEMP\hayamimi_serve.err.log"
@@ -35,9 +35,17 @@ if (-not $serverUp) {
 }
 
 # ---- 2. Electron 桌面字幕窗（默认可交互模式）----
+# 优先用打包版 dist\win-unpacked\*.exe（文件名含中文，故用通配符匹配）；
+# 没有打包版时回退到开发用的 node_modules electron。
 Write-Host "[2/2] 启动桌面字幕窗 ..."
-Start-Process -FilePath "$overlay\node_modules\electron\dist\electron.exe" `
-    -ArgumentList "." -WorkingDirectory $overlay -WindowStyle Hidden
+$packaged = Get-ChildItem (Join-Path $overlay 'dist\win-unpacked\*.exe') -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+if ($packaged) {
+    Start-Process -FilePath $packaged.FullName
+} else {
+    Start-Process -FilePath "$overlay\node_modules\electron\dist\electron.exe" `
+        -ArgumentList "." -WorkingDirectory $overlay -WindowStyle Hidden
+}
 Start-Sleep -Seconds 2
 
 Write-Host ""

@@ -2,8 +2,11 @@
 rem ============================================================
 rem  hayamimi one-click launcher: server + desktop subtitle window
 rem  Usage: double-click this file from Explorer.
+rem  Portable: the project root is derived from THIS file's own
+rem  location, so the whole folder can be moved/copied anywhere.
+rem  (ASCII only on purpose: cmd reads .bat in its ANSI codepage.)
 rem ============================================================
-set "PROJECT=D:\AGI\hayamimi"
+for %%I in ("%~dp0..") do set "PROJECT=%%~fI"
 set "OVERLAY=%PROJECT%\desktop-subtitle"
 set "SERVER_URL=http://localhost:8833/"
 
@@ -44,16 +47,29 @@ if errorlevel 1 (
 )
 
 rem --- 2. desktop subtitle window ---
-echo [2/2] Starting desktop subtitle window...
-pushd "%OVERLAY%"
-start "" "%OVERLAY%\node_modules\electron\dist\electron.exe" .
-popd
+rem Prefer the packaged exe in dist\win-unpacked (its filename is non-ASCII,
+rem hence the wildcard: this file must stay pure ASCII). Falls back to the
+rem dev-checkout electron when the packaged build is absent.
+set "SUBTITLE_EXE="
+for %%F in ("%OVERLAY%\dist\win-unpacked\*.exe") do set "SUBTITLE_EXE=%%~fF"
+if defined SUBTITLE_EXE (
+    echo [2/2] Starting desktop subtitle window (packaged exe)...
+    start "" "%SUBTITLE_EXE%"
+) else (
+    echo [2/2] Starting desktop subtitle window (dev electron)...
+    pushd "%OVERLAY%"
+    start "" "%OVERLAY%\node_modules\electron\dist\electron.exe" .
+    popd
+)
 
 echo.
 echo Subtitle window controls:
-echo   Lock button (lock)  toggle click-through (draggable vs pass-through)
+echo   Pin button          toggle title-bar auto-hide (pinned = always shown)
+echo   Lock button         toggle click-through (draggable vs pass-through)
 echo   Gear button         open settings menu (font size / font family / quit)
 echo   API/Local button    switch translation channel (local MT vs OpenAI API)
+echo   Audio button        cycle audio source: mic / speaker loopback / both
+echo   Top sliders         subtitle backdrop opacity / window width
 echo   Left-drag           move the window (while lock is ON)
 echo   Ctrl+Alt+D          quick toggle click-through
 echo   Esc                 quit subtitle window
