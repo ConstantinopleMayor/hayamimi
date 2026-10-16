@@ -42,14 +42,15 @@ IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache")
 USAGE_TXT = """hayamimi 整合包 {ver} —— 解压即用
 =============================================
 
-一、首次使用（三步）
+一、首次使用（解压后即可用）
 1) 把整个文件夹解压到【短路径】下，例如  C:\\hayamimi
    （模型文件名较长，路径太深会触发 Windows 260 字符限制）
-2) 双击  首次运行.bat   （只需一次）
-   它把 .venv 指向包内的 python\\，并自检所有依赖
-3) 双击  desktop-subtitle\\早耳字幕.exe
-   → 出现字幕窗；服务器（端口 8833）会自动在后台拉起，
-     日志：%TEMP%\\hayamimi-serve.log
+2) 双击  desktop-subtitle\\早耳字幕.exe
+   → 出现字幕窗；exe 首次启动会自动把 .venv 指向包内 python\\，
+      并在后台拉起服务器（端口 8833），日志：%TEMP%\\hayamimi-serve.log
+3) （可选，推荐）双击一次  首次运行.bat
+   做依赖自检 + 清除解压工具留下的“网络下载”标记（免除 SmartScreen 询问）；
+   跳过它 exe 也能跑，只是少了上面两项
 
 二、日常使用
 - 直接用那个 exe 就是启动器：它探测 8833，没有就自己起服务器；关窗会停掉它启动的服务器
@@ -76,13 +77,20 @@ USAGE_TXT = """hayamimi 整合包 {ver} —— 解压即用
 - 未包含 openai_translate.json（真实 API 配置）
 
 六、卸载
-- 直接删掉整个文件夹即可（运行期不往包目录写东西，日志只写 %TEMP%）
+- 直接删掉整个文件夹即可（日志只写 %TEMP%；包目录里唯一会被写入的是
+  exe 首次启动时自动修正的 .venv\\pyvenv.cfg）
 
 七、排错
-- 双击 exe 被 SmartScreen 拦：点“更多信息”→“仍要运行”（程序未签名）
+- **窗口一片空白 / 显示错误页**：说明包不完整（缺 scripts\\、.venv\\、python\\ 或 models\\），
+  或者你把 exe 单独拷出来运行了 → 请重新【完整解压】整个包，然后运行 首次运行.bat
+  （新版遇到这种情况会直接在窗口里写明原因并弹对话框，不会再给个空白页）
+- 双击 exe 出现“Windows 已保护你的电脑”（SmartScreen，程序未签名）：点【仍要运行】即可，
+  同一文件只问一次；运行 首次运行.bat 也会自动清除这类“下载标记”；
+  或改用 7-Zip / 资源管理器“解压到当前文件夹”，不要直接在 zip 里双击 exe
 - 端口 8833 / 8766 被占用：先关掉已在运行的旧实例或占用进程
+- 首次运行.bat 提示 “PACKAGE INCOMPLETE”：把整个包重新完整解压（别只拷 exe）
 - 首次运行.bat 提示依赖检查失败：把窗口里的报错原样发给开发者
-- 更多细节见包内 docs\\（README.zh.md 等）
+- 更多细节见包内 docs\\（README.zh.md、PORTABLE.md 等）
 """
 
 META_FILES = [

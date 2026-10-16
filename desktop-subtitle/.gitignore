@@ -2,3 +2,21 @@ node_modules/
 diag.log
 *.log
 dist/
+
+# The packaged app is published FLAT into this folder by `npm run dist`
+# (tools/publish-flat.js), so the entry point is desktop-subtitle\早耳字幕.exe
+# instead of dist\win-unpacked\早耳字幕.exe. Ignore its artifacts so ~300 MB
+# never enters git. Only the source files stay tracked here: main.js,
+# preload.js, package.json, package-lock.json, .gitignore, tools/ and the
+# launcher scripts (启动早耳.bat / 停止早耳.bat / start_desktop_subtitle.ps1).
+*.exe
+*.dll
+*.pak
+*.bin
+*.dat
+/locales/
+/resources/
+LICENSES.chromium.html
+LICENSE.electron.txt
+vk_swiftshader_icd.json
+.published-flat.json

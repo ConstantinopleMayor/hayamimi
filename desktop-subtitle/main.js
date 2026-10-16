@@ -19,7 +19,7 @@
 //             Right-click / gear opens the menu.
 //   Lock OFF: click-through; only the top-left button band stays interactive.
 //   Ctrl+Alt+D toggle   Ctrl+Alt+L cycle language   Esc quit
-const { app, BrowserWindow, screen, globalShortcut, Menu, ipcMain } = require("electron");
+const { app, BrowserWindow, screen, globalShortcut, Menu, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
 
@@ -312,6 +312,13 @@ const { spawn, execFileSync } = require("child_process");
 const net = require("net");
 
 let spawnedServerPid = null;
+// Set when findProjectRoot() fails: this exe is not sitting inside a complete
+// package (no scripts/ + .venv/ above it). The window then shows an explicit
+// notice instead of a blank Chromium error page (see showRootNotice()).
+let serverRootMissing = false;
+let failNotified = false; // one dialog per run for a failed overlay load
+let warmPollTimer = null; // set while waiting for a freshly spawned server to bind 8833
+let foundRoot = null;     // project root once located (for notice-page footers)
 
 function probeServer(timeoutMs, cb) {
   const sock = net.connect({ host: "127.0.0.1", port: 8833 });
@@ -354,14 +361,58 @@ function findProjectRoot(fromDir) {
   return null;
 }
 
-function autoStartServer(o) {
+// Startup sequence. Probe 8833 first: a server that is already running is used
+// as-is and the overlay loads immediately. Otherwise spawn one and keep the
+// window on a readable "starting" page until the port answers -- the first
+// load of the ASR models takes 15-30 s, and loading the overlay URL before
+// that produced an ERR_CONNECTION_REFUSED dialog plus a Chromium error page
+// that never recovered. If the spawn cannot even be attempted because the exe
+// is outside a complete package, the root notice is shown; any other spawn
+// failure shows the not-ready page and keeps polling (a server started by
+// hand meanwhile is picked up automatically).
+function startUpFlow() {
   probeServer(1200, (up) => {
     if (up) {
-      diag("server already up; not spawning");
+      diag("server already up; loading the overlay");
+      loadOverlay();
       return;
     }
-    spawnServer(false);
+    if (spawnServer(false)) {
+      diag("server spawning; showing the warm-up page until 8833 is up");
+      win.loadURL(statusPageUrl());
+      warmPollTimer = setInterval(warmTick, 800);
+      return;
+    }
+    if (serverRootMissing) {
+      diag("project root missing -> loading the notice page instead of the overlay");
+      win.loadURL(noticePageUrl());
+      return;
+    }
+    diag("server spawn failed -> loading the not-ready page");
+    showServerNotice("http://localhost:8833/", "spawn-error", "服务器进程无法启动");
+    win.loadURL(statusPageUrl());
+    warmPollTimer = setInterval(warmTick, 800);
   });
+}
+
+function warmTick() {
+  if (!win || win.isDestroyed()) {
+    clearInterval(warmPollTimer);
+    warmPollTimer = null;
+    return;
+  }
+  probeServer(700, (up) => {
+    if (!up || !win || win.isDestroyed()) return;
+    if (!warmPollTimer) return; // an earlier probe already resolved
+    clearInterval(warmPollTimer);
+    warmPollTimer = null;
+    diag("server is up; loading the overlay");
+    loadOverlay();
+  });
+}
+
+function loadOverlay() {
+  win.loadURL(buildUrl(opts.url, opts.show));
 }
 
 // Spawn argv for the transcribe server. serveArgs (the user's --serve-args
@@ -393,12 +444,48 @@ function serverSpawnArgs(applyButtonState) {
   return args.concat(kept);
 }
 
+// The portable package ships a `.venv` built on the developer's machine, so
+// its pyvenv.cfg still points at THAT machine's Python. 首次运行.bat re-points
+// it, but the exe self-heals the file too (the same four lines), so a user who
+// skips the one-time setup -- or just double-clicks the exe right after
+// unzipping -- still gets a working server. Runs only when the package carries
+// its own interpreter (python\ next to the root); the dev checkout has no such
+// folder and is never touched.
+function ensurePackagedVenv(root) {
+  const bundled = path.join(root, "python", "python.exe");
+  if (!fs.existsSync(bundled)) return;
+  const cfgPath = path.join(root, ".venv", "pyvenv.cfg");
+  try {
+    let cur = "";
+    try { cur = fs.readFileSync(cfgPath, "utf8"); } catch (_) {}
+    const vm = /(?:^|\n)\s*version\s*=\s*(\S+)/.exec(cur);
+    const lines = [
+      "home = " + path.join(root, "python"),
+      "executable = " + bundled,
+      "include-system-site-packages = false",
+      "version = " + (vm ? vm[1] : "3.12.13"),
+    ];
+    const norm = (s) => s.replace(/\r\n/g, "\n").trim();
+    if (norm(cur) === norm(lines.join("\n"))) return; // already bundled
+    fs.writeFileSync(cfgPath, lines.join("\r\n") + "\r\n", "utf8");
+    diag("pyvenv.cfg self-healed -> " + path.join(root, "python"));
+  } catch (e) {
+    diag("pyvenv.cfg self-heal FAILED: " + e.message);
+  }
+}
+
 function spawnServer(applyButtonState) {
   const root = findProjectRoot(launchDir());
   if (!root) {
-    diag("project root not found near exe; skipping server autostart");
+    serverRootMissing = true;
+    diag("project root not found near exe; skipping server autostart"
+         + " | execPath=" + process.execPath + " | launchDir=" + launchDir());
     return false;
   }
+  serverRootMissing = false;
+  foundRoot = root;
+  diag("project root = " + root);
+  ensurePackagedVenv(root);
   const py = path.join(root, ".venv", "Scripts", "python.exe");
   const args = serverSpawnArgs(applyButtonState);
   try {
@@ -1463,11 +1550,94 @@ function showMenu() {
   Menu.buildFromTemplate(template).popup({ window: win });
 }
 
+// ---------------------------------------------------------------------------
+// Startup notices. Three situations used to leave a blank Chromium error page
+// on screen, which reads as "nothing happened":
+//   1. the exe is NOT inside a complete package (no scripts/ + .venv/ above
+//      it) -> findProjectRoot() fails, no server can be started;
+//   2. a freshly spawned server needs 15-30 s to load its models -- the window
+//      now shows a "starting" page and swaps to the overlay when 8833 answers;
+//   3. the overlay URL fails to load mid-session (server died, port taken...).
+// All three render a readable page inside the window AND raise one dialog.
+// ---------------------------------------------------------------------------
+function noticeHtml(title, lines, footer) {
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return "<!doctype html><meta charset='utf-8'><style>"
+    + "html,body{margin:0;background:#1b1b1f;color:#e8e8ea;"
+    + "font-family:'Microsoft YaHei','Segoe UI',sans-serif;overflow:hidden}"
+    + "#n{padding:14px 16px}"
+    + "h1{margin:0 0 8px;font-size:15px;color:#ffb86b}"
+    + "p{margin:4px 0;font-size:12.5px;line-height:1.45}"
+    + ".dim{color:#9a9aa2;font-size:11px;word-break:break-all;white-space:pre-wrap}"
+    + "</style><div id='n'><h1>" + esc(title) + "</h1>"
+    + lines.map((l) => "<p>" + esc(l) + "</p>").join("")
+    + "<p class='dim'>" + esc(footer) + "</p></div>";
+}
+
+function noticePageUrl() {
+  const html = noticeHtml(
+    "找不到项目目录（缺 scripts\\ 与 .venv\\）",
+    [
+      "这个 exe 是整套 hayamimi 包的一部分，必须和 scripts\\、.venv\\、models\\ 待在同一个项目根下。",
+      "· 请把整个包【完整解压】（不要只把 exe 拷出来单独运行），再双击 desktop-subtitle\\早耳字幕.exe",
+      "· 刚解压的话，先运行一次包根目录的 首次运行.bat",
+      "· 按 Esc 关闭此窗口；详见包内 docs\\PORTABLE.md",
+    ],
+    "exe: " + process.execPath + "\n搜索起点: " + launchDir());
+  return "data:text/html;charset=utf-8," + encodeURIComponent(html);
+}
+
+function statusPageUrl() {
+  const html = noticeHtml(
+    "正在启动字幕服务器…",
+    [
+      "首次启动需要加载语音模型，大约 15–30 秒（切换音频源后重启也要这么久），请稍候。",
+      "· 服务器就绪后本窗口会自动切到字幕页，无需操作",
+      "· 若长时间停在此页：端口 8833 可能被占用，或服务器启动失败",
+      "· 日志：%TEMP%\\hayamimi-serve.log / hayamimi-serve.err.log",
+      "· 也可双击 desktop-subtitle\\启动早耳.bat 手动起服务器；按 Esc 关闭本窗口",
+    ],
+    "exe: " + process.execPath + "\nproject root: " + (foundRoot || "?")
+  );
+  return "data:text/html;charset=utf-8," + encodeURIComponent(html);
+}
+
+function showRootNotice() {
+  try {
+    dialog.showMessageBox(win, {
+      type: "warning",
+      title: "hayamimi - 启动失败",
+      message: "找不到项目目录（缺 scripts\\ 与 .venv\\）",
+      detail: "这个 exe 必须和 scripts\\、.venv\\、models\\ 待在同一个项目根下。\n\n"
+        + "· 请重新【完整解压】整合包（不要只拷贝 exe 单独运行），然后双击 "
+        + "desktop-subtitle\\早耳字幕.exe\n"
+        + "· 若刚解压，请先运行一次包根目录的 首次运行.bat",
+      buttons: ["知道了"],
+      noLink: true,
+    }).catch(() => {});
+  } catch (_) {}
+}
+
+function showServerNotice(url, code, desc) {
+  try {
+    dialog.showMessageBox(win, {
+      type: "warning",
+      title: "hayamimi - 服务器未启动",
+      message: "无法连接转写服务器：" + url,
+      detail: "服务器未就绪（" + code + " " + desc + "）。\n\n"
+        + "· 端口 8833 可能被占用，或服务器启动失败\n"
+        + "· 日志：%TEMP%\\hayamimi-serve.log / hayamimi-serve.err.log\n"
+        + "· 也可双击 desktop-subtitle\\启动早耳.bat 先手动起服务器",
+      buttons: ["知道了"],
+      noLink: true,
+    }).catch(() => {});
+  } catch (_) {}
+}
+
 app.whenReady().then(() => {
   opts = parseArgs();
   lang = opts.lang;
-  audioInput = opts.input; // before autoStartServer: serverSpawnArgs reads it
-  autoStartServer(opts); // exe-as-bat: spawn server if not already up (async)
+  audioInput = opts.input; // serverSpawnArgs reads it (startUpFlow spawns later)
 
   // API-translation availability: a usable openai_translate.json in the
   // project root (one directory above this app) enables the "API" channel
@@ -1570,8 +1740,42 @@ app.whenReady().then(() => {
     showMenu();
   });
 
+  // Mid-session overlay load failures (server died, port taken, ...): say so
+  // instead of showing Chromium's error page, which looks like "nothing
+  // happened". Suppressed while the warm-up poll is running -- during that
+  // phase 8833 is simply not up yet and no overlay load has been attempted.
+  win.webContents.on("did-fail-load", (_e, code, desc, url, isMainFrame) => {
+    if (isMainFrame === false) return;
+    if (warmPollTimer) return;
+    diag("did-fail-load code=" + code + " " + desc + " url=" + url);
+    if (!failNotified) {
+      failNotified = true;
+      showServerNotice(url, code, desc);
+    }
+  });
+
   win.webContents.on("did-finish-load", async () => {
     diag("did-finish-load URL=" + win.webContents.getURL());
+    // the initial empty document can finish loading before startUpFlow() has
+    // decided what to show; nothing to bootstrap yet
+    if (win.webContents.getURL() === "about:blank") return;
+    if (serverRootMissing) {
+      // not inside a complete package: there is no overlay page to style and no
+      // server to talk to -- the readable notice page is already loaded, just
+      // give it room and make sure the user notices it
+      diag("incomplete package: showing the root notice");
+      const nb = win.getBounds();
+      win.setBounds({ x: nb.x, y: nb.y, width: nb.width, height: 250 });
+      showRootNotice();
+      return;
+    }
+    if (win.webContents.getURL().startsWith("data:")) {
+      // warm-up / not-ready page: nothing to bootstrap until the overlay loads
+      diag("status page shown; waiting for the server");
+      const nb = win.getBounds();
+      win.setBounds({ x: nb.x, y: nb.y, width: nb.width, height: 230 });
+      return;
+    }
     win.webContents.on("console-message", (_e, _l, message) => {
       diag("renderer: " + message);
     });
@@ -1610,7 +1814,9 @@ app.whenReady().then(() => {
     notifyServerTranslation(translateSpec(lang));
   });
 
-  win.loadURL(buildUrl(opts.url, opts.show));
+  // Load nothing yet: startUpFlow() probes/spawns the server first and drives
+  // the window (warm-up page -> overlay, or the appropriate notice).
+  startUpFlow();
 
   pollTimer = setInterval(refreshMouseMode, 40);
 
