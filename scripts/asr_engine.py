@@ -28,6 +28,7 @@ from zh_space import normalize_zh_spaces
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 V3_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8")
+V2_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8")
 SV_MODEL_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")
 OMNI_MODEL_DIR = os.path.join(MODELS_DIR, "omnilingual-300m-ctc-int8")
 WHISPER_TINY_DIR = os.path.join(MODELS_DIR, "sherpa-onnx-whisper-tiny")
@@ -58,6 +59,26 @@ V3_LANGS = {
     "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu",
     "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
 }
+
+# Valid values for RoutedASR(en_tier=...) / --en-tier. "v3" (default) keeps
+# "en" on the multilingual Parakeet TDT v3 model alongside the other
+# V3_LANGS. "v2" re-homes "en" on the en-only Parakeet TDT v2 (punctuation +
+# capitalization built in; FLEURS en WER 6.6% vs v3's 10.0%, upstream #57) --
+# opt-in because it adds ~660MB resident once loaded and consumes one
+# --max-resident slot. A missing v2 directory degrades to v3 (see
+# _TIER_FALLBACK), never to rz, so the opt-in can never take the en route
+# down.
+EN_TIERS = ("v3", "v2")
+
+
+def resolve_en_tier(requested: str) -> str:
+    """Validate an --en-tier / RoutedASR(en_tier=...) value.
+
+    Pure function (no model access) so it's unit-testable without loading
+    sherpa-onnx models."""
+    if requested not in EN_TIERS:
+        raise ValueError(f"unknown en_tier {requested!r}, must be one of {EN_TIERS}")
+    return requested
 
 LID_MAX_SECONDS = 4.0  # only feed the first N seconds of a segment to the LID model
 
@@ -108,6 +129,20 @@ def _build_v3_recognizer(threads: int):
         decoder=_find(V3_MODEL_DIR, "decoder*.onnx"),
         joiner=_find(V3_MODEL_DIR, "joiner*.onnx"),
         tokens=os.path.join(V3_MODEL_DIR, "tokens.txt"),
+        num_threads=threads,
+        model_type="nemo_transducer",
+    )
+
+
+def _build_v2_recognizer(threads: int):
+    # en-only tier, opt-in (--en-tier v2 / RoutedASR(en_tier="v2")). Same NeMo
+    # TDT transducer export shape as v3, just a different model directory
+    # (upstream #57); punctuation and capitalization come from the model.
+    return sherpa_onnx.OfflineRecognizer.from_transducer(
+        encoder=_find(V2_MODEL_DIR, "encoder*.onnx"),
+        decoder=_find(V2_MODEL_DIR, "decoder*.onnx"),
+        joiner=_find(V2_MODEL_DIR, "joiner*.onnx"),
+        tokens=os.path.join(V2_MODEL_DIR, "tokens.txt"),
         num_threads=threads,
         model_type="nemo_transducer",
     )
@@ -464,6 +499,7 @@ _KEY_FILES = {
     "pz": (PARA_ZH_DIR, "model*.onnx"),
     "sv": (SV_MODEL_DIR, "model*.onnx"),
     "v3": (V3_MODEL_DIR, "encoder*.onnx"),
+    "v2": (V2_MODEL_DIR, "encoder*.onnx"),
     "omni": (OMNI_MODEL_DIR, "model*.onnx"),
 }
 
@@ -478,11 +514,20 @@ _BUILDERS = {
     "pz": _build_paraformer_zh,
     "sv": _build_sense_voice,
     "v3": _build_v3_recognizer,
+    "v2": _build_v2_recognizer,
     "omni": _build_omnilingual,
 }
 
-# preload priority when a residency cap is in effect
+# preload priority when a residency cap is in effect. "v2" is deliberately
+# absent: an opt-in model most sessions never touch (en_tier defaults to
+# "v3"), so it lazy-loads on first use instead of paying its load cost on
+# every session regardless of whether the opt-in feature is on.
 _PRELOAD_ORDER = ("pz", "sv", "v3", "omni")
+
+# Opt-in tiers that are strict alternatives to a default tier, and the default
+# they must degrade to when missing (consulted by _get_with_fallback before
+# the generic chain). Register every future opt-in tier here.
+_TIER_FALLBACK: dict[str, tuple[str, ...]] = {"v2": ("v3",)}
 
 
 class ModelUnavailable(RuntimeError):
@@ -505,10 +550,11 @@ class RoutedASR:
                  max_resident: int | None = None, punctuate: bool = True,
                  hotwords_file: str = "", replace_file: str = "",
                  lid_switch_confirm: int = 2, dual_confirm: bool = True,
-                 forced_lang: str | None = None):
+                 forced_lang: str | None = None, en_tier: str = "v3"):
         self._threads = threads
         self.dual_confirm = dual_confirm  # --mode balanced (default); False = --mode fast
         self.forced_lang = forced_lang    # --mode single: skip all LID/switch logic
+        self.en_tier = resolve_en_tier(en_tier)  # --en-tier: v3 (default) / v2 opt-in
         self._models: dict[str, object] = {}
         self._last_used: dict[str, float] = {}
         self._max_resident = max_resident
@@ -529,6 +575,7 @@ class RoutedASR:
         self._closed = False
         self._bg_threads: list[threading.Thread] = []
         self._bg_lock = threading.Lock()  # guards _closed + _bg_threads
+        self._fallback_warned: set[str] = set()  # once-per-tier degradation stderr
         self.last_lang = None  # sticky language from the most recent final
         self._unavailable: set[str] = set()  # models missing on disk (--minimal installs)
         self._pending_lang = None   # candidate new language awaiting confirmation
@@ -695,9 +742,13 @@ class RoutedASR:
             with self._load_lock:
                 if self._punct is None:
                     try:
-                        from punct_ja import PunctuatorJa
+                        # the 4-class restorer (、。？！ from one modernbert
+                        # model, ~37MB int8, ~3.4ms/line) replaces the old
+                        # fp32 mojicast BERT (、。 only, 364MB, ~44ms) --
+                        # upstream #58. Missing model/deps degrade quietly.
+                        from punct_ja import PunctuatorJa4Class
 
-                        self._punct = PunctuatorJa()
+                        self._punct = PunctuatorJa4Class()
                     except Exception:
                         self._punctuate = False  # missing model/deps: degrade quietly
         return self._punct
@@ -766,11 +817,29 @@ class RoutedASR:
         return rec
 
     def _get_with_fallback(self, name: str) -> tuple[object, str]:
-        for cand in (name, "rz", "sv", "v3", "pz", "omni"):
+        # An opt-in tier that is a strict alternative to a default tier must
+        # degrade to THAT default before the generic ja-first chain (v2 -> v3,
+        # not v2 -> rz whose English is unpunctuated ALL-CAPS). The table is
+        # consulted here, not at the call site, so a future opt-in tier only
+        # has to register its default in _TIER_FALLBACK to get this right.
+        chain = [name]
+        for cand in (*_TIER_FALLBACK.get(name, ()), "rz", "sv", "v3", "pz", "omni"):
+            if cand not in chain:
+                chain.append(cand)
+        for cand in chain:
             try:
-                return self._get(cand), cand
+                rec = self._get(cand)
             except ModelUnavailable:
                 continue
+            if cand != name and name not in self._fallback_warned:
+                # once per distinct requested name per session -- a whole
+                # missing tier would otherwise warn on every single segment
+                # for the rest of the session
+                self._fallback_warned.add(name)
+                print(f"[hayamimi] model tier '{name}' unavailable; falling "
+                      f"back to '{cand}' for the rest of the session "
+                      f"(see scripts/download_models.py)", file=sys.stderr)
+            return rec, cand
         raise RuntimeError(
             "no ASR models found under models/ -- run scripts/download_models.py")
 
@@ -853,9 +922,38 @@ class RoutedASR:
             return self._get_with_fallback("pz")
         if lang in SV_LANGS:
             return self._get_with_fallback("sv")
+        if lang == "en" and self.en_tier == "v2":
+            # opt-in en-only tier; deliberately checked before the V3_LANGS
+            # membership test rather than by removing "en" from V3_LANGS, so
+            # routing-set callers keep seeing "en" homed on v3 at the default.
+            # A missing v2 lands on v3 via _TIER_FALLBACK.
+            return self._get_with_fallback("v2")
         if lang in V3_LANGS:
             return self._get_with_fallback("v3")
         return self._get_with_fallback("omni")
+
+    def _draft_punct(self, text: str, lang: str | None, tier: str) -> str:
+        """Draft-text punctuation for the tiers that emit bare text.
+
+        pz (Paraformer-zh) and rz (ReazonSpeech ja) produce unpunctuated
+        output; SenseVoice / V3 do their own. Finals get punctuation restored
+        in transcribe(); drafts did not -- a pauseless speaker watched a
+        punctuation-free pile grow for the whole segment. Only the
+        known-language pz/rz draft paths are restored here (the generic
+        fallback path's language is unknown, so its text is left alone).
+        The trailing end-mark a punctuator appends to unfinished text is
+        stripped by run_stream's strip_draft_tail_marks() -- one place for
+        the display, the draft translation and the boundary detector."""
+        if not text.strip():
+            return text
+        try:
+            if lang == "zh" and tier == "pz" and self.punct_zh is not None:
+                return self.punct_zh.restore(text)
+            if lang == "ja" and tier == "rz" and self.punct is not None:
+                return self.punct.restore(text)
+        except Exception:
+            pass  # a punctuation failure must never lose the draft
+        return text
 
     def partial(self, samples: np.ndarray, sample_rate: int,
                 lang_hint: str | None = None) -> str:
@@ -874,15 +972,17 @@ class RoutedASR:
         """
         self._check_open()
         if self.forced_lang is not None:
-            rec, _ = self._route(self.forced_lang)
-            return self._replace(self._decode(rec, samples, sample_rate),
+            rec, tier = self._route(self.forced_lang)
+            text = self._replace(self._decode(rec, samples, sample_rate),
                                  zh=self.forced_lang == "zh")
+            return self._draft_punct(text, self.forced_lang, tier)
 
         if lang_hint is not None:
             # this utterance's language is confirmed: use its specialist
-            rec, _ = self._route(lang_hint)
-            return self._replace(self._decode(rec, samples, sample_rate),
+            rec, tier = self._route(lang_hint)
+            text = self._replace(self._decode(rec, samples, sample_rate),
                                  zh=lang_hint == "zh")
+            return self._draft_punct(text, lang_hint, tier)
 
         sticky = self.last_lang
         if sticky in V3_LANGS and sticky != "en":
@@ -905,7 +1005,7 @@ class RoutedASR:
             try:
                 rz_text = self._decode(self._get("rz"), samples, sample_rate)
                 if rz_text.strip():
-                    return self._replace(rz_text)
+                    return self._draft_punct(self._replace(rz_text), "ja", "rz")
             except ModelUnavailable:
                 pass
         return self._replace(sv_text, zh="zh" in (sv_tag or ""))

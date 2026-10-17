@@ -347,6 +347,10 @@ def test_partial_forced_lang_routes_directly_without_lid_or_sv_probe():
         # keeps checking whatever the real guard checks.
         _closed = False
         _check_open = asr_engine.RoutedASR._check_open
+        # draft punctuation rides the same borrowed-method pattern: for the
+        # sv tier the helper short-circuits (lang "ko" matches no pz/rz arm)
+        # and returns the text untouched, without touching any punctuator
+        _draft_punct = asr_engine.RoutedASR._draft_punct
 
         def _route(self, lang):
             assert lang == "ko"

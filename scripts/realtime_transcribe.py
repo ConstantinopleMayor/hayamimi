@@ -639,6 +639,157 @@ PARTIAL_EVERY_S = 0.5   # decode a draft this often (in audio time) during speec
 PARTIAL_WINDOW_S = 60.0
 
 
+SENT_END_CHARS = "。？！?!.．…"
+FLUSH_MIN_SPEECH_S = 2.0   # a shorter segment is not worth a forced flush
+FLUSH_COOLDOWN_S = 1.5     # audio-time quiet period required between flushes
+BOUNDARY_TAIL_CHARS = 4    # fresh characters required after the end mark
+TAIL_SCAN_S = 2.5          # trim scan window at the flushed segment's tail
+DIP_REL_GATE = 3.0         # a dip frame is <= this x the window's quiet floor
+DIP_ABS_GATE = 2e-3        # ...and quieter than this absolute RMS
+DIP_MIN_RUN_FRAMES = 4     # a boundary pause is >= this many quiet frames
+                           # (~120ms); the micro-gaps between the letters of
+                           # a spelled-out acronym ("A P I") are 30-80ms and
+                           # must never be cut at
+
+
+def _latin_letter(c: str) -> bool:
+    """Alphanumeric check shared by the boundary pickers: a sentence-end mark
+    between two alphanumerics ("调用AP。I" / "v4.1。flash") is a punctuator
+    tear, not a boundary. Digits INCLUDED so version-string tears are skipped
+    too; real ends always have CJK (or nothing) on one side."""
+    return ("a" <= c <= "z") or ("A" <= c <= "Z") or ("0" <= c <= "9")
+
+_TAIL_MARKS_RE = None  # lazily built below
+
+
+def strip_draft_tail_marks(text: str) -> str:
+    """Remove ONE trailing run of sentence-end marks (plus whitespace) from a
+    draft text.
+
+    The draft punctuators and the native-punctuation models all append an
+    end mark to whatever they have heard so far -- that trailing mark is the
+    model's guess about an UNFINISHED sentence, not a boundary (the speaker
+    is still talking), and left in place it (a) shows a period that comes
+    and goes on every re-decode and (b) hides the text's real last INTERNAL
+    boundary from SemanticSplitter.should_flush, which then never fires for
+    pz/en drafts -- the exact '模型库。还没变成 final' bug. INTERNAL marks
+    are untouched: they are genuine sentence boundaries."""
+    global _TAIL_MARKS_RE
+    if _TAIL_MARKS_RE is None:
+        _TAIL_MARKS_RE = _re.compile(r"[。．.!！?？…][\s　]*$")
+    return _TAIL_MARKS_RE.sub("", text).rstrip()
+
+
+class SemanticSplitter:
+    """Flush-closes the VAD segment at sentence ends measured in DRAFT text.
+
+    The VAD only closes a segment after >= min_silence of true silence
+    (max_speech just temporarily raises its threshold to *encourage* a
+    split), so a speaker who never pauses grows one giant segment: every 0.5s
+    draft re-decodes the whole thing and the final only lands when a real
+    pause finally arrives. When a draft shows a sentence-end mark followed by
+    fresh text, the sentence is acoustically complete -- vad.flush()
+    finalizes the segment right there and the very next drain_segments emits
+    its final (sentence-sized segments, less draft-decode CPU, snappier
+    subtitles; the old max_speech encouragement stays as the fallback for
+    punctuation-free stretches).
+
+    The flushed segment's tail may already hold the next sentence's first
+    syllables (the draft lags the audio it describes):
+    trim_if_flushed cuts the flushed segment at the last energy dip in its
+    trailing TAIL_SCAN_S window. The cut audio is bridged back by the next
+    segment's 1s preroll (history.last_seg_end shrinks with the trim because
+    with_preroll is handed the trimmed samples), so nothing is lost to
+    either final. No dip found -> the whole segment emits (it may carry a
+    syllable or two of the next sentence; liveable).
+    """
+
+    def __init__(self):
+        self._cooldown_until = 0.0
+        self._flushed_end = None  # end sample index of the segment to trim
+
+    def should_flush(self, text: str, speech_s: float, audio_pos: float) -> bool:
+        if speech_s < FLUSH_MIN_SPEECH_S or audio_pos < self._cooldown_until:
+            return False
+        # strip the draft's trailing end-mark first: models/punctuators append
+        # one to unfinished text, and an un-stripped trailing mark both
+        # shadows the last INTERNAL boundary from the scan below ( pz/en
+        # drafts end with one all the time -> flush never fired ) and has no
+        # fresh text after it, so it could never count as a boundary anyway
+        text = strip_draft_tail_marks(text)
+        # scan back to the newest internal boundary, skipping marks that
+        # tore an all-caps word apart (letters both sides, "AP。I") -- those
+        # are punctuator artifacts, and cutting there would split "API"
+        cut = -1
+        for i in range(len(text) - 1, -1, -1):
+            if text[i] in SENT_END_CHARS:
+                prev = text[i - 1] if i > 0 else ""
+                nxt = text[i + 1] if i + 1 < len(text) else ""
+                if _latin_letter(prev) and _latin_letter(nxt):
+                    continue
+                cut = i
+                break
+        if cut < 0:
+            return False
+        # the mark must be FOLLOWED by fresh text: the boundary sentence is
+        # complete AND the next one has started speaking. Threshold is
+        # script-aware: CJK needs 4 chars (morpheme-level evidence); Latin
+        # text needs just 2+ chars of a new WORD -- English words average 5
+        # ASCII chars, so 4 would keep delaying en's flush by a syllable.
+        tail = text[cut + 1:].strip()
+        if _re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", tail):
+            return len(tail) >= BOUNDARY_TAIL_CHARS
+        return len(tail) >= 2
+
+    def arm(self, audio_pos: float, flushed_end: int) -> None:
+        self._cooldown_until = audio_pos + FLUSH_COOLDOWN_S
+        self._flushed_end = flushed_end
+
+    def trim_if_flushed(self, seg_end: int, samples: np.ndarray,
+                        sample_rate: int) -> np.ndarray:
+        """Cut the flushed segment at its boundary dip; other segments pass
+        through untouched (matched by end sample index, one shot)."""
+        if self._flushed_end is None or seg_end != self._flushed_end:
+            return samples
+        self._flushed_end = None
+        n = len(samples)
+        frame = max(int(0.03 * sample_rate), 8)
+        # scan the last TAIL_SCAN_S seconds -- or the WHOLE segment when it
+        # is shorter (sentence-level flushes are 2-3s, exactly the ones that
+        # need the trim; the run checks below keep an early cut safe)
+        win = min(int(TAIL_SCAN_S * sample_rate), n)
+        tail = samples[-win:]
+        m = len(tail) // frame
+        if m < 8:
+            return samples  # nothing that could hold pause + speech on both sides
+        rms = np.sqrt((tail[:m * frame].reshape(m, frame) ** 2).mean(axis=1))
+        loud = float(rms.max())
+        if loud < DIP_ABS_GATE:
+            return samples  # the whole tail is near-silence: no syllables to hand back
+        # the dip gate must sit well BELOW the speech level (a pauseless tail
+        # has floor == speech RMS, where "floor x 3" alone would call every
+        # frame quiet and cut real words) and well above true noise
+        gate = min(max(float(rms.min()) * DIP_REL_GATE, DIP_ABS_GATE), loud * 0.3)
+        quiet = np.flatnonzero(rms <= gate)
+        # only a RUN of consecutive quiet frames is a boundary pause; the
+        # 30-80ms gaps inside a spelled-out acronym show up as 1-2 quiet
+        # frames and must never cut ("A P I" -> "…AP" + "I…")
+        if len(quiet) < DIP_MIN_RUN_FRAMES:
+            return samples
+        runs = np.split(quiet, np.where(np.diff(quiet) != 1)[0] + 1)
+        # walk runs from the latest one backwards; a run needs >=2 speech
+        # frames before it (the sentence's last words) and >=2 after (the
+        # next sentence's first syllables -- what the cut hands back to the
+        # next segment via preroll)
+        for run in reversed(runs):
+            f_end = int(run[-1])
+            f_start = int(run[0])
+            if f_start < 2 or f_end > m - 3:
+                continue
+            return samples[:n - win + (f_end + 1) * frame]
+        return samples
+
+
 class PartialPrinter:
     """Shows in-progress drafts; overwrites in place on a tty, one line otherwise."""
 
@@ -715,13 +866,24 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
                    printer: PartialPrinter, history: AudioHistory | None = None,
                    known_lang: str | None = None, refiner: "Refiner | None" = None,
                    translator_worker: "TranslationWorker | None" = None,
-                   speaker_labeler=None) -> int:
+                   speaker_labeler=None,
+                   splitter: "SemanticSplitter | None" = None) -> int:
     drained = 0
     while not vad.empty():
         segment = vad.front
         seg_end_time = time.perf_counter()  # segment-end reference point for latency
         samples = np.asarray(segment.samples, dtype=np.float32)
-        seg_start, seg_end = segment.start, segment.start + len(samples)
+        seg_start = segment.start
+        seg_end = seg_start + len(samples)
+        if splitter is not None:
+            # a boundary-flushed segment gets its trailing next-sentence
+            # syllables cut off (see SemanticSplitter.trim_if_flushed): spans
+            # and preroll bounds must use the TRIMMED extent, or the refine
+            # pass would decode the same audio into two utterance groups
+            trimmed = splitter.trim_if_flushed(seg_end, samples, sample_rate)
+            if len(trimmed) != len(samples):
+                samples = trimmed
+                seg_end = seg_start + len(samples)
         if history is not None:
             samples = history.with_preroll(seg_start, samples)
         vad.pop()
@@ -1479,6 +1641,7 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
     audio_pos = 0.0
     last_partial = 0.0
     early_lang = None  # LID result computed mid-utterance so finals skip it
+    splitter = SemanticSplitter()
     if history is None:
         history = AudioHistory(sample_rate)
     for chunk in chunks:
@@ -1490,7 +1653,8 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
             if drain_segments(vad, sample_rate, asr, stats, printer, history, early_lang,
                               refiner=refiner,
                               translator_worker=translator_worker,
-                              speaker_labeler=speaker_labeler):
+                              speaker_labeler=speaker_labeler,
+                              splitter=splitter):
                 early_lang = None
             if refiner is not None:
                 refiner.maybe_refine(int(audio_pos * sample_rate), force=True)
@@ -1513,7 +1677,8 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
             if asr.forced_lang is None and early_lang is None and len(cur) >= int(2.0 * sample_rate):
                 early_lang = asr.identify(cur, sample_rate)
             if printer.enabled and len(cur) >= sample_rate // 2:
-                partial_text = asr.partial(cur, sample_rate, lang_hint=early_lang)
+                partial_text = strip_draft_tail_marks(
+                    asr.partial(cur, sample_rate, lang_hint=early_lang))
                 printer.show(partial_text)
                 # Kick off a draft translation WHILE the speaker is still
                 # talking, so the confirmed line's translation isn't the
@@ -1523,11 +1688,24 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
                 if translator_worker is not None and partial_text.strip():
                     translator_worker.submit_partial(
                         partial_text, early_lang or getattr(asr, "last_lang", None) or "ja")
+                # Sentence-boundary flush (SemanticSplitter): the draft now
+                # carries punctuation, so a です/呢/?  followed by fresh words
+                # means the sentence is complete even though the speaker
+                # never paused -- finalize the segment NOW instead of
+                # letting it grow to the VAD's own (much later, much
+                # longer) cut. The very next drain in this same loop
+                # iteration emits the final, and the trimmed syllables of
+                # the next sentence ride back in via that segment's preroll.
+                if partial_text.strip() and splitter.should_flush(
+                        partial_text, len(cur) / sample_rate, audio_pos):
+                    splitter.arm(audio_pos, vad.current_segment.start + len(cur))
+                    vad.flush()
 
         if drain_segments(vad, sample_rate, asr, stats, printer, history, early_lang,
                           refiner=refiner,
                           translator_worker=translator_worker,
-                          speaker_labeler=speaker_labeler):
+                          speaker_labeler=speaker_labeler,
+                          splitter=splitter):
             early_lang = None
         if refiner is not None and not vad.is_speech_detected():
             refiner.maybe_refine(int(audio_pos * sample_rate))
@@ -1542,7 +1720,16 @@ def main():
     ap.add_argument("--min-silence", type=float, default=0.35,
                     help="silence (s) that ends an utterance; lower = snappier finals, more splits")
     ap.add_argument("--max-speech", type=float, default=12.0,
-                    help="force-finalize an utterance after this many seconds of continuous speech")
+                    help="when a segment exceeds this many seconds the VAD temporarily "
+                         "raises its threshold to ENCOURAGE a split (not a hard cut -- "
+                         "pauseless speech can exceed it); sentence-end flushes close "
+                         "segments sooner regardless")
+    ap.add_argument("--en-tier", choices=["v3", "v2"], default="v2",
+                    help="English ASR route: v2 = en-only Parakeet TDT (fork default -- "
+                         "built-in punctuation+capitalization, FLEURS en WER 6.6%% vs "
+                         "v3's 10.0%%, upstream #57, ~460MB download via "
+                         "download_models.py --en-parakeet-v2) or v3 (multilingual "
+                         "Parakeet TDT). A missing v2 falls back to v3")
     ap.add_argument("--max-resident", type=int, default=3,
                     help="max non-tier0 models kept in memory (LRU eviction); 0 or less = unlimited")
     ap.add_argument("--serve", type=int, nargs="?", const=8833, default=None, metavar="PORT",
@@ -1692,7 +1879,8 @@ def main():
                     hotwords_file=args.hotwords, replace_file=args.replace,
                     lid_switch_confirm=max(args.lid_switch_confirm, 1),
                     dual_confirm=(args.mode != "fast"),
-                    forced_lang=args.lang if args.mode == "single" else None)
+                    forced_lang=args.lang if args.mode == "single" else None,
+                    en_tier=args.en_tier)
     asr.min_switch_s = max(args.lang_switch_guard, 0.0)
     vad = build_vad(args.min_silence, args.max_speech)
     stats = SessionStats()

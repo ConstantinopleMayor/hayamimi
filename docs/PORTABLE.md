@@ -12,7 +12,10 @@ by itself. Built and verified on 2026-09-16, re-verified 2026-10-17 (see
 hayamimi/
   python/                      bundled CPython 3.12.13 (portable, ~52 MiB)
   .venv/                       runtime dependencies (~609 MiB)
-  models/                      FULL runtime model set (~3.1 GiB)
+  models/                      FULL runtime model set (~3.2 GiB: en on the
+                                Parakeet TDT v2 tier, ja punctuation on the
+                                37MB 4-class model; the retired 364MB
+                                mojicast 2-class punctuator is excluded)
   scripts/  docs/  README*  LICENSE  THIRD_PARTY_NOTICES.md  requirements.txt
   desktop-subtitle/            the packaged app FLAT: the exe, its dlls,
                                 locales/ and resources/ sit directly here
@@ -64,6 +67,7 @@ own interpreter is used and nothing outside the folder is consulted.
 | `node_modules/` | the packaged exe is self-contained |
 | ffmpeg | only the dataset/eval scripts (`make_realset*.py`) use it -- never the live pipeline |
 | `sherpa-onnx-zipformer-korean-2024-06-24` | `download_models.py` labels it "eval baseline only"; ko runs on SenseVoice (`asr_engine.py` SV_LANGS) |
+| `mojicast-punct-onnx` | RETIRED 2-class ja punctuator (364MB) -- superseded by the 4-class `punct-ja-4class-permissive` (upstream #58); the packager excludes it and existing installs can delete the folder |
 
 ## Building / refreshing the package
 
@@ -121,16 +125,17 @@ Cold-start testing exposed a UX bug in the 09-16 build: the window loaded the
 overlay URL immediately, i.e. before the freshly spawned server had bound 8833.
 Result: a false "服务器未启动" dialog a few seconds in, and a Chromium error
 page that never recovered even though the server came up later. The exe now
-probes/spawns first, shows a `正在启动字幕服务器…` page, and swaps to the
+probes/spawns first (**with the window hidden -- nothing appears on screen
+during the wait**), and swaps to the
 overlay when 8833 answers. `main.js` also self-heals `.venv\\pyvenv.cfg` (same
 four lines as `首次运行.bat`) whenever the package carries its own `python\\`,
 so the one-time setup is optional. Re-verified on freshly extracted copies:
 
-1. `首次运行.bat` -> preflight OK, deps OK; exe -> warm-up page -> overlay,
-   HTTP 200, no `did-fail-load` (no self-heal needed: the .bat's cfg already
-   points at the bundled python).
+1. `首次运行.bat` -> preflight OK, deps OK; exe -> (window hidden while the
+   server loads) -> overlay, HTTP 200, no `did-fail-load` (no self-heal
+   needed: the .bat's cfg already points at the bundled python).
 2. Cold start **without** `首次运行.bat` -> `pyvenv.cfg self-healed -> <pkg>\\python`
-   -> warm-up page -> overlay -> HTTP 200, live subtitles confirmed.
+   -> same hidden-until-ready start -> overlay -> HTTP 200, live subtitles confirmed.
 3. pyvenv.cfg pointed at a nonexistent python (fresh-machine simulation) ->
    self-heal again -> working window, **no** dialog.
 4. exe copied out of any package -> the readable "找不到项目目录" notice page
@@ -158,7 +163,7 @@ both cases and explains itself:
 | Symptom | Meaning | What the exe does now |
 |---|---|---|
 | `project root not found near exe` in `%TEMP%\hayamimi-desktop-subtitle.log` | the exe is not inside a complete package (or was copied out alone) | loads a readable notice page (project root, missing pieces, how to fix) **and** raises a dialog |
-| window shows `正在启动字幕服务器…` | normal warm-up: a freshly spawned server loads its models for 15-30 s | swaps to the overlay automatically once 8833 answers (no dialog) |
+| window shows nothing right after launching the exe | normal warm-up: a freshly spawned server loads its models (first start 15-30 s; the window is deliberately hidden until then -- no warm-up page) | the overlay window appears on its own once 8833 answers (no dialog); a start that FAILS (spawn error / port taken) raises a dialog instead of staying silent |
 | the overlay URL fails to load (e.g. `did-fail-load`, port 8833 taken) | the server is not running (and was not just spawned) | logs `did-fail-load ...` and raises a one-time dialog pointing at `%TEMP%\hayamimi-serve.log` / `启动早耳.bat` |
 | `首次运行.bat` prints `PACKAGE INCOMPLETE - missing: scripts\ ...` | the archive was not fully extracted | stops right there instead of "succeeding" into a broken setup |
 

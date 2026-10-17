@@ -37,7 +37,14 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache")
+IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache",
+                                # retired 2-class punctuation model (364MB,
+                                # superseded by punct-ja-4class-permissive;
+                                # nothing in the runtime references it anymore)
+                                "mojicast-punct-onnx",
+                                # huggingface_hub's download-cache dirs inside
+                                # models fetched via download_hf_repo
+                                ".cache")
 
 USAGE_TXT = """hayamimi 整合包 {ver} —— 解压即用
 =============================================

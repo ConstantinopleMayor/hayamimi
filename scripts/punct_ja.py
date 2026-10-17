@@ -17,6 +17,7 @@ asr_engine.py / realtime_transcribe.py -- integration is done elsewhere.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 import unicodedata
@@ -125,11 +126,16 @@ class PunctuatorJa:
         return self.vocab.get(ch, self.unk_id)
 
     # ------------------------------------------------------------------
-    def restore(self, text: str) -> str:
-        """Insert 、/。 into `text` and return the punctuated string."""
+    def restore(self, text: str, force_final_period: bool | None = None) -> str:
+        """Insert 、/。 into `text` and return the punctuated string.
+
+        force_final_period overrides the constructor default per call:
+        the streaming draft path passes False -- a provisional line must
+        not grow a trailing 。 every time it is re-decoded."""
         text = text.strip()
         if not text:
             return text
+        ffp = self.force_final_period if force_final_period is None else force_final_period
 
         chars = self._tokenize_chars(text)
         if not chars:
@@ -164,35 +170,159 @@ class PunctuatorJa:
                 # don't double up before existing punctuation
                 continue
             if period_p >= self.period_threshold and (
-                not is_last or self.force_final_period
+                not is_last or ffp
             ):
                 out_parts.append("。")
             elif comma_p >= self.comma_threshold:
                 out_parts.append("、")
 
         result = "".join(out_parts)
-        if self.force_final_period and result and result[-1] not in _JA_PUNCT_CHARS:
+        if ffp and result and result[-1] not in _JA_PUNCT_CHARS:
             result += "。"
 
-        result = self._apply_question_marks(result)
+        result = self._apply_question_marks(result, force_final_period=ffp)
         return result
 
     @staticmethod
-    def _apply_question_marks(text: str) -> str:
+    def _apply_question_marks(text: str, force_final_period: bool = True) -> str:
         """Rule-based post-pass: turn a sentence-final '。' into '？' when
         the sentence ends in a common question suffix. The ONNX model only
         classifies comma/period, so this is a simple heuristic layered on
-        top (see docs/PUNCT_JA.md, "known limitations")."""
+        top (see docs/PUNCT_JA.md, "known limitations").
+
+        With force_final_period=False the LAST content segment gets no mark
+        appended: the caller is punctuating a provisional draft, and a
+        trailing 。 that comes and goes between re-decodes just flickers."""
         segments = text.split("。")
         # split() on "a。b。" -> ["a", "b", ""]; a trailing "" means the
         # text ended with "。" (so there's nothing after the last mark).
+        last = len(segments) - 1
         out = []
-        for seg in segments:
+        for i, seg in enumerate(segments):
             if not seg:
+                continue
+            if i == last and not force_final_period:
+                out.append(seg)
                 continue
             mark = "？" if seg.endswith(_QUESTION_SUFFIXES) else "。"
             out.append(seg + mark)
         return "".join(out)
+
+
+# ------------------------------------------------------------------------
+PUNCT4_LABELS = ("O", "、", "。", "？", "！")
+PUNCT4_DEFAULT_MODEL_DIR = SCRIPT_DIR.parent / "models" / "punct-ja-4class-permissive"
+PUNCT4_ONNX_RELPATH = os.path.join("quantized_ort", "punct_4class.int8.onnx")
+PUNCT4_MAX_CHARS = 450
+PUNCT4_INTRA_OP_NUM_THREADS = 2
+
+
+class PunctuatorJa4Class:
+    """Four-class (+ "none") ja punctuation restorer, upstream #58.
+
+    Single token-classification model (sbintuitions/modernbert-ja-30m body,
+    MIT, fine-tuned on FineWeb-2 jpn_Jpan) that predicts, per subword token,
+    whether one of 、/。/？/！ follows it directly -- unlike PunctuatorJa
+    above, ？ and ！ come from the MODEL, not the suffix heuristic, and the
+    int8 export is ~44MB lighter and ~13x faster than the fp32 mojicast
+    BERT (FLEURS-ja punctuation F1 0.888 vs 0.621 -- the repo README table).
+    Model dir: models/punct-ja-4class-permissive/ (download via
+    scripts/download_models.py).
+
+    restore() returns text whose FINAL mark is still a guess about a
+    possibly-unfinished sentence -- same contract as the old restorer's
+    force_final_period output; the draft path strips trailing marks with
+    realtime_transcribe.strip_draft_tail_marks(). There is no
+    force_final_period flag: marks are inserted exactly where the model
+    fires, and the caller's post-processing decides about the tail.
+    """
+
+    def __init__(
+        self,
+        model_dir: str | Path = PUNCT4_DEFAULT_MODEL_DIR,
+        onnx_relpath: str | Path = PUNCT4_ONNX_RELPATH,
+        max_chars: int = PUNCT4_MAX_CHARS,
+        num_threads: int = PUNCT4_INTRA_OP_NUM_THREADS,
+    ):
+        import onnxruntime as ort
+
+        try:
+            from tokenizers import Tokenizer
+        except ImportError as e:  # pragma: no cover
+            raise ImportError(
+                "the `tokenizers` package is required for PunctuatorJa4Class. "
+                "Install with: pip install tokenizers"
+            ) from e
+
+        model_dir = Path(model_dir)
+        onnx_path = model_dir / onnx_relpath
+        tokenizer_path = model_dir / "hf" / "tokenizer.json"
+        if not onnx_path.exists() or not tokenizer_path.exists():
+            raise FileNotFoundError(
+                f"4-class punctuation model files not found under {model_dir}. "
+                "Expected quantized_ort/punct_4class.int8.onnx and "
+                "hf/tokenizer.json (scripts/download_models.py fetches them)."
+            )
+
+        self.max_chars = max_chars
+        self.tokenizer = Tokenizer.from_file(str(tokenizer_path))
+
+        so = ort.SessionOptions()
+        so.intra_op_num_threads = num_threads
+        so.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(
+            str(onnx_path), sess_options=so, providers=["CPUExecutionProvider"]
+        )
+
+    def restore(self, text: str) -> str:
+        """Insert 、/。/？/！ into `text` and return the punctuated string.
+
+        Purely additive: every character of `text` survives unchanged and
+        only marks are inserted. The model was trained on NFKC-normalised
+        text; callers feeding raw ASR output with fullwidth digits/Latin or
+        halfwidth katakana should normalise first -- the pipeline normalizes
+        here in one shot (unlike the upstream split, fork-side ASR inserts
+        are pre-ITN for drafts; doing it here keeps every call site safe).
+        """
+        text = text.strip()
+        if not text:
+            return text
+        text = unicodedata.normalize("NFKC", text)
+        text = text[: self.max_chars]
+
+        enc = self.tokenizer.encode(text)
+        ids_np = np.array([enc.ids], dtype=np.int64)
+        mask_np = np.ones((1, len(enc.ids)), dtype=np.int64)
+
+        logits = self.session.run(
+            ["logits"], {"input_ids": ids_np, "attention_mask": mask_np}
+        )[0][0]  # -> (seq_len, 5)
+        preds = logits.argmax(-1).tolist()
+
+        return reconstruct_punct4_text(text, enc.offsets, preds)
+
+
+def reconstruct_punct4_text(text: str, offsets, label_ids, labels=PUNCT4_LABELS) -> str:
+    """Pure reconstruction step for PunctuatorJa4Class.restore(): given the
+    plain `text` fed to the tokenizer and parallel per-token (start, end)
+    char-offset / predicted-label-id sequences (as produced by a
+    `tokenizers` fast tokenizer + argmax over the ONNX model's logits),
+    insert the predicted marks right after the last character each token
+    covers and return the punctuated string."""
+    mark_at = [""] * len(text)
+    for (start, end), label_id in zip(offsets, label_ids):
+        if end <= start:
+            continue  # special token (CLS/SEP), offset (0, 0)
+        label = labels[label_id]
+        if label != "O" and end - 1 < len(mark_at):
+            mark_at[end - 1] = label
+
+    out_parts: list[str] = []
+    for i, ch in enumerate(text):
+        out_parts.append(ch)
+        if mark_at[i]:
+            out_parts.append(mark_at[i])
+    return "".join(out_parts)
 
 
 # ------------------------------------------------------------------------

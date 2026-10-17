@@ -183,6 +183,10 @@ def main():
                      help="also download 2 extra models (~1GB) used only by scripts/eval_accuracy.py "
                           "and scripts/make_realset_zhko.py as comparison baselines -- not needed "
                           "to run realtime_transcribe.py.")
+    ap.add_argument("--en-parakeet-v2", action="store_true",
+                     help="also download the opt-in en-only Parakeet TDT v2 tier (~460MB, "
+                          "built-in punctuation+capitalization; enable with --en-tier v2, "
+                          "upstream #57). Not part of the default download set.")
     args = ap.parse_args()
 
     os.makedirs(MODELS_DIR, exist_ok=True)
@@ -207,16 +211,15 @@ def main():
         os.path.join(MODELS_DIR, "silero_vad.onnx"),
         "Silero VAD")
 
-    # Punctuation model: only the fp32 export. The int8 export on this HF repo
-    # (punct_bert.int8.onnx) was found non-functional (near-constant logits)
-    # on onnxruntime 1.29 CPU EP during development -- see docs/PUNCT_JA.md.
-    # Skipped here to save ~90MB and avoid confusion; punct_ja.py only ever
-    # loads punct_bert.onnx.
+    # Japanese punctuation: the 4-class restorer (、。？！, upstream #58,
+    # MIT modernbert base) -- int8 37MB + 6.7MB tokenizer. Replaces the old
+    # fp32 mojicast-punct-onnx BERT (、。 only, 364MB, ~44ms/line); delete
+    # models/mojicast-punct-onnx/ from existing installs to reclaim it.
     download_hf_repo(
-        "ishiki-emo/mojicast-punct-onnx",
-        "mojicast-punct-onnx",
-        "Japanese punctuation restoration (Mojicast/tohoku-nlp, fp32 only)",
-        ignore_patterns=["*.int8.onnx"])
+        "oboroge0/hayamimi-punct-ja-4class",
+        "punct-ja-4class-permissive",
+        "Japanese punctuation 4-class (modernbert-ja-30m, MIT; int8 only)",
+        ignore_patterns=["*.safetensors", "punct_4class.onnx"])
 
     if args.minimal:
         print("\n--minimal done. zh/ko/yue/EU/omnilingual ASR, speaker labels, and "
@@ -279,6 +282,12 @@ def main():
         "ishiki-emo/mojicast-fugumt-ja-en-ct2",
         "mojicast-fugumt-ja-en-ct2",
         "FuguMT CTranslate2 (ja->en translation, CC BY-SA 4.0 -- see THIRD_PARTY_NOTICES.md)")
+
+    if args.en_parakeet_v2:
+        download_and_extract_tarbz2(
+            f"{GITHUB_RELEASES}/{ASR_TAG}/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2",
+            "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
+            "Parakeet TDT 0.6B v2 (en-only, opt-in --en-tier v2)")
 
     if args.eval_baselines:
         download_and_extract_tarbz2(

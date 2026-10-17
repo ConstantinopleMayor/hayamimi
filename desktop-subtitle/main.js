@@ -18,7 +18,7 @@
 //   Lock ON:  interactive; left-drag anywhere moves the window (native).
 //             Right-click / gear opens the menu.
 //   Lock OFF: click-through; only the top-left button band stays interactive.
-//   Ctrl+Alt+D toggle   Ctrl+Alt+L cycle language   Esc quit
+//   Ctrl+Alt+D toggle   Ctrl+Alt+L cycle language (close: the title bar ✕)
 const { app, BrowserWindow, screen, globalShortcut, Menu, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
@@ -44,7 +44,7 @@ function diag(msg) {
 }
 
 const DEFAULT_SIZE = 24;  // 24pt initial subtitle size
-const LANGS = ["en", "zh", "ko", "off"];
+const LANGS = ["zh", "en", "ko", "off"]; // button cycle: OFF -> ZH -> EN -> KO
 const LANG_LABEL = { en: "EN", zh: "ZH", ko: "KO", off: "OFF" };
 const SIZE_CHOICES = [12, 16, 20, 24, 32, 40, 48, 56, 64];
 const FONT_CHOICES = [
@@ -363,13 +363,16 @@ function findProjectRoot(fromDir) {
 
 // Startup sequence. Probe 8833 first: a server that is already running is used
 // as-is and the overlay loads immediately. Otherwise spawn one and keep the
-// window on a readable "starting" page until the port answers -- the first
-// load of the ASR models takes 15-30 s, and loading the overlay URL before
-// that produced an ERR_CONNECTION_REFUSED dialog plus a Chromium error page
-// that never recovered. If the spawn cannot even be attempted because the exe
-// is outside a complete package, the root notice is shown; any other spawn
-// failure shows the not-ready page and keeps polling (a server started by
-// hand meanwhile is picked up automatically).
+// window HIDDEN until the port answers -- the first load of the ASR models
+// takes 15-30 s, and the window is created with show:false so nothing (not
+// even a warm-up page) appears on screen during that wait; the overlay is
+// revealed by loadOverlay() the moment the server is ready. Loading the
+// overlay URL before that produced an ERR_CONNECTION_REFUSED dialog plus a
+// Chromium error page that never recovered, hence the poll. Failure paths
+// still show the window: the root notice when the exe is outside a complete
+// package, the not-ready page (and a dialog) on any other spawn failure,
+// which keeps polling (a server started by hand meanwhile is picked up
+// automatically).
 function startUpFlow() {
   probeServer(1200, (up) => {
     if (up) {
@@ -378,17 +381,18 @@ function startUpFlow() {
       return;
     }
     if (spawnServer(false)) {
-      diag("server spawning; showing the warm-up page until 8833 is up");
-      win.loadURL(statusPageUrl());
+      diag("server spawning; window stays hidden until 8833 is up");
       warmPollTimer = setInterval(warmTick, 800);
       return;
     }
     if (serverRootMissing) {
       diag("project root missing -> loading the notice page instead of the overlay");
       win.loadURL(noticePageUrl());
+      win.show();
       return;
     }
-    diag("server spawn failed -> loading the not-ready page");
+    diag("server spawn failed -> showing the not-ready page");
+    win.show();
     showServerNotice("http://localhost:8833/", "spawn-error", "服务器进程无法启动");
     win.loadURL(statusPageUrl());
     warmPollTimer = setInterval(warmTick, 800);
@@ -411,8 +415,13 @@ function warmTick() {
   });
 }
 
+// The window is created hidden (a cold start must show nothing on screen
+// until the server is ready); reveal it now that the overlay is loading. A
+// transparent window renders as nothing until the first paint, so the user
+// only ever sees the overlay itself appear.
 function loadOverlay() {
   win.loadURL(buildUrl(opts.url, opts.show));
+  if (!win.isVisible()) win.show();
 }
 
 // Spawn argv for the transcribe server. serveArgs (the user's --serve-args
@@ -626,7 +635,7 @@ function buildUrl(base, show) {
 let win = null;
 let opts = null;
 let passthrough = false;
-let lang = "off"; // default: no translation (button cycles EN/ZH/KO/OFF)
+let lang = "off"; // default: no translation (button cycles OFF/ZH/EN/KO)
 let audioInput = "mic"; // capture source (mic/speaker/mix); switching restarts the server
 let serverBusy = false; // audio-source restart in flight: the audio button shows the hourglass icon, re-entry blocked
 let mode = "both";  // "both" = bilingual rows, "tr" = translation only
@@ -1053,16 +1062,28 @@ function makeInitJs() {
     //                   partial draft rides INLINE at the end (same-line look
     //                   as the original #final-line + #partial-line pair), so
     //                   a new final APPENDS after older finals and several can
-    //                   share the screen. Each confirmed segment keeps its own
-    //                   8s lifetime, then fades out.
-    //   #hmy-tr-flow    translations: one segment per confirmed source with
-    //                   the same 8s lifetime + an in-progress draft at the end.
-    // 'segs' maps seq -> {srcEl, trEl, timer} so a late 'translation' (API is
+    //                   share the screen.
+    //   #hmy-tr-flow    translations: one row per confirmed source segment +
+    //                   an in-progress draft at the end.
+    // 'segs' maps seq -> {srcEl, trEl} so a late 'translation' (API is
     // slow) can still attach to its segment.
+    //
+    // Lifetime policy (replaces the old per-segment 8s TTL, which re-flowed
+    // the text at random moments while reading): content is.STABLE while
+    // anyone is speaking or translating -- the ONLY changes are at a new
+    // final's arrival. When no event has been seen for IDLE_CLEAR_MS
+    // (silence, paused video, just finished reading), the whole card is
+    // cleared once; during very long continuous speech a roll-up cap keeps
+    // the card bounded, dropping the OLDEST segments at the same moment a
+    // new one appends (scroll-with-reading, never mid-read).
+    var IDLE_CLEAR_MS = 2000;  // no SSE event at all for this long -> clear the card
+    var MAX_CHARS = 200;       // roll-up cap: this many source chars on screen -> drop oldest on append
     var box = document.getElementById('box');
     var txtFlow = null, trFlow = null, txtPart = null, trDraft = null;
-    var segs = {};        // seq -> {srcEl, trEl, timer}
+    var segs = {};        // seq -> {srcEl, trEl}
     var lastSeq = 0;
+    var idleTimer = null;
+    var seqOrder = [];    // confirmed seqs in append order (roll-up eviction)
     if (box) {
       txtFlow = document.createElement('div');
       txtFlow.id = 'hmy-txt-flow';
@@ -1076,6 +1097,44 @@ function makeInitJs() {
       trDraft = document.createElement('span');
       trDraft.className = 'hmy-tr-draft';
       trFlow.appendChild(trDraft);
+    }
+    function bumpActivity() {
+      // every SSE event (finals, drafts, late translations) counts as
+      // activity; only TRUE silence -- zero events -- trips the clear
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(function(){
+        // idle clear: the one visual change that happens without content.
+        // The inline draft spans are rebuilt fresh so the next utterance's
+        // drafts render normally.
+        for (var k in segs) delete segs[k];
+        seqOrder.length = 0;
+        if (!txtFlow || !trFlow) return;
+        txtFlow.textContent = '';
+        trFlow.textContent = '';
+        txtPart = document.createElement('span');
+        txtPart.className = 'hmy-txt-part';
+        txtFlow.appendChild(txtPart);
+        trDraft = document.createElement('span');
+        trDraft.className = 'hmy-tr-draft';
+        trFlow.appendChild(trDraft);
+      }, IDLE_CLEAR_MS);
+    }
+    function dropOldest() {
+      // roll-up eviction, called only at append time: while the source flow
+      // holds >= MAX_CHARS, remove the oldest confirmed segment (source +
+      // translation rows together) -- the card stays bounded during
+      // continuous speech, and the reflow coincides with the new sentence
+      // appearing (scroll-with-reading, never mid-read)
+      while (txtFlow.textContent.trim().length >= MAX_CHARS) {
+        var old = seqOrder.shift();
+        if (old === undefined) break;
+        var sg = segs[old];
+        if (!sg) { delete segs[old]; continue; }
+        if (sg.srcEl && sg.srcEl.parentNode) sg.srcEl.parentNode.removeChild(sg.srcEl);
+        if (sg.trEl && sg.trEl.parentNode) sg.trEl.parentNode.removeChild(sg.trEl);
+        delete segs[old];
+        if (txtFlow.textContent.trim().length < MAX_CHARS) break;
+      }
     }
     window.__hmyShowTr = function(){
       // language switch: refresh only the LATEST confirmed translation from
@@ -1113,12 +1172,16 @@ function makeInitJs() {
     // like the original #partial-line next to #final-line.
     var es = new EventSource('/events');
     es.onmessage = function(e){
+      bumpActivity();
       var ev;
       try { ev = JSON.parse(e.data); } catch (err) { return; }
 
       if (ev.type === 'partial') {
         // current in-progress source text rides inline at the end of the
-        // source flow (same-line look, mirroring #partial-line).
+        // source flow (same-line look, mirroring #partial-line). After an
+        // idle clear the span was rebuilt; after a roll-up drop it may have
+        // been detached for a moment -- re-attach before writing.
+        if (txtPart && txtPart.parentNode !== txtFlow) txtFlow.appendChild(txtPart);
         if (txtPart) txtPart.textContent = ev.text;
         return;
       }
@@ -1126,6 +1189,7 @@ function makeInitJs() {
         // current in-progress draft translation rides inline at the end of
         // the translation flow; never cached in __hmyTr (that map only
         // holds confirmed translations).
+        if (trDraft && trDraft.parentNode !== trFlow) trFlow.appendChild(trDraft);
         if (window.__hmyLang === ev.lang && trDraft) {
           trDraft.textContent = ev.text;
         }
@@ -1148,11 +1212,14 @@ function makeInitJs() {
         return;
       }
       if (ev.type === 'final') {
-        // promote the current draft to a confirmed segment: append to the
-        // source flow after older finals, start its 8s lifetime, and give
-        // it an empty translation row the late 'translation' will fill.
+        // promote the current draft to a confirmed segment: roll-up the
+        // oldest segments if the caps are hit, then append to the source
+        // flow after older finals and give it an empty translation row the
+        // late 'translation' will fill. NO per-segment lifetime anymore --
+        // without this timer the text never reflows while reading.
         var seq = (ev.seq !== undefined && ev.seq !== null) ? ev.seq : (++lastSeq);
         if (seq > lastSeq) lastSeq = seq;
+        dropOldest();
         var srcEl = document.createElement('span');
         srcEl.className = 'hmy-txt-seg';
         srcEl.textContent = ev.text;
@@ -1176,29 +1243,11 @@ function makeInitJs() {
         // (clearing it now would leave an empty translation row for the whole
         // API/MT round-trip window). The 'translation' handler clears it.
 
-        var segObj = { srcEl: srcEl, trEl: trEl, timer: null };
-        segs[seq] = segObj;
-        // each confirmed segment has its own 8s lifetime, then fades out and
-        // is removed -- several finals can share the screen in the meantime.
-        segObj.timer = setTimeout(function(){
-          // no fade-out: remove immediately after the 8s lifetime (a fade
-          // felt laggy -- the text visibly sat there transitioning).
-          if (srcEl && srcEl.parentNode) srcEl.parentNode.removeChild(srcEl);
-          if (trEl && trEl.parentNode) trEl.parentNode.removeChild(trEl);
-          var ds = srcEl.getAttribute && srcEl.getAttribute('data-seq');
-          if (ds !== null && ds !== undefined && ds !== '') delete segs[String(ds)];
-        }, 8000);
-        // keep a reverse pointer for cleanup (simplest: read data-seq)
-        srcEl.setAttribute('data-seq', String(seq));
+        segs[seq] = { srcEl: srcEl, trEl: trEl };
+        seqOrder.push(seq);
         return;
       }
     };
-    // helper: map a source element back to its seq via data-seq
-    function s2seq(el) {
-      if (!el) return null;
-      var d = el.getAttribute && el.getAttribute('data-seq');
-      return d !== null && d !== undefined && d !== '' ? String(d) : null;
-    }
     console.log('hmy: init ok');
   } catch (err) {
     console.log('hmy: init FAILED ' + ((err && err.message) || err));
@@ -1581,7 +1630,7 @@ function noticePageUrl() {
       "这个 exe 是整套 hayamimi 包的一部分，必须和 scripts\\、.venv\\、models\\ 待在同一个项目根下。",
       "· 请把整个包【完整解压】（不要只把 exe 拷出来单独运行），再双击 desktop-subtitle\\早耳字幕.exe",
       "· 刚解压的话，先运行一次包根目录的 首次运行.bat",
-      "· 按 Esc 关闭此窗口；详见包内 docs\\PORTABLE.md",
+      "· 按 ✕ 按钮关闭此窗口；详见包内 docs\\PORTABLE.md",
     ],
     "exe: " + process.execPath + "\n搜索起点: " + launchDir());
   return "data:text/html;charset=utf-8," + encodeURIComponent(html);
@@ -1595,7 +1644,7 @@ function statusPageUrl() {
       "· 服务器就绪后本窗口会自动切到字幕页，无需操作",
       "· 若长时间停在此页：端口 8833 可能被占用，或服务器启动失败",
       "· 日志：%TEMP%\\hayamimi-serve.log / hayamimi-serve.err.log",
-      "· 也可双击 desktop-subtitle\\启动早耳.bat 手动起服务器；按 Esc 关闭本窗口",
+      "· 也可双击 desktop-subtitle\\启动早耳.bat 手动起服务器；按 ✕ 关闭本窗口",
     ],
     "exe: " + process.execPath + "\nproject root: " + (foundRoot || "?")
   );
@@ -1715,6 +1764,8 @@ app.whenReady().then(() => {
     height: winH,
     x: winX,
     y: winY,
+    show: false, // stay hidden until the server is ready (startUpFlow);
+    // loadOverlay() reveals the window, error paths call win.show() themselves
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -1820,7 +1871,9 @@ app.whenReady().then(() => {
 
   pollTimer = setInterval(refreshMouseMode, 40);
 
-  globalShortcut.register("Esc", () => app.quit());
+  // no global Esc shortcut: a global Esc quit the window while the user was
+  // typing Esc in ANY app (browser forms, games). Closing is the title bar's
+  // ✕ only; the other Ctrl+Alt+X combos are unlikely to collide and stay.
   globalShortcut.register("Control+Alt+D", () => applyPassthrough(!passthrough));
   globalShortcut.register("Control+Alt+L", () => cycleLang());
   globalShortcut.register("Control+Alt+M", () => applyMode(mode === "both" ? "tr" : "both"));

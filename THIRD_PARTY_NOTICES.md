@@ -15,6 +15,7 @@ weights** -- one of them is share-alike, not permissive.
 | `sherpa-onnx-paraformer-zh-2024-03-09` (Paraformer-zh, Mandarin bilingual zh+en, zh) | Alibaba DAMO Academy / FunASR | Apache-2.0 | [FunASR](https://github.com/modelscope/FunASR) (ModelScope `speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8358`), packaged by k2-fsa/sherpa-onnx |
 | `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17` (SenseVoice small, ko/yue) | Alibaba / FunAudioLLM | Apache-2.0 (code) + FunASR Model Open Source License Agreement (official weights; permits commercial use with attribution) | [FunAudioLLM/SenseVoice](https://github.com/FunAudioLLM/SenseVoice), packaged by k2-fsa/sherpa-onnx |
 | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` (Parakeet TDT 0.6B v3, en + 24 EU langs) | NVIDIA | CC-BY-4.0 | [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), packaged by k2-fsa/sherpa-onnx |
+| `sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8` (Parakeet TDT 0.6B v2, en-only -- fork default for `en`, opt-in upstream; enabled by `--en-tier v2`) | NVIDIA | CC-BY-4.0 | [nvidia/parakeet-tdt-0.6b-v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2), packaged by k2-fsa/sherpa-onnx |
 | `omnilingual-300m-ctc-int8` (Meta Omnilingual ASR 300M CTC, ~1600-language fallback) | Meta AI | Apache-2.0 | [facebook/omniASR-CTC-300M](https://huggingface.co/facebook/omniASR-CTC-300M) / [facebookresearch/omnilingual-asr](https://github.com/facebookresearch/omnilingual-asr), ONNX export packaged by k2-fsa/sherpa-onnx |
 | `sherpa-onnx-whisper-tiny` (spoken-language ID) | OpenAI | MIT | [openai/whisper](https://github.com/openai/whisper), ONNX export packaged by k2-fsa/sherpa-onnx |
 | `silero_vad.onnx` (voice activity detection) | Silero Team | MIT | [snakers4/silero-vad](https://github.com/snakers4/silero-vad), packaged by k2-fsa/sherpa-onnx |
@@ -24,7 +25,8 @@ weights** -- one of them is share-alike, not permissive.
 
 | Model (dir under `models/`) | Publisher | License | Source |
 |---|---|---|---|
-| `mojicast-punct-onnx` (Japanese punctuation restoration) | Base models: Tohoku NLP + bobfromjapan; ONNX export: Mojicast (ishiki-emo) | Apache-2.0 | [tohoku-nlp/bert-base-japanese-char-v3](https://huggingface.co/tohoku-nlp/bert-base-japanese-char-v3), [bobfromjapan/bert_japanese_punctuation](https://huggingface.co/bobfromjapan/bert_japanese_punctuation), export: [ishiki-emo/mojicast-punct-onnx](https://huggingface.co/ishiki-emo/mojicast-punct-onnx) |
+| `punct-ja-4class-permissive` (Japanese punctuation restoration, 、。？！ 4-class -- replaces the retired mojicast 2-class model) | Base model: sbintuitions (modernbert-ja-30m, MIT); fine-tune data: FineWeb-2 jpn_Jpan (**ODC-By 1.0 -- attribution required**); ONNX export + trained head: oboroge0 (hayamimi) | MIT (weights); training data ODC-By 1.0 | [sbintuitions/modernbert-ja-30m](https://huggingface.co/sbintuitions/modernbert-ja-30m), [HuggingFaceFW/fineweb-2](https://huggingface.co/datasets/HuggingFaceFW/fineweb-2), export: [oboroge0/hayamimi-punct-ja-4class](https://huggingface.co/oboroge0/hayamimi-punct-ja-4class) |
+| *(retired)* `mojicast-punct-onnx` (old 2-class Japanese punctuation, 、。 only) | Base models: Tohoku NLP + bobfromjapan; ONNX export: Mojicast (ishiki-emo) | Apache-2.0 | [tohoku-nlp/bert-base-japanese-char-v3](https://huggingface.co/tohoku-nlp/bert-base-japanese-char-v3), [bobfromjapan/bert_japanese_punctuation](https://huggingface.co/bobfromjapan/bert_japanese_punctuation), export: [ishiki-emo/mojicast-punct-onnx](https://huggingface.co/ishiki-emo/mojicast-punct-onnx) -- superseded by `punct-ja-4class-permissive`; safe to delete from existing installs (364 MB) |
 | `mojicast-m2m100-ct2` (M2M-100 418M, ja->zh/ko translation) | Meta AI (base model); CTranslate2 conversion: Mojicast (ishiki-emo) | MIT | [facebook/m2m100_418M](https://huggingface.co/facebook/m2m100_418M), conversion: [ishiki-emo/mojicast-m2m100-ct2](https://huggingface.co/ishiki-emo/mojicast-m2m100-ct2) |
 | `mojicast-fugumt-ja-en-ct2` (FuguMT, ja->en translation) | staka (base model); CTranslate2 conversion: Mojicast (ishiki-emo) | **CC BY-SA 4.0 (share-alike)** | [staka/fugumt-ja-en](https://huggingface.co/staka/fugumt-ja-en), conversion: [ishiki-emo/mojicast-fugumt-ja-en-ct2](https://huggingface.co/ishiki-emo/mojicast-fugumt-ja-en-ct2) |
 
@@ -63,8 +65,10 @@ evaluation -- `asr_engine.py`'s routing does not use them.
 | [soundfile](https://github.com/bastibe/python-soundfile) | BSD-3-Clause | |
 | [sounddevice](https://github.com/spatialaudio/python-sounddevice) | MIT | microphone capture |
 | [soundcard](https://github.com/bastibe/SoundCard) | BSD-3-Clause | WASAPI loopback capture of PC audio output for `--input speaker`/`mix` |
-| [fugashi](https://github.com/polm/fugashi) | MIT (MeCab itself is BSD/GPL/LGPL tri-license) | Japanese tokenization for punctuation restoration |
+| [fugashi](https://github.com/polm/fugashi) | MIT (MeCab itself is BSD/GPL/LGPL tri-license) | Japanese tokenization for the (retired) mojicast punctuation model; still used by `punct_ja.py`'s legacy `PunctuatorJa` class and its tests |
 | [unidic-lite](https://github.com/polm/unidic-lite) | MIT (dictionary data: BSD-modified, per UniDic) | dictionary for fugashi |
+| [tokenizers](https://github.com/huggingface/tokenizers) | Apache-2.0 | fast tokenizer for `PunctuatorJa4Class` (the 4-class punctuation model) |
+| [jieba](https://github.com/fxsjy/jieba) | MIT | Chinese dictionary segmenter; `punct_zh.py`'s word-split repair pass (bogus end-mark removal) |
 | [kiwipiepy](https://github.com/bab2min/kiwipiepy) | **LGPL-2.1-or-later** | Korean tokenizer, used only to fix SenseVoice's spacing on `ko` output; optional at runtime (falls through silently if not installed) -- kept as an **optional/dev extra**, not a hard runtime dependency, to avoid LGPL obligations on the core install |
 | [psutil](https://github.com/giampaolo/psutil) | BSD-3-Clause | memory diagnostics |
 
@@ -82,7 +86,7 @@ evaluation -- `asr_engine.py`'s routing does not use them.
 ## Design inspiration
 
 Several integration choices in this project (the FuguMT/M2M-100 CTranslate2
-conversions, the punctuation model export, and beam-size/repetition-control
+conversions, the (retired) punctuation model export, and beam-size/repetition-control
 settings noted in `docs/TRANSLATE.md` and `docs/TRANSLATE_M2M.md`) are drawn
 from or reuse artifacts published by the [Mojicast](https://github.com/ishiki-emo/mojicast)
 project (MIT-licensed offline captioning app) by ishiki-emo. Credit and thanks

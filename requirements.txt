@@ -16,6 +16,10 @@ ctranslate2==4.8.1
 sentencepiece==0.2.2
 fugashi==1.5.2
 unidic-lite==1.0.8
+# 4-class Japanese punctuation model (punct-ja-4class-permissive) fast tokenizer
+tokenizers==0.23.3
+# Chinese dictionary segmenter; punct_zh.py's word-split repair pass
+jieba==0.42.1
 psutil==7.2.2
 huggingface_hub==1.28.0
 
