@@ -59,12 +59,17 @@ _RE = re.compile(
     r"(第?)([" + _NUM_CHARS + r"]+)(?:点([" + _FRAC_CHARS + r"]+))?(" + _UNIT_ALT + r")?"
 )
 _PCT_RE = re.compile(
-    r"百分之([" + _NUM_CHARS + r"]+)(?:点([" + _FRAC_CHARS + r"]+))?"
+    r"百分之\s*([" + _NUM_CHARS + r"]+)(?:点\s*([" + _FRAC_CHARS + r"]+))?"
 )
 # itn_cjk runs BEFORE zh_digit (postprocessing order: ITN -> punct ->
 # --replace last), so a "百分之" that already went through itn_cjk carries
 # ARABIC digits (百分之17, 百分之3.5): both forms must collapse to "17%".
-_PCT_AR_RE = re.compile(r"百分之(\d+)(?:\.(\d+))?")
+# Paraformer's token spacing wraps those digits in spaces ("百分之1 . 4",
+# "百分之 1 . 4"), which used to defeat both percent patterns -- only the
+# head matched and the decimal tail was orphaned ("1% . 4", 2026-10-18
+# report) -- so whitespace after 百分之 and around 点/'.' is part of the
+# match.
+_PCT_AR_RE = re.compile(r"百分之\s*(\d+)(?:\s*\.\s*(\d+))?")
 
 
 def _parse_int(s: str) -> int:

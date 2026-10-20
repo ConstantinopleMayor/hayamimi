@@ -268,12 +268,16 @@ class TranslatorApi:
         }
         # Reasoning-model support (OpenAI-compatible endpoints like
         # SiliconFlow): `enable_thinking` switches thinking mode on/off for
-        # MOST reasoning models (DeepSeek-V4, GLM, Kimi, ...). NOT all models
-        # accept the field — e.g. SiliconFlow's tencent/Hunyuan-MT-7B returns
-        # 400 code 20015 "current model does not support parameter
-        # enable_thinking". So we only send it when the config EXPLICITLY sets
-        # it: `"enable_thinking": true/false`. Omitted (default) = don't send
-        # the field at all, which keeps strict MT endpoints happy.
+        # reasoning models (DeepSeek-R1, DeepSeek-V4, GLM, Kimi, ...).
+        # Probed 2026-10-19 on SiliconFlow: BOOLEAN true/false are accepted
+        # (Hunyuan-MT silently ignores them; DeepSeek-R1 answers fast with
+        # false and thinks long with true); STRING values ("true"/"false")
+        # are REJECTED with HTTP 400 code 20015 "The parameter is invalid"
+        # -- that was the original 20015 report. So: only send the field
+        # when the config EXPLICITLY sets it as a BOOLEAN; omitted (default)
+        # = don't send, the most compatible choice. The settings panel
+        # writes real booleans and surfaces any HTTP rejection before the
+        # config is saved.
         et = self.cfg.get("enable_thinking")
         if et is not None:
             payload["enable_thinking"] = bool(et) if not isinstance(et, str) else et

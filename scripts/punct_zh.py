@@ -43,6 +43,23 @@ def _latin_letter(c: str) -> bool:
     return ("a" <= c <= "z") or ("A" <= c <= "Z") or ("0" <= c <= "9")
 
 
+def _spaced_digits_around(text: str, i: int) -> bool:
+    """The mark at i sits INSIDE a number whose separator pz wrapped in
+    token spaces ("31 . 2" for "31.2", "4。 12"): the nearest non-space
+    chars on both sides are ASCII digits. The literal _latin_letter guard
+    cannot see this -- the mark's neighbours are the spaces."""
+    j = i - 1
+    while j >= 0 and text[j] in (" ", "　"):
+        j -= 1
+    k = i + 1
+    n = len(text)
+    while k < n and text[k] in (" ", "　"):
+        k += 1
+    p = text[j] if j >= 0 else ""
+    r = text[k] if k < n else ""
+    return ("0" <= p <= "9") and ("0" <= r <= "9")
+
+
 class PunctuatorZh:
     """Restores Chinese/English punctuation in unpunctuated text.
 
@@ -89,7 +106,7 @@ class PunctuatorZh:
     def _repair_word_splits(self, text: str) -> str:
         """Delete sentence-end marks (。？！) that cannot be real boundaries.
 
-        Two conservative checks per mark (？！included, ，never touched):
+        Three conservative checks per mark (？！included, ，never touched):
 
         1. jieba join: a 2+2 char window around the mark (mark excluded) is
            re-segmented; a single token SPANNING the mark's position means
@@ -102,8 +119,12 @@ class PunctuatorZh:
            _PRED_markers is bogus -- drop it. ("最新。模型" stays: 最 is
            not in the guard set because 最新/最快 are true predicates too;
            protecting them costs the rare miss.)
+        3. spaced-digit guard: pz token spacing wraps a decimal separator
+           in spaces ("4。 12.3"), which defeats the alnum guard above (its
+           neighbours are the spaces); nearest non-space chars being two
+           ASCII digits means the mark sits inside a number -- drop it.
 
-        Marks passing both checks survive; everything else is the model's
+        Marks passing all checks survive; everything else is the model's
         output untouched."""
         try:
             jieba = self._get_jieba()
@@ -131,6 +152,12 @@ class PunctuatorZh:
                         # parse ("code、body" from CodeBuddy), and a real
                         # Latin-item enumeration ("腾讯、阿里") has a CJK
                         # neighbor and survives
+                        drop = True
+                    elif _spaced_digits_around(text, i):
+                        # spaced variant of the same tear: pz token spacing
+                        # wraps a decimal separator in spaces ("4。 12.3" /
+                        # "31 . 2"), hiding the digits from the literal
+                        # guard above
                         drop = True
                     elif ch != "、" and prev in _ATTRIB_FINALS and prev2 not in _PRED_MARKERS:
                         # attributive guard is sentence-end logic; a 、 after

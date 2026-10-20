@@ -169,6 +169,19 @@ def _has_kana(text: str) -> bool:
     return any("぀" <= c <= "ヿ" for c in text)
 
 
+def _cjk_dominant(text: str) -> bool:
+    """True when the text reads as a han script (same 0.3 threshold and
+    range as script_corrected_lang) with no kana that would mark it
+    Japanese."""
+    if _has_kana(text):
+        return False
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 4:
+        return False
+    han = sum(1 for c in letters if "一" <= c <= "鿿")
+    return han / len(letters) > 0.3
+
+
 def script_corrected_lang(tagged: str, text: str) -> str:
     """Correct an LID tag that contradicts the script of the decoded text."""
     letters = [c for c in text if c.isalpha()]
@@ -943,7 +956,17 @@ class RoutedASR:
         fallback path's language is unknown, so its text is left alone).
         The trailing end-mark a punctuator appends to unfinished text is
         stripped by run_stream's strip_draft_tail_marks() -- one place for
-        the display, the draft translation and the boundary detector."""
+        the display, the draft translation and the boundary detector.
+
+        Exception: a draft decoded by the omnilingual fallback under an
+        obviously wrong early-LID tag (e.g. a Mandarin segment whose
+        English-name opening whisper-tiny labeled "ru") carries no
+        punctuation AND skipped the zh transformations, so the boundary
+        flush could never fire and the card showed one bare run-on for the
+        whole segment while the final came out fine via transcribe()'s
+        script-correction re-decode (2026-10-18 report). Han-dominant,
+        kana-free omni text is treated as a zh draft: converted and
+        punctuated like any other."""
         if not text.strip():
             return text
         try:
@@ -951,6 +974,9 @@ class RoutedASR:
                 return self.punct_zh.restore(text)
             if lang == "ja" and tier == "rz" and self.punct is not None:
                 return self.punct.restore(text)
+            if (tier == "omni" and self.punct_zh is not None
+                    and _cjk_dominant(text)):
+                return self.punct_zh.restore(self._replace(text, zh=True))
         except Exception:
             pass  # a punctuation failure must never lose the draft
         return text

@@ -14,9 +14,10 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 from realtime_transcribe import (AudioHistory, PartialPrinter, PREROLL_S, Refiner,
-                                 apply_translation_spec, digits_consistent,
-                                 translate_by_sentence)
+                                 SemanticSplitter, apply_translation_spec,
+                                 digits_consistent, translate_by_sentence)
 import asr_engine
+import realtime_transcribe
 import translate_m2m
 
 
@@ -374,7 +375,87 @@ def test_partial_forced_lang_routes_directly_without_lid_or_sv_probe():
     assert result == "raw text"
 
 
-def test_reset_session_clears_sticky_state():
+class _MarkPunct:
+    """Stand-in punctuator whose restore marks that it ran by appending a
+    period, the way the real CT restore closes a finished clause."""
+
+    def restore(self, text):
+        if text.endswith("。"):
+            return text
+        return text + "。"
+
+
+class _BoomPunct:
+    def restore(self, text):
+        raise AssertionError("punctuator must not run for non-zh drafts")
+
+
+def test_draft_punct_omni_mistagged_cjk_draft_gets_zh_conversion_and_punct():
+    # 2026-10-18 report: a Mandarin segment whose English-name opening made
+    # whisper-tiny's 2s LID emit an unsupported tag routed its drafts to the
+    # omnilingual CTC fallback -- bare text, no digit conversion, no marks,
+    # so the sentence-boundary flush never fired and the card showed one
+    # run-on bare draft until the segment closed ~13s later. The final was
+    # fine (transcribe()'s script-correction re-decode); the draft path had
+    # no equivalent. Han-dominant, kana-free omni drafts must now be
+    # converted and punctuated like any zh draft.
+    from zh_digit import restore_zh_digits
+
+    class _Stub:
+        punct_zh = _MarkPunct()
+        _draft_punct = asr_engine.RoutedASR._draft_punct
+
+        def _replace(self, text, zh=False):
+            assert zh is True, "the omni arm must run the zh transformations"
+            return restore_zh_digits(text)
+
+    raw = "免费开放只十月三十一日d四前表示已经优化了今天的咨讯"
+    out = asr_engine.RoutedASR._draft_punct(_Stub(), raw, "ru", "omni")
+    assert "10月31日" in out
+    assert out.endswith("。")
+
+
+def test_draft_punct_omni_non_zh_drafts_untouched():
+    # English and kana-bearing omni drafts are not zh; the punctuator must
+    # stay out of them, as must the zh transformations.
+
+    class _Stub:
+        punct_zh = _BoomPunct()
+        _draft_punct = asr_engine.RoutedASR._draft_punct
+
+        def _replace(self, text, zh=False):
+            raise AssertionError("zh transformations must not run")
+
+    for raw, tag in [("hello world this is a live test", "ru"),
+                     ("明日の会議で発表します", "ru")]:
+        assert (asr_engine.RoutedASR._draft_punct(_Stub(), raw, tag, "omni")
+                == raw), tag
+
+
+def test_draft_punct_omni_cjk_without_punct_zh_untouched():
+    # Minimal install without the zh punctuator: the omni arm must skip
+    # rather than crash (the surrounding try/except would also catch it,
+    # but the draft must stay byte-identical either way).
+
+    class _Stub:
+        punct_zh = None
+        _draft_punct = asr_engine.RoutedASR._draft_punct
+
+        def _replace(self, text, zh=False):
+            raise AssertionError("zh transformations must not run")
+
+    raw = "免费开放只十月三十一日"
+    assert asr_engine.RoutedASR._draft_punct(_Stub(), raw, "ru", "omni") == raw
+
+
+def test_cjk_dominant_thresholds():
+    # Same 0.3 han fraction and kana exclusion as script_corrected_lang's
+    # script contradiction rule.
+    assert asr_engine._cjk_dominant("免费开放只十月三十一日d四前表示") is True
+    assert asr_engine._cjk_dominant("hello world this is a test") is False
+    assert asr_engine._cjk_dominant("明日の会議で発表します") is False  # kana
+    assert asr_engine._cjk_dominant("ok嗯") is False  # < 4 letters
+    assert asr_engine._cjk_dominant("") is False
     # reset_session() only touches plain attributes (no model calls), so it
     # can be exercised against a bare stand-in without loading any models.
     class _Stub:
@@ -981,3 +1062,120 @@ def test_hot_translate_switch_rebinds_the_refiner(monkeypatch):
     assert worker.langs == built
     rt.apply_translation_spec("en", worker, lambda: None)
     assert worker.langs == built
+
+
+# ---- sentence-boundary flush guard (SemanticSplitter) ----------------------
+
+def _flush(text, speech_s=3.0, audio_pos=10.0):
+    # fresh splitter: cooldown 0, FLUSH_MIN_SPEECH_S satisfied
+    return SemanticSplitter().should_flush(text, speech_s, audio_pos)
+
+
+def test_flush_skips_pz_spaced_decimal_tear():
+    """pz token spacing wraps a decimal point in spaces ("31 . 2"), which
+    defeats the literal alnum guard -- the flush used to fire mid-number and
+    cut the audio after the first digit ("四十二点三" arrived as "四" +
+    "十二点三", rendered "4。12.3。"; 2026-10-18 user report)."""
+    assert not _flush("terminal bench从31 . 2涨到40")
+    assert not _flush("返v4 . 1flash11")
+    # collapsed form already covered by the literal guard
+    assert not _flush("terminal bench从31.2涨到40")
+
+
+def test_flush_skips_spaced_digit_sentence_mark():
+    assert not _flush("涨到4。 12.3")
+    assert not _flush("涨到4 。 12.3")
+
+
+def test_flush_still_fires_on_real_chinese_sentence_end():
+    assert _flush("开源了。第一张表里对比")
+    # a real CJK sentence end followed by a number is still a boundary
+    assert _flush("测试完成。3项全部上涨")
+
+
+def test_flush_still_fires_on_english_period():
+    # EN drafts use spaced ". Next" boundaries; the spaced guard is
+    # digit-only and must not swallow them
+    assert _flush("I really want to go out. Please")
+
+
+def test_flush_still_skips_literal_acronym_tear():
+    assert not _flush("调用AP。I然后呢")
+
+
+def test_flush_skips_left_detached_spaced_tears():
+    """Every real sentence mark attaches leftward ("out. Please",
+    "开源了。第一句"); only pz token spacing emits left-detached dots
+    ("31 . 2" / "A . P . I"). Any mark preceded by a space is that artifact
+    and must never trigger a flush -- letters, digits or mixed."""
+    assert not _flush("调用 A . P . I 然后呢")
+    assert not _flush("升级到 flash . 1017 版本了")
+
+
+def test_flush_skips_cjk_numeral_tear():
+    """A mark wedged between two CJK numerals ("四。十二点三") is a model
+    tear; a numeral on ONE side only is still a real boundary."""
+    assert not _flush("视频里从四。十二点三涨到五")
+    assert _flush("答案就是十二。然后我们继续")
+
+
+def test_flush_skips_english_abbreviation():
+    """A dot closing a common abbreviation is not a sentence end; "No."
+    IS a sentence on its own and must keep flushing, and words merely
+    ENDING in the abbreviation letters ("best.") are untouched."""
+    assert not _flush("I spoke to Mr. Smith about it")
+    assert _flush("No. I don't think so")
+    assert _flush("That was the best. It really was")
+
+
+def test_flush_defers_while_a_number_is_still_in_progress():
+    """A fresh tail visibly ending INSIDE a number ("…波及百分之",
+    "…涨到29") must not flush yet: the trim would snap the audio between
+    "百分之" and "一点四" (2026-10-18: rendered "百分之。1.4"). The next
+    partial re-checks once the number has finished."""
+    assert not _flush("暴露此事。与一次大规模蒸馏攻击有关波及百分之")
+    assert not _flush("上涨。涨到29")
+    assert not _flush("上涨。达到百分之1 .")
+    # number complete, but the boundary is STALE: ~27 fresh chars (~6s of
+    # speech) sit behind the mark, far outside the trim's 2.5s window --
+    # exactly the 2026-10-18 "有。管" report (promised cut at "此事。",
+    # actual cut at "有|关")
+    assert not _flush("暴露此事。与一次大规模蒸馏攻击有关波及百分之一点四的council")
+
+
+def test_flush_refuses_stale_boundary_with_long_tail():
+    """CT can surface a boundary mark seconds after its pause: by flush
+    time the tail behind it has grown past what the trim's 2.5s scan window
+    can still see, so the trim snaps the audio at the NEWEST dip instead --
+    often a mid-word micro-pause dozens of chars past the real boundary
+    (2026-10-18 report: "有。管"). Refusing the flush falls back to VAD
+    closing: later than ideal, never wrong."""
+    # CJK tail of 12 (~2.7s) > BOUNDARY_TAIL_MAX_CJK
+    assert not _flush("暴露此事。与一次大规模蒸馏攻击，有")
+    assert not _flush("暴露此事。与一次大规模蒸馏攻击有关")
+    # latin tail of 36 > BOUNDARY_TAIL_MAX_LATIN
+    assert not _flush("and then. The quick brown fox jumps over the lazy dog")
+
+
+def test_flush_allows_fresh_boundary_within_trim_window():
+    """Tails inside the window keep flushing: CJK 8 chars (~1.8s) and
+    latin 20 chars (~1.5s) at the limits, fewer in between."""
+    assert _flush("暴露此事。与一次大规模蒸馏")  # 8 CJK chars
+    assert _flush("暴露此事。与一次大规模")  # 5 CJK chars
+    assert _flush("and then. The quick brown fox")  # 19 latin chars
+    # a mixed tail counts against the CJK limit (any CJK char in it)
+    assert not _flush("暴露此事。与1.4%的council用户均有关联")
+    # number complete AND the tail still fresh: usable boundary (the stale
+    # case lives in test_flush_refuses_stale_boundary_with_long_tail)
+    assert _flush("上涨。涨到29.5了")
+
+
+def test_build_stamp_names_dir_and_newest_mtime():
+    # A long-lived --serve process keeps its import-time code; the stamp's
+    # newest-.py mtime is how a "still broken" report is told apart from
+    # "old process never restarted". Must name the real scripts dir
+    # (absolute, so repo vs portable copy is visible) and carry a parseable
+    # newest timestamp.
+    stamp = realtime_transcribe._build_stamp()
+    assert os.path.isabs(stamp.split("  (")[0].replace("[build] ", ""))
+    assert realtime_transcribe._re.search(r"newest \.py \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\)$", stamp), stamp

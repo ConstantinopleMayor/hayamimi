@@ -120,6 +120,18 @@ def test_zh_punct_restore_crash_never_loses_transcription():
     assert rec.stages == ["restore", "replace"]
 
 
+def test_zh_digit_spaced_percent_forms():
+    """Paraformer token spacing wraps the percent digits ("百分之1 . 4"),
+    which used to defeat both percent patterns: only the head matched and
+    the decimal tail was orphaned -- the final carried "1% . 4"
+    (2026-10-18 report, confirmed in the serve log)."""
+    assert restore_zh_digits("波及百分之1 . 4的council用户") == "波及1.4%的council用户"
+    assert restore_zh_digits("百分之 1 . 4") == "1.4%"  # space after 百分之
+    assert restore_zh_digits("百分之1.4") == "1.4%"
+    assert restore_zh_digits("百分之一点四") == "1.4%"  # kanji-form regression
+    assert restore_zh_digits("百分之 一点 四") == "1.4%"  # kanji + spaces
+
+
 def test_zh_digit_cross_regression_with_itn():
     # "百分之十七": ITN converts the inner digits (百分之17), then zh_digit
     # restores the percentage -- both must compose cleanly.
@@ -130,6 +142,23 @@ def test_zh_digit_cross_regression_with_itn():
     assert restore_zh_digits("百分之十七") == "17%"
     # idioms stay untouched by ITN (conservative)
     assert itn_cjk.convert("一石二鳥", "zh") == "一石二鳥"
+
+
+def test_zh_repair_drops_spaced_digit_sentence_mark():
+    """pz token spacing can wrap the mark in spaces ("4。 12.3"); the
+    literal alnum guard sees the spaces, so the spaced-digit check must
+    drop the mark there too (same tear as "4。12.3")."""
+    from punct_zh import PunctuatorZh
+
+    class _NoJieba:
+        def _get_jieba(self):
+            raise RuntimeError("jieba intentionally unavailable")
+
+    repair = PunctuatorZh._repair_word_splits
+    assert repair(_NoJieba(), "涨到4。 12.3") == "涨到4 12.3"
+    assert repair(_NoJieba(), "涨到4 。 12.3") == "涨到4  12.3"
+    # a real CJK sentence end stays untouched
+    assert repair(_NoJieba(), "开源了。第一张表里对比") == "开源了。第一张表里对比"
 
 
 def test_zh_punct_model_golden_skip_if_missing():

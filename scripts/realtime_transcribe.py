@@ -643,6 +643,17 @@ SENT_END_CHARS = "。？！?!.．…"
 FLUSH_MIN_SPEECH_S = 2.0   # a shorter segment is not worth a forced flush
 FLUSH_COOLDOWN_S = 1.5     # audio-time quiet period required between flushes
 BOUNDARY_TAIL_CHARS = 4    # fresh characters required after the end mark
+# UPPER bound on the same tail: the trim can only cut at a pause that is
+# still inside its 2.5s TAIL_SCAN_S window. Sentence pace is ~4.5 CJK chars/s
+# (~13 latin chars/s), so a tail longer than this means the boundary pause
+# has already scrolled out of the window and the trim would snap the audio
+# at the NEWEST dip instead -- often a mid-word micro-pause dozens of chars
+# past the real boundary (2026-10-18 report: the late "此事。" boundary came
+# with 12 fresh chars behind it; the trim cut at "有|关" and CT pasted the
+# orphan into the final as "有。管"). Refusing the flush lets the segment
+# close the old VAD way -- later than ideal, never wrong.
+BOUNDARY_TAIL_MAX_CJK = 8
+BOUNDARY_TAIL_MAX_LATIN = 20
 TAIL_SCAN_S = 2.5          # trim scan window at the flushed segment's tail
 DIP_REL_GATE = 3.0         # a dip frame is <= this x the window's quiet floor
 DIP_ABS_GATE = 2e-3        # ...and quieter than this absolute RMS
@@ -658,6 +669,55 @@ def _latin_letter(c: str) -> bool:
     tear, not a boundary. Digits INCLUDED so version-string tears are skipped
     too; real ends always have CJK (or nothing) on one side."""
     return ("a" <= c <= "z") or ("A" <= c <= "Z") or ("0" <= c <= "9")
+
+
+def _spaced_digits_around(text: str, i: int) -> bool:
+    """The mark at i sits INSIDE a number whose decimal point pz wrapped in
+    token spaces ("31 . 2" for "31.2"): the nearest non-space chars on both
+    sides are ASCII digits. The literal _latin_letter guard cannot see this
+    (the mark's neighbours are the spaces), which let a flush fire mid-number
+    and cut "四十二点三" into "四" + "十二点三" (2026-10-18 user report).
+    Real sentence dots keep a letter or CJK on one side ("out. Next",
+    "开源了。第一句") and are not matched."""
+    j = i - 1
+    while j >= 0 and text[j] in (" ", "　"):
+        j -= 1
+    k = i + 1
+    n = len(text)
+    while k < n and text[k] in (" ", "　"):
+        k += 1
+    p = text[j] if j >= 0 else ""
+    r = text[k] if k < n else ""
+    return ("0" <= p <= "9") and ("0" <= r <= "9")
+
+
+# CJK numeral chars: a mark wedged between two of them ("四。十二点三") is a
+# model tear, never a boundary (see the H2 guard in should_flush).
+_CJK_NUMERALS = "〇零一二三四五六七八九十百千万两"
+
+# Flush deferral (see should_flush): a fresh tail visibly ending INSIDE a
+# number ("…波及百分之", "…涨到29", "…百分之1 .") must not be flushed yet --
+# the trim would snap the audio between "百分之" and "一点四" (2026-10-18
+# report: two finals rendered "百分之。1.4" while the value is 1.4%). The
+# next 0.5s partial re-checks once the number has finished.
+_NUM_TAIL_CHARS = "0123456789" + _CJK_NUMERALS + "点.．"
+_DANGLING_NUM_TAILS = ("百分之", "千分之", "万分之", "涨到")
+
+_ABBREV_RE = None  # lazily built (this file imports `re as _re` further down)
+
+
+def _abbrev_before(text: str, i: int) -> bool:
+    """True when the mark at i closes a common English abbreviation
+    ("Mr. Smith", "vs. baseline"): the letters right before the mark match a
+    small conservative list. "No." is deliberately ABSENT: it is a complete
+    sentence on its own ("No. I don't think...") and must keep flushing.
+    The lookbehind keeps words merely ENDING in these letters ("best.",
+    "just.", "since.") out of the match."""
+    global _ABBREV_RE
+    if _ABBREV_RE is None:
+        _ABBREV_RE = _re.compile(
+            r"(?i)(?<![A-Za-z])(?:mr|mrs|ms|dr|prof|st|jr|sr|vs|etc|approx|inc|ltd)$")
+    return _ABBREV_RE.search(text, 0, i) is not None
 
 _TAIL_MARKS_RE = None  # lazily built below
 
@@ -717,15 +777,32 @@ class SemanticSplitter:
         # drafts end with one all the time -> flush never fired ) and has no
         # fresh text after it, so it could never count as a boundary anyway
         text = strip_draft_tail_marks(text)
-        # scan back to the newest internal boundary, skipping marks that
-        # tore an all-caps word apart (letters both sides, "AP。I") -- those
-        # are punctuator artifacts, and cutting there would split "API"
+        # scan back to the newest internal boundary, skipping every mark
+        # shape known to be an artifact rather than a boundary:
+        #   - letters both sides, "AP。I" (pieces of one token)
+        #   - detached from the LEFT token ("31 . 2", "A . P . I"): every
+        #     real sentence mark in the pipeline attaches leftward
+        #     ("out. Please", "开源了。第一句"); only pz token spacing
+        #     emits left-detached dots
+        #   - inside a spaced number, "31 . 2" / "4。 12.3"
+        #   - between two CJK numerals, "四。十二点三"
+        #   - closing an English abbreviation, "Mr. Smith"
+        # Flushing at any of these cut the audio mid-token (2026-10-18
+        # reports: "四十二点三" arrived as "四" + "十二点三")
         cut = -1
         for i in range(len(text) - 1, -1, -1):
             if text[i] in SENT_END_CHARS:
                 prev = text[i - 1] if i > 0 else ""
                 nxt = text[i + 1] if i + 1 < len(text) else ""
+                if prev in (" ", "　"):
+                    continue
                 if _latin_letter(prev) and _latin_letter(nxt):
+                    continue
+                if _spaced_digits_around(text, i):
+                    continue
+                if prev in _CJK_NUMERALS and nxt in _CJK_NUMERALS:
+                    continue
+                if _abbrev_before(text, i):
                     continue
                 cut = i
                 break
@@ -737,6 +814,21 @@ class SemanticSplitter:
         # text needs just 2+ chars of a new WORD -- English words average 5
         # ASCII chars, so 4 would keep delaying en's flush by a syllable.
         tail = text[cut + 1:].strip()
+        if tail and (tail[-1] in _NUM_TAIL_CHARS
+                     or tail.endswith(_DANGLING_NUM_TAILS)):
+            # the fresh text visibly ends inside a number ("…波及百分之",
+            # "…涨到29"): the speaker is not done with it yet, and flushing
+            # now lets the trim snap the audio mid-number (2026-10-18:
+            # "百分之" + "1.4" rendered "百分之。1.4"). Wait -- the next
+            # 0.5s partial re-checks once the number has finished.
+            return False
+        # a stale boundary (too much fresh speech behind it, see the
+        # BOUNDARY_TAIL_MAX_* constants) must not flush either: the split
+        # point it promises is no longer where the trim can cut
+        if len(tail) > (BOUNDARY_TAIL_MAX_CJK
+                        if _re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", tail)
+                        else BOUNDARY_TAIL_MAX_LATIN):
+            return False
         if _re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", tail):
             return len(tail) >= BOUNDARY_TAIL_CHARS
         return len(tail) >= 2
@@ -934,6 +1026,11 @@ import re as _re
 # Set in main() from --api-config (or auto-detected openai_translate.json in
 # the project root). Non-None means the API translation route is available.
 _api_cfg = None
+# The path _api_cfg came from (None = translate_api's default project-root
+# openai_translate.json). Kept so apply_translation_spec() can RE-READ the
+# same file at runtime: the desktop settings panel writes it while the server
+# keeps running.
+_api_cfg_path = None
 
 
 def digits_consistent(src: str, out: str) -> bool:
@@ -1054,6 +1151,18 @@ def apply_translation_spec(spec: str, worker: "TranslationWorker",
     effect from the next group onward.
     """
     spec = (spec or "").strip().lower()
+
+    # Re-read openai_translate.json before (re)building translators: the
+    # desktop settings panel saves it at runtime and expects the new
+    # base_url/model/api_key (or a file created after boot) to take effect on
+    # the next POST /api/translate without a server restart. The boot-time
+    # cache in _api_cfg would otherwise pin the old file forever.
+    global _api_cfg
+    try:
+        from translate_api import load_config as _reload_api_cfg
+        _api_cfg = _reload_api_cfg(_api_cfg_path) if _api_cfg_path else _reload_api_cfg()
+    except Exception:
+        pass
 
     def _publish(trs: dict) -> None:
         worker.set_langs(trs)
@@ -1711,6 +1820,25 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
             refiner.maybe_refine(int(audio_pos * sample_rate))
 
 
+def _build_stamp() -> str:
+    """One-line build identity for the startup log: the absolute script
+    directory (which copy is running -- repo vs portable) plus the newest
+    .py mtime in it (auto-updates with any code edit -- a hand-written
+    version constant would drift). Exists because a long-lived --serve
+    process keeps its import-time code: without this stamp, "fixed but
+    still broken" reports are indistinguishable from "old process never
+    restarted" (2026-10-18: Fix-S was on disk at 15:51 but the serve
+    spawned at 15:41 never saw it)."""
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        mtimes = [os.path.getmtime(os.path.join(here, name))
+                  for name in os.listdir(here) if name.endswith(".py")]
+        newest = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(max(mtimes)))
+        return f"[build] {here}  (newest .py {newest})"
+    except OSError:
+        return "[build] (scan failed)"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--wav", help="wav file to simulate streaming from (16kHz mono s16)")
@@ -1810,6 +1938,8 @@ def main():
                     help="port for the --input ws /ingest endpoint (default 8766)")
     args = ap.parse_args()
 
+    print(_build_stamp(), file=sys.stderr)
+
     if args.list_audio_devices:
         import sounddevice as sd
 
@@ -1845,11 +1975,12 @@ def main():
     # API translation config: --api-config path wins; otherwise auto-detect
     # the project-root openai_translate.json. A usable config enables the
     # "api:..." translation route (see build_translators).
-    global _api_cfg
+    global _api_cfg, _api_cfg_path
     from translate_api import api_targets as _api_targets
     from translate_api import load_config as _load_api_config
 
     if args.api_config:
+        _api_cfg_path = args.api_config
         _api_cfg = _load_api_config(args.api_config)
         if _api_cfg is None:
             print(f"[api] config {args.api_config} is missing or unusable "
