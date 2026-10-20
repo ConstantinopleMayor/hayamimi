@@ -1,129 +1,73 @@
-# hayamimi (早耳)
+# hayamimi（早耳）
 
 [![tests](https://github.com/ConstantinopleMayor/hayamimi/actions/workflows/test.yml/badge.svg)](https://github.com/ConstantinopleMayor/hayamimi/actions/workflows/test.yml) [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![release](https://img.shields.io/github/v/release/ConstantinopleMayor/hayamimi)](https://github.com/ConstantinopleMayor/hayamimi/releases)
 
-**Real-time, multilingual speech-to-text on CPU only.** Live subtitles, a
-browser dashboard, speaker labels, and on-the-fly translation -- no GPU, no
-cloud API, under 2GB RAM.
+**纯 CPU 实时多语种语音转文字。** 实时字幕、浏览器仪表盘、说话人标签、即时翻译 —— 不需要 GPU，不依赖云端 API，内存占用低于 2GB。
 
-日本語版 README は [README.ja.md](README.ja.md) にあります。 中文版见 [README.zh.md](README.zh.md)。
+"早耳"（hayamimi）在日语中意为"耳聪目明、反应快的人"。本项目的设计目标正是如此：你还在说话时，部分字幕已经出现；说完后约 **100ms** 内，确认的字幕行即落地。
 
-"早耳" (hayamimi) is Japanese for "quick ear" -- someone who picks up on
-things fast. That's the design goal: partial subtitles appear while you're
-still talking, and a finalized line lands roughly **100ms after you stop**.
+English README → [README.en.md](README.en.md) / 日本語版 → [README.ja.md](README.ja.md)
 
-## Why
+## 为什么
 
-Most CPU-only real-time transcription setups fall back to a single
-general-purpose model (Whisper) and accept its accuracy ceiling. hayamimi
-instead routes each utterance to whichever specialist model is best for its
-language, all running as quantized (INT8) ONNX models via
-[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) -- no PyTorch, no CUDA.
+大多数仅凭 CPU 的实时转写方案都会退而求其次采用一个通用模型（如 Whisper），并接受其准确率上限。hayamimi 则把每一段语音路由到最适合该语言的专用模型，全部以量化（INT8）ONNX 模型通过 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 运行 —— 无需 PyTorch、无需 CUDA。
 
-On real broadcast Japanese audio (see `docs/SCORECARD.md`), that routing
-gets **5.8% CER**, less than half of `whisper-large-v3-turbo`'s 13.8% on the
-same clips, while running at 10-50x realtime on a 6-core desktop CPU.
+在真实日文广播音频上（见 `docs/SCORECARD.md`），这套路由的 **CER 为 5.8%**，不及 `whisper-large-v3-turbo` 在同样片段的 13.8%，且在 6 核桌面 CPU 上以 10-50 倍于实时的速度运行。
 
-## Features
+## 功能
 
-| Feature | What it does |
+| 功能 | 说明 |
 |---|---|
-| 5-route language catalog | ja/zh/ko/yue/en+24 EU languages each go to a dedicated best-in-class model; everything else (~1600 languages) falls back to Meta's Omnilingual ASR |
-| Partial subtitles | in-progress draft text updates every ~0.5s while you're still speaking |
-| Fast finals | a finalized line typically lands ~100ms after you stop talking (ja; see `docs/GOALS.md` for other languages) |
-| Two-pass refinement | after 2s of silence, recent utterances are batch re-decoded for a higher-accuracy "clean" transcript (ja real-broadcast CER 15.5% -> 12.0%) |
-| Speaker labels | `--speakers` tags each utterance S1/S2/... using CAM++ speaker embeddings (turn-taking, not full diarization) |
-| Translation | `--translate en,zh,ko,es,...` translates the detected line live (en via FuguMT; any other M2M-100 target code is accepted if the model's vocabulary supports it -- zh/ko/es have measured quality, see docs/TRANSLATE_M2M.md) |
-| API translation | `--translate api:zh,api:en,...` (or bare `api`) sends every detected line through an OpenAI-compatible endpoint (Ollama / LM Studio / OpenAI / vLLM...) and translates ANY detected source language into the chosen targets; configured via `openai_translate.json`, hot-switchable, works alongside the local MT routes |
-| Hotwords / user dictionary | `--hotwords` biases decoding toward proper nouns (currently has no effect on the ja tier -- see Limitations); `--replace` does post-hoc find/replace and works everywhere |
-| OBS overlay + dashboard | `--serve` starts a local HTTP server with a browser-source overlay and a live dashboard |
-| Network audio input | `--input ws` accepts mic audio over a WebSocket (phone, ESP32/stackchan) and feeds it through the same pipeline, including `--serve`'s dashboard/overlay |
-| Speaker loopback input | `--input speaker` transcribes whatever is playing on the PC's audio output (WASAPI loopback, Windows only, no Stereo Mix setup needed); `--input mix` sums it with the mic into one stream (e.g. meeting transcription) |
-| Memory-bounded | LRU model eviction keeps resident models under a configurable cap (default: <2GB total) |
-| CPU-only | every model runs as quantized ONNX via sherpa-onnx; no GPU or PyTorch required |
+| 5 路语言路由 | ja/zh/ko/yue 及 en+24 种欧洲语言各配专用最优模型；其余约 1600 种语言回退到 Meta Omnilingual ASR |
+| 部分字幕 | 说话过程中约每 0.5s 更新一次草稿文本 |
+| 快速确认 | 日语停顿时，确认行通常约 100ms 落地（其他语言见 `docs/GOALS.md`） |
+| 两遍精修 | 静音 2 秒后对最近若干话语批量重新解码，产出更高精度的"清稿"（日语真实广播 CER 15.5% → 12.0%） |
+| 说话人标签 | `--speakers` 用 CAM++ 说话人嵌入为每段话语标注 S1/S2/...（按话轮，非完整说话人分离） |
+| 翻译 | `--translate en,zh,ko,es,...` 实时翻译识别出的行（en 走 FuguMT；其余任意 M2M-100 目标代码；zh/ko/es 已实测质量，见 `docs/TRANSLATE_M2M.md`） |
+| API 翻译 | `--translate api:zh,api:en,...`（或裸 `api`）把每一行识别结果发送到 OpenAI 兼容端点（Ollama / LM Studio / OpenAI / vLLM / 硅基流动...），将**任意识别出的源语言**翻译成所选目标；桌面字幕窗的设置面板可直接填写并测试 |
+| 热词/用户词典 | `--hotwords` 向解码注入专有名词偏好（当前对 ja 路由无效，见 Limitations）；`--replace` 做事后查找替换，全路由生效 |
+| OBS 覆盖层 + 仪表盘 | `--serve` 启动本地 HTTP 服务器，提供浏览器源覆盖层与实时仪表盘 |
+| 桌面字幕窗 | 独立 Electron 窗口：透明、置顶、可点击穿透，现代设置面板（字体/背景/翻译 API/思考模式），GitHub Release 提供便携包 |
+| 网络音频输入 | `--input ws` 接受经 WebSocket 传来的麦克风音频（手机、ESP32/stackchan 等），走同一流水线 |
+| 扬声器回环输入 | `--input speaker` 转写电脑正在外放的声音（WASAPI 回环，仅限 Windows）；`--input mix` 把麦克风与外放混成一路（如会议转写） |
+| 内存有界 | LRU 模型淘汰策略让常驻模型保持在可配置上限内（默认总内存 <2GB） |
+| 纯 CPU | 所有模型均经 sherpa-onnx 以量化 ONNX 运行；无需 GPU 或 PyTorch |
 
-## Demo UI
+## 演示 UI
 
-`--serve` starts a local server exposing three views:
+`--serve` 启动本地服务器，暴露三个视图：
 
-- **`http://localhost:8833/dashboard`** -- the live dashboard: a partial-text
-  strip for in-progress speech, a finals feed with language badges, speaker
-  chips, and per-line latency, inline translations under each line, and a
-  second column with the refined (two-pass) transcript as it lands.
-- **`http://localhost:8833/`** -- a minimal OBS browser-source overlay
-  (add this URL as a Browser Source in OBS for stream captions). The
-  confirmed line and the in-progress line are separate rows; append
-  `?show=final` or `?show=partial` to render only one of them, so each
-  can be placed and styled as its own OBS source.
-- **`http://localhost:8833/transcript`** -- plain scrolling transcript
-  history.
+- **`http://localhost:8833/dashboard`** —— 实时仪表盘：进行中语音的部分文本条、带语言徽章的确认信息流、说话人标签、每行延迟，以及两遍精修的"清稿"栏。
+- **`http://localhost:8833/`** —— 供 OBS 浏览器源使用的最小覆盖层。确认行与进行中行为两行；追加 `?show=final` 或 `?show=partial` 可只渲染其中一行，方便各自独立摆放与定制。
+- **`http://localhost:8833/transcript`** —— 简易滚动字幕历史。
 
 ![dashboard](docs/images/dashboard.png)
 
-## Network audio input
+---
 
-`--input ws` runs a WebSocket ingest endpoint instead of reading the local
-microphone, so a phone or a stackchan-class ESP32 board can stream mic audio
-over the LAN and get it transcribed through hayamimi's normal pipeline:
+## 部署
 
-```bash
-.venv/Scripts/python scripts/realtime_transcribe.py --input ws --serve
-# -> ws://<host>:8766/ingest accepts audio; http://localhost:8833/dashboard shows the results
-```
+### 1. 前置条件
 
-Protocol: connect to `/ingest`, send one JSON text frame
-(`{"sr": 16000, "format": "pcm_s16le", "channels": 1}`), then stream raw
-`pcm_s16le` audio as binary frames. The server resamples non-16kHz audio and
-replies with the same partial/final/translation/refine JSON events the
-dashboard's SSE stream carries, so a client can show its own subtitles too.
-Only one audio-producing client is accepted at a time; `scripts/ws_mic_client.py`
-is a dependency-free reference client (streams a wav file at real-time pace)
-that doubles as a template for a phone/ESP32 implementation.
+| 项 | 要求 |
+|---|---|
+| 操作系统 | **Windows 10/11**（主要开发与测试平台）；macOS/Linux 运行时均跨平台，但尚未端到端 CI 验证 |
+| Python | **3.11 – 3.12（64 位）**；3.10 理论可用但未针对该版本固定依赖 |
+| 磁盘 | 完整模型约 **3.1GB**；`--minimal` 精简安装约 **1.1GB** |
+| 内存 | 常驻 <2GB（`--max-resident 3` 默认；`--max-resident 2` 约 1.35GB） |
+| GPU | **不需要** —— 全部为量化 ONNX，CPU 推理 |
+| ffmpeg | 系统中可调用（部分评测/音频工具需要；实时转写主链路不依赖） |
+| Node.js | **仅桌面字幕窗的自行构建需要**；直接使用 Release 便携包时不需要 |
 
-## Speaker (system audio) loopback input
+运行时依赖固定在 [`requirements.txt`](requirements.txt)（与开发机 venv 逐一核对过）；
+评测/测试用依赖见 [`requirements-dev.txt`](requirements-dev.txt)。
 
-`--input speaker` transcribes whatever is playing through the PC's audio
-output -- the other side of a call, a video -- instead of the microphone;
-`--input mix` transcribes the mic and the speaker output summed into one
-stream, e.g. for meeting transcription (your voice + the call audio
-together):
+### 2. 源码部署
 
 ```bash
-.venv\Scripts\python scripts\realtime_transcribe.py --input speaker
-.venv\Scripts\python scripts\realtime_transcribe.py --input mix
-```
+git clone https://github.com/ConstantinopleMayor/hayamimi.git
+cd hayamimi
 
-This uses WASAPI loopback via the `soundcard` package, which taps the
-render endpoint directly -- unlike the classic "Stereo Mix" recording
-device, no opt-in is needed in Windows Sound settings, and it works even
-when the sound driver doesn't expose Stereo Mix at all. **Windows only**
-(no loopback path is wired up for other platforms yet).
-
-`mix` matches capture timestamps within roughly 48ms and clips the summed
-samples to [-1, 1]. It uses the microphone as its clock and drops old queued
-audio on both sides if decoding falls behind. A failed speaker capture is
-reported on stderr and falls back to mic-only; a failed microphone stops the
-stream. This is one mixed transcript, with no separate tracks or acoustic
-echo cancellation. Use headphones to avoid capturing the call audio twice.
-
-By default both modes use the system's default input/output device. If you
-have more than one mic or output device, `--list-audio-devices` prints what's
-available, and `--mic-device NAME` / `--speaker-device NAME` (substring
-match) pick a specific one. Over a Remote Desktop session, the PC's own
-physical mic usually can't be opened at all (Windows blocks cross-session
-access) -- enable microphone redirection in your RDP client instead (in
-`mstsc`: Show Options > Local Resources > Remote audio > Recording >
-"Record from this computer"), or run hayamimi at the local console.
-
-## Requirements
-
-Python 3.10+ and ffmpeg on PATH. Developed and tested on **Windows 11**;
-macOS/Linux are expected to work (all runtimes are cross-platform) but are
-not yet CI-tested end to end — reports welcome.
-
-## Quickstart
-
-```bash
 python -m venv .venv
 
 # Windows
@@ -133,263 +77,241 @@ python -m venv .venv
 # macOS / Linux
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python scripts/download_models.py
-
-# Real-time transcription from your microphone
-.venv/Scripts/python scripts/realtime_transcribe.py     # Windows
-.venv/bin/python scripts/realtime_transcribe.py          # macOS/Linux
-
-# From the PC's audio output instead (a call, a video) -- Windows only
-.venv\Scripts\python scripts\realtime_transcribe.py --input speaker
-
-# Mic + PC audio output together, e.g. for meeting transcription
-.venv\Scripts\python scripts\realtime_transcribe.py --input mix
-
-# With the dashboard + OBS overlay
-.venv/Scripts/python scripts/realtime_transcribe.py --serve
-# -> open http://localhost:8833/dashboard in a browser
 ```
 
-`scripts/download_models.py` pulls ~3.1GB of pretrained models into
-`models/` (git-ignored). Pass `--minimal` for a ~1.1GB ja/en-only install
-(ReazonSpeech, whisper-tiny, Silero VAD, Japanese punctuation). See
-`THIRD_PARTY_NOTICES.md` for what each model's license commits you to.
+`scripts/download_models.py` 的常用选项：
 
-**Chinese routing**: `zh` goes to the Mandarin bilingual paraformer build
-(English words stay whole, Chinese digits are restored to numerals);
-substituting a different zh model breaks this — see
-`docs/ASR_MODELS.md`.
-
-Final zh output runs a fixed postprocessing chain, same as ja:
-CJK kanji-numeral ITN (`scripts/itn_cjk.py`, ja/zh/yue) → punctuation
-restoration (ja `punct_ja.py` / zh `punct_zh.py`, the sherpa-onnx
-CT-Transformer int8 model ~72MB, fetched by `download_models.py`) →
-user `--replace` last, whose zh branch also restores Chinese digit words
-(`zh_digit.py`) and collapses Paraformer's ASCII token spacing
-(`zh_space.py`: letters read out one by one come back glued — `g r m` →
-`grm`, `4 . 1` → `4.1`; multi-letter English words keep their spaces).
-A missing punct model degrades quietly (final text stays unpunctuated,
-never lost).
-
-## Desktop subtitle window (`desktop-subtitle/`)
-
-![desktop subtitle](docs/images/desktop-subtitle.png)
-
-A transparent, always-on-top subtitle window that renders hayamimi's live
-captions straight onto your desktop — no OBS needed. The source line and
-its translation appear together, styled like broadcast captions (bold text,
-soft shadow, bilibili-style outline). Startup defaults: translation OFF
-(cycle the language button to EN/ZH/KO), bilingual display, 24pt.
-
-**Quickest start (no Node.js needed)**: download
-`hayamimi-subtitle-0.3.2-win-x64.zip` from [GitHub
-Releases](https://github.com/ConstantinopleMayor/hayamimi/releases),
-extract its contents **directly into** `hayamimi\desktop-subtitle\` (e.g.
-with 7-Zip: "Extract here" while that folder is the target), then
-double-click `desktop-subtitle\早耳字幕.exe`. The exe is the whole launcher
-in one file:
-
-- On startup it probes `http://127.0.0.1:8833/`; if the server is not
-  running it locates the project root and starts the server hidden (logs
-  to `%TEMP%\hayamimi-serve.log`). An already-running server is reused.
-- **Closing the window (✕ / Esc / menu quit) stops the transcribe server
-  again** — only `realtime_transcribe` python processes are touched, other
-  python programs are left alone.
-- Without an OpenAI-compatible translation endpoint, launch with
-  `早耳字幕.exe --serve-args "--translate zh"` to use the local MT models.
-
-The machine still needs Python 3.10+, ffmpeg and the models (see
-Quickstart) — the exe replaces only the Node/Electron part.
-
-**In the window**
-
-| Control | Action |
+| 选项 | 作用 |
 |---|---|
-| padlock (MDL2) | toggle click-through (draggable vs pass-through) |
-| pin (MDL2) | title-bar auto-hide: armed = the bar fades away when the pointer leaves the window (the window loses that row); pinned = the bar always stays |
-| gear (MDL2) | settings menu: font, size, language, display mode, text style, backdrop, quit |
-| EN / ZH / KO / OFF | cycle the displayed translation language |
-| 双语 / 译文 | bilingual vs translation-only display |
-| mic / speaker / mic+speaker (MDL2) | cycle the audio source (button right of 双语/译文): mic → speaker loopback → mic+speaker mix. Switching restarts the engine (~15–30 s of paused subtitles); speaker/mix are Windows-only |
-| API / 本地 | switch the translation channel |
-| top sliders | backdrop opacity (0–60%) and window width |
-| bar / cross (MDL2) | minimize / quit |
-| `Ctrl+Alt+D` / `Ctrl+Alt+L` / `Ctrl+Alt+M` | click-through / language / display mode |
-| `Esc` | quit (also stops the server) |
+| （无） | 完整模型集，约 3.1GB，覆盖全部路由 |
+| `--minimal` | 约 1.1GB 的 ja/en 精简安装（ReazonSpeech、whisper-tiny、Silero VAD、日语标点） |
+| `--en-parakeet-v2` | 加装 en-only Parakeet TDT v2（内置标点/大小写，en WER 6.6% vs v3 10.0%，约 460MB） |
+| `--eval-baselines` | 评测对照模型（准确率基准用，非实时链路所需） |
 
-All icons are Segoe MDL2 Assets glyphs, so the whole row is tinted by one
-accent colour (see `main.js`); nothing carries an outline. The title bar
-auto-hides by default (`--no-bar-autohide` keeps it pinned), and while it is
-hidden the window is fully click-through.
+**启动方式**（任选）：
 
-- Confirmed lines accumulate on screen (each lives ~8s) with the
-  in-progress draft updating inline while you speak; the window auto-fits
-  its height to the text.
-- Text style — shadow, thin outline, bilibili-style thick outline (重墨),
-  text opacity, bold — is adjustable in the settings menu, and every
-  option has a matching CLI flag (`--text-shadow`, `--text-stroke`,
-  `--text-ink`, `--text-opacity`, `--bold`, `--bg`, `--mode`, `--lang`,
-  `--size`).
-- With the API translator, each request carries the last few confirmed
-  (source, translation) pairs as context, so names and terminology stay
-  consistent across lines (`context_n` / `context_timeout_s` in
-  `openai_translate.json`).
+```bash
+# 麦克风实时转写
+.venv\Scripts\python scripts\realtime_transcribe.py
 
-**Developer mode** (needs Node.js):
+# 转写电脑外放的声音（通话、视频）-- 仅限 Windows
+.venv\Scripts\python scripts\realtime_transcribe.py --input speaker
+
+# 麦克风 + 外放一起转写（如会议记录）
+.venv\Scripts\python scripts\realtime_transcribe.py --input mix
+
+# 带仪表盘 + OBS 覆盖层
+.venv\Scripts\python scripts\realtime_transcribe.py --serve
+# -> 浏览器打开 http://localhost:8833/dashboard
+```
+
+Windows 用户也可直接双击项目根的 **`启动早耳.bat`**：自动拉起服务器（隐藏控制台，日志写入
+`%TEMP%\hayamimi-serve.log` / `hayamimi-serve.err.log`），就绪后再打开桌面字幕窗；
+**`停止早耳.bat`** 一键停止。serve 日志首行是 `[build]` 标记（脚本目录 + 最新 `.py` 修改时间），
+可用于确认当前运行的是哪份代码/哪次构建。
+
+**中文路由说明**：`zh` 路由到普通话中英双语 paraformer 模型（英文按整词输出、中文数字自动还原为阿拉伯数字）；
+后处理链为 CJK 数字 ITN → 标点恢复（zh 用 `punct_zh.py`，CT-Transformer int8 约 72MB）→ 用户 `--replace`。
+
+### 3. 桌面字幕窗（便携包）
+
+透明、始终置顶的字幕窗，把实时字幕直接渲染在桌面上 —— 无需打开 OBS。
+GitHub Release 提供**独立便携包**（只含桌面窗，不含服务器/模型）：
+
+1. 从 [GitHub Releases](https://github.com/ConstantinopleMayor/hayamimi/releases) 下载
+   `hayamimi-subtitle-0.3.4-win-x64.7z`
+2. **完整解压进** 源码目录的 `desktop-subtitle\`（合并，勿嵌套、勿只拷 exe；
+   用 7-Zip / NanaZip 时选中该文件夹后"解压到当前文件夹"）
+3. 双击 `desktop-subtitle\早耳字幕.exe`
+
+exe 是调度器：探测 `http://127.0.0.1:8833/`，服务器没跑就自动定位项目根并拉起
+（隐藏窗口，日志同上），已在运行则直接复用；**关闭字幕窗（✕ / Esc / 面板「退出字幕窗」）会
+自动停止转写服务器**（只停命令行匹配 `realtime_transcribe` 的 python 进程）。
+
+> 机器仍需 Python 3.11+ 与模型（见上一节）—— 便携包只替代 Node/Electron 部分。
+> SmartScreen 提示时选"仍要运行"；压缩包若被标记为"来自网络"，可右键属性 → 解除锁定，
+> 或运行 `首次运行.bat` 自动处理（该脚本同时校验包完整性）。
+
+**自行构建**（可选，需 Node.js）：
 
 ```bash
 cd desktop-subtitle
-npm install            # installs Electron + electron-builder
-npm start              # run from source
-npm run dist           # rebuild the release zip into dist/
+npm install
+npm run dist
 ```
 
-The window loads `http://localhost:8833/` by default; the server must be
-running with `--serve` (see Quickstart) — or just let the exe start it.
+产出 `dist\hayamimi-subtitle-0.3.4-win-x64.7z`（用户分发格式）、内部 zip（整合包脚本依赖），
+并自动把 exe 及相关文件平铺发布到 `desktop-subtitle\`。开发调试可用 `npm start`。
 
-`desktop-subtitle/启动早耳.bat` + `停止早耳.bat` do the same server
-start/stop via scripts instead of the exe.
+**窗内操作**
 
-## Runtime translation hot-switch (no restart)
+![桌面字幕窗](docs/images/desktop-subtitle.png)
 
-Two independent ways to change which languages **the detected text** is
-translated to **while the server is already running**:
+| 控件 | 作用 |
+|---|---|
+| 锁形图标 | 切换点击穿透（可拖拽 / 穿透） |
+| 图钉图标 | 标题栏自动隐藏：未钉住＝鼠标离开后整行淡出；钉住＝常驻 |
+| 齿轮图标 | 打开/关闭**设置面板**（见下） |
+| EN / ZH / KO / OFF | 循环切换翻译语言 |
+| 双语 / 译文 | 双语与仅译文切换 |
+| 麦克风 / 喇叭 / 两者 | 循环切换音频源（切换会重启识别引擎，约 15–30 秒；系统音频仅 Windows） |
+| API / 本地 | 切换翻译通道 |
+| 顶部滑块 | 背景卡片透明度（0–60%）与窗口宽度 |
+| `Ctrl+Alt+D` / `Ctrl+Alt+L` / `Ctrl+Alt+M` | 点击穿透 / 语言 / 显示模式 |
 
-1. **Console commands** — type in the server's terminal window:
-   `translate en,zh,ko` (activate), `translate off` (deactivate),
-   `translate zh` (switch), `quit` (exit).
-2. **HTTP endpoint** — `POST /api/translate` accepts
-   `{"langs": "zh"}` / `{"langs": "en,zh,ko"}` / `{"langs": ""}` and
-   hot-swaps the active translators. This is exactly what the subtitle
-   window's **EN/ZH/KO/OFF** button uses.
+**设置面板**（齿轮打开；**常驻置顶**，点击其他窗口不会消失；Esc / ✕ / 再点齿轮关闭）
 
-Translators are lazy-loaded on first use, so the first `translate ...`
-takes a few seconds to load models.
+![设置面板](docs/images/settings-panel.png)
 
-## OpenAI-compatible API translation (`api:` targets)
+- **字幕样式**：字号 9 档、字体 12 档（默认跟随页面）、粗体、阴影、描边、重墨（B 站弹幕式）、文字透明度
+- **翻译**：目标语言、通道（本地模型 / OpenAI API）、显示模式
+- **翻译 API**（OpenAI 兼容）：地址 / 模型 / 密钥 + **保存并测试**
+  —— 先实测 `chat/completions`（2xx 才落盘），失败显示具体原因且不改动现有配置；
+  成功后合并写入项目根 `openai_translate.json` 并热生效（服务器无需重启）
+  - **思考模式**三态：默认（不发送 `enable_thinking`，兼容性最好）/ 开 / 关；
+    推理模型（DeepSeek-R1 等）选"关"可显著降低延迟；不支持该参数的模型会忽略它（布尔值），
+    字符串值会被严格端点拒绝（HTTP 400 code 20015）
+  - **上下文翻译**开关：等价于 `context_n`（开=保留最近 6 条对照，关=0）
+- **背景与窗口**：背景透明度档位、点击穿透
 
-By default every translated line's **source is the detected language** of the
-finalized utterance, but the bundled translators themselves are ja-fixed:
-`en` (FuguMT ja->en) and the M2M-100 routes all expect Japanese input. To
-translate **any** detected language (ja, zh, en, ko, yue, ...) into a chosen
-target, point hayamimi at an OpenAI-compatible chat-completions endpoint.
+### 4. OBS 覆盖层
 
-Create `openai_translate.json` in the project root (start from
-`openai_translate.example.json`):
+在 OBS 中添加「浏览器」源，URL 填 `http://localhost:8833/`；需要分行摆放时：
 
-```json
-{
-  "base_url": "http://localhost:11434/v1",
-  "model": "qwen2.5:7b",
-  "api_key": "",
-  "timeout_sec": 10,
-  "targets": ["zh", "en", "ko"],
-  "src_names": { "ja": "Japanese", "zh": "Chinese", "en": "English",
-                 "ko": "Korean", "yue": "Cantonese" },
-  "prompt": ""
-}
+- `http://localhost:8833/?show=final` —— 只渲染确认行
+- `http://localhost:8833/?show=partial` —— 只渲染进行中的草稿行
+
+窗口尺寸按你的画面自定（覆盖层内容居中、自适应宽度）。
+
+### 5. 翻译配置
+
+- **本地模型**（`--translate zh` / `en` / `ko` / ...）：en 走 FuguMT（ja→en），
+  其余走 M2M-100（ja→任意词表支持的目标）。仅日语源。默认**关闭翻译**。
+- **OpenAI 兼容 API**（`api:` 目标）：任意源语言→目标。**推荐直接在设置面板填写并测试**；
+  也可手写项目根 `openai_translate.json`（以 `openai_translate.example.json` 为模板）：
+
+| 字段 | 说明 |
+|---|---|
+| `base_url` | 任意 OpenAI 兼容基址（Ollama `/v1`、LM Studio、vLLM、硅基流动...） |
+| `model` | 模型名（如 `tencent/Hunyuan-MT-7B`） |
+| `api_key` | 云端点必填；本地服务器留空 |
+| `timeout_sec` | 单次请求超时（默认 10） |
+| `targets` | 允许的 `api:` 目标，如 `["zh","en","ko"]` |
+| `enable_thinking` | 可选布尔；**不写＝不发送该参数**（最兼容）。字符串值会被部分端点拒绝 |
+| `context_n` | 上下文对照条数（0 关闭，默认 6） |
+| `context_timeout_s` | 多久无翻译视为换话题并清空上下文（默认 60） |
+| `src_names` / `prompt` | 提示词中的语言名映射 / 自定义系统提示词模板（`{src}` `{target}` 占位符） |
+
+### 6. 常见问题
+
+| 现象 | 处理 |
+|---|---|
+| 首次启动很慢 | 正常：首次加载模型约 15–30 秒（serve 日志可见 `loading models...`） |
+| 端口 8833 被占用 | 换端口：`--serve 8840`；覆盖层/仪表盘 URL 随之变化。桌面窗按项目设置里配置的 URL 探测 |
+| `incomplete package` / 模型缺失 | 用 `download_models.py` 补齐（`--minimal` 精简）；确认 `models/` 在项目根下 |
+| 没有声音 / 选错设备 | `--list-audio-devices` 列出设备，`--mic-device NAME` / `--speaker-device NAME`（子串匹配）指定 |
+| 远程桌面（RDP）里麦克风打不开 | Windows 禁止跨会话访问；在 mstsc 中开启麦克风重定向，或本机控制台运行 |
+| 系统音频转写无声 | WASAPI 回环仅 Windows；确认用的是输出设备而非输入 |
+| 想确认当前跑的是哪版代码 | 看 serve 日志首行 `[build] ...`（脚本目录 + 最新 .py 时间） |
+| 杀软/SmartScreen 拦截 | 解压后运行 `首次运行.bat`（自动解除"来自网络"标记）；或手动解除锁定 |
+
+---
+
+## 网络音频输入
+
+`--input ws` 以 WebSocket 接收端点代替本地麦克风。手机或 stackchan 类 ESP32 板可通过局域网串流麦克风音频：
+
+```bash
+.venv/Scripts/python scripts/realtime_transcribe.py --input ws --serve
+# -> ws://<host>:8766/ingest 接收音频；http://localhost:8833/dashboard 显示结果
 ```
 
-- `base_url` is any OpenAI-compatible base (OpenAI, Ollama's `/v1`, LM Studio,
-  vLLM, ...). `api_key` stays empty for local servers.
-- `targets` limits which languages `api:` can be asked for; `src_names` maps
-  detected language codes to names in the prompt (falls back to the code).
-- `prompt` is an optional custom system prompt with `{src}` and `{target}`
-  placeholders; empty means the built-in interpreter prompt (handles the
-  target language, plus "only output the translation" / keep numbers intact).
+协议：连接 `/ingest`，发送一条 JSON 文本帧（`{"sr": 16000, "format": "pcm_s16le", "channels": 1}`），
+然后以二进制帧串流原始 `pcm_s16le` 音频。服务器会重采样非 16kHz 音频，以与仪表盘 SSE 相同的
+partial/final/translation/refine JSON 事件应答。同一时刻只接受一个音频生产客户端；
+`scripts/ws_mic_client.py` 是无依赖参考客户端（按实时节奏串流一个 wav 文件）。
 
-Then the `--translate` route accepts an `api:` prefixed `LANGS` spec, mixed
-freely with local codes (`api:zh`, `api:en,ko`, bare `api` = all configured
-targets, or `api:zh,en` = zh via API + en via local FuguMT). The same spec
-works in the runtime hot-switch (`translate api:zh`) and via
-`POST /api/translate` (`{"langs": "api:zh"}`).
+## 扬声器（系统外放）回环输入
 
-The subtitle window's **API / 本地** button toggles the channel: when set to
-**API**, the language button sends `api:` specs; when set to **本地** it sends
-plain codes (local MT). Without a usable `openai_translate.json` the API
-button is greyed out and behavior is unchanged.
+`--input speaker` 转写电脑音频输出上正在播放的内容（通话对面、视频等）；`--input mix` 把麦克风与外放混成一路，
+适合会议记录。底层是 `soundcard` 包的 WASAPI 回环：直接挂到渲染端点上，无需"立体声混音"设置。
+**仅限 Windows**。`mix` 按采集时间戳对齐（约 48ms 容差）后相加并截幅，以麦克风时钟为主；
+扬声器采集失败会在 stderr 报告并退化为纯麦克风。注意这是**单路混合转写**，不做分轨，
+也没有回声消除——请戴耳机。
 
-Any API failure or timeout returns the source line unchanged — the same
-non-blank guarantee the local translators give.
+## 运行时翻译热切换（无需重启）
 
-## CLI reference
+在**服务器运行中**改变翻译语言，两条途径：
 
-All flags are on `scripts/realtime_transcribe.py`:
+1. **控制台命令**：`translate en,zh,ko` / `translate off` / `translate api:zh` / `quit`
+2. **HTTP 端点**：`POST /api/translate`，`{"langs": "zh"}` / `{"langs": "api:zh,en"}` / `{"langs": ""}`
+   —— 字幕窗的语言/通道按钮即调用此端点。
 
-| Flag | Default | Description |
+翻译器懒加载，首次切换需数秒。API 通道的配置（`openai_translate.json`）在每次热切换时
+**重新读取**，因此面板保存后立即生效。
+
+## CLI 参考
+
+| 参数 | 默认 | 说明 |
 |---|---|---|
-| `--wav PATH` | mic input | simulate streaming from a 16kHz mono WAV file instead of the microphone |
-| `--no-realtime` | off | with `--wav`, don't sleep between chunks (fast batch processing) |
-| `--input {mic,wav,ws,speaker,mix}` | mic, or wav if `--wav` is given | audio source; `ws` accepts audio over the network (see below); `speaker` transcribes the PC's audio output (WASAPI loopback, Windows only); `mix` sums mic + speaker into one stream |
-| `--mic-device NAME` | system default input | substring match for the input device `--input mic`/`mix` captures from; see `--list-audio-devices` |
-| `--speaker-device NAME` | system default output | substring match for the output device `--input speaker`/`mix` loops back from; see `--list-audio-devices` |
-| `--list-audio-devices` | off | print available audio devices and exit |
-| `--ws-host HOST` | `0.0.0.0` | bind host for `--input ws`'s `/ingest` endpoint |
-| `--ws-port PORT` | 8766 | port for `--input ws`'s `/ingest` endpoint |
-| `--threads N` | 4 | inference threads per model |
-| `--no-partial` | off | disable in-progress draft subtitles |
-| `--min-silence SEC` | 0.35 | silence duration that ends an utterance; lower = snappier finals, more splits |
-| `--max-speech SEC` | 12.0 | force-finalize an utterance after this many seconds of continuous speech |
-| `--max-resident N` | 3 | max non-tier0 models kept resident (LRU eviction); `<=0` = unlimited |
-| `--serve [PORT]` | off, 8833 | serve the dashboard + OBS overlay at `http://localhost:PORT` |
-| `--no-refine` | off | disable the second-pass re-decode of utterance groups |
-| `--transcript PATH` | none | append refined transcript lines to this file |
-| `--hotwords PATH` | none | hotword list (one per line) to bias decoding toward proper nouns; currently no effect on the ja tier (use `--replace` there) |
-| `--replace PATH` | none | user dictionary: `wrong=right` per line, applied to all output |
-| `--lang-switch-guard SEC` | 2.0 | ignore language detections shorter than this as noise (`0` disables) |
-| `--lid-switch-confirm N` | 2 | consecutive new-language detections needed before the session switches; raise for stickier sessions |
-| `--speakers` | off | label utterances with speaker ids (S1, S2, ...) |
-| `--translate [LANGS]` | off, `en` | translate the detected line to these comma-separated languages. Plain codes use the local models (en = FuguMT, others = M2M-100); `api:zh` / bare `api` route through the OpenAI-compatible endpoint in `openai_translate.json` and translate ANY source language |
+| `--wav PATH` | 麦克风 | 从 16kHz 单声道 WAV 模拟流式输入 |
+| `--no-realtime` | 关 | 搭配 `--wav` 时不按实时节奏播 |
+| `--input {mic,wav,ws,speaker,mix}` | mic | 音频来源 |
+| `--mic-device NAME` / `--speaker-device NAME` | 系统默认 | 设备子串匹配 |
+| `--list-audio-devices` | 关 | 列出音频设备后退出 |
+| `--serve [PORT]` | 关，8833 | 启动仪表盘 + OBS 覆盖层 |
+| `--translate [LANGS]` | 关 | 逗号分隔目标；`api:` 前缀走 OpenAI 兼容端点 |
+| `--speakers` | 关 | S1/S2/... 说话人标注 |
+| `--hotwords PATH` / `--replace PATH` | 无 | 热词（ja 路由暂无效）/ 用户词典 |
+| `--text-shadow` `--text-stroke` `--text-ink` `--text-opacity` `--bold` `--bg` `--mode` `--lang` `--size` | — | 字幕窗启动样式 |
 
-## Architecture
+完整列表见 `scripts/realtime_transcribe.py --help`。
+
+## 架构
 
 ```
                           ┌─────────────┐
-  mic / wav ───────────▶ │  Silero VAD │  0.35s end-of-speech + 0.8s preroll
+  mic / wav ───────────▶ │  Silero VAD │  0.35s 停顿时长 + 0.8s 前滚
                           └──────┬──────┘
-                                 │ speech segment
+                                 │ 语音段
                                  ▼
                    ┌───────────────────────────┐
-                   │  whisper-tiny spoken-LID   │  runs on first ~4s while
-                   │  (+ char-set arbitration)  │  the segment is still coming in
+                   │  whisper-tiny 口语语言识别  │  段仍在输入时于前 4s 运行
                    └─────────────┬─────────────┘
-                                 │ language tag
+                                 │ 语言标签
                  ┌───────────────┼────────────────┬─────────────┬──────────────┐
                  ▼               ▼                ▼             ▼              ▼
              ┌───────┐      ┌─────────┐      ┌──────────┐  ┌─────────┐   ┌──────────┐
              │  ja   │      │   zh    │      │  ko/yue  │  │ en + 24 │   │  ~1600   │
-             │ Reazon│      │Paraformer│      │SenseVoice│  │EU langs │   │  other   │
+             │ Reazon│      │Paraformer│      │SenseVoice│  │EU 语种  │   │  其他    │
              │Speech │      │   -zh   │      │  small   │  │Parakeet │   │Omnilingual│
-             │Zipform│      │         │      │          │  │TDT v3   │   │  ASR     │
              └───┬───┘      └────┬────┘      └────┬─────┘  └────┬────┘   └────┬─────┘
                  └───────────────┴────────────────┴─────────────┴─────────────┘
                                                 │
-                     partial (every ~0.5s)      │      final (~0.1s after end-of-speech)
+                     partial（约每 0.5s）        │      final（停话约 0.1s）
                      ◀───────────────────────────┴───────────────────────▶
                                                 │
                           ┌─────────────────────┼─────────────────────┐
                           ▼                     ▼                     ▼
                  ┌────────────────┐   ┌──────────────────┐   ┌────────────────┐
-                 │ ja punctuation  │   │ speaker labeling  │   │  translation    │
-                 │ (BERT restore)  │   │ (CAM++, --speakers)│   │ (FuguMT/M2M-100)│
+                 │ 标点恢复        │   │ 说话人标注        │   │ 翻译            │
+                 │ (ja/zh restore)│   │ (CAM++, --speakers)│   │ (本地/API)      │
                  └────────────────┘   └──────────────────┘   └────────────────┘
                                                 │
-                     2s silence: batch re-decode recent utterances (two-pass refine)
+                      静音 2 秒：批量重解码最近话语（两遍精修）
                                                 │
                                                 ▼
-                              dashboard / OBS overlay / transcript file
+                             仪表盘 / OBS 覆盖层 / 桌面字幕窗
 ```
 
-Models are lazy-loaded on first use; an LRU cache evicts the
-least-recently-used non-Japanese models (`--max-resident`) so memory stays
-bounded no matter how many languages a session wanders through.
+模型首次使用时懒加载；LRU 缓存按 `--max-resident` 逐出最近最少使用的非日语模型，使内存保持有界。
 
-## Measured performance
+## 实测性能
 
-End-to-end (LID -> routing -> decode -> ja punctuation), real speech, no
-preroll/two-pass (single clips). `en` uses WER, all others use CER (`yue`
-t2s-normalized). Full methodology in `docs/SCORECARD.md`.
+端到端（语言识别 → 路由 → 解码 → 标点），真实语音，无前滚/两遍精修（单片段）。
+`en` 使用 WER，其余使用 CER。完整方法见 `docs/SCORECARD.md`。
 
-| Language | Clips | LID accuracy | Route | Mean error | Mean RTF |
+| 语言 | 片段数 | 语言识别准确率 | 路由 | 平均错误率 | 平均 RTF |
 |---|---|---|---|---|---|
 | ja | 15 | 15/15 | ReazonSpeech | 7.5% | 0.071 |
 | en | 15 | 15/15 | Parakeet v3 | 2.3% | 0.109 |
@@ -397,110 +319,43 @@ t2s-normalized). Full methodology in `docs/SCORECARD.md`.
 | ko | 12 | 12/12 | SenseVoice | 8.1% | 0.062 |
 | yue | 12 | 12/12 | SenseVoice | 6.1% | 0.061 |
 
-RTF (real-time factor) well under 0.2 across every route means each route
-runs 9-16x faster than realtime on CPU alone -- see `docs/GOALS.md` for the
-full target table and `docs/BENCHMARKS.md` for the complete iteration log
-(30+ measured changes, latency/memory/accuracy tradeoffs and why each one was
-made or rejected).
+关键数字：
 
-Headline numbers from that log:
+- **日语 CER 5.8%**（beam search）于真实广播音频，对比同片段 `whisper-large-v3-turbo` 13.8%
+- **日语平均 final 延迟约 100ms**（含标点）；5 语言压力测试平均 236ms、最大 552ms
+- **内存 <2GB**（`--max-resident 3`；`--max-resident 2` 约 1.35GB）
+- 各路由 RTF 均远低于 0.2 —— 比实时快 9–16 倍
 
-- **Japanese CER 5.8%** (beam search) on real broadcast audio, vs. 13.8% for
-  `whisper-large-v3-turbo` on the same clips -- less than half the error rate.
-- **~100ms mean final latency** (ja, punctuated); ~236ms mean / 552ms max
-  across a 5-language soak test with every feature enabled.
-- **<2GB RAM** with `--max-resident 3` (1.35GB at `--max-resident 2`).
+## 已知局限（坦诚列表）
 
-## Limitations (honest list)
+- **不支持句内语言混码。** 路由按话语选择一种语言；句内混语会被弄乱或丢弃。
+- **小段落在响铃/音效/BGM 冲击后可能误路由。** `--lang-switch-guard` + `--lid-switch-confirm` 可缓解；详见 `docs/BENCHMARKS.md` 迭代 #29。
+- **会话首段先由 SenseVoice 确认语言**（`docs/NOISE.md` 双 LID 章节）；SenseVoice 5 语言之外的会话确立有短暂延迟。
+- **`--hotwords` 当前对 ja 路由无效**（字节级 BPE 与 cjkchar 不兼容）；日语专有名词请用 `--replace`。
+- **两个同时说话的说话人不会被分离**（按话轮标注，非真分离）。
+- **本地翻译质量有上限**：FuguMT/M2M-100 为小模型，ja→zh/ko 数字不能可靠保留（见 `docs/TRANSLATE.md`、`docs/TRANSLATE_M2M.md`）。
+- **端到端麦克风流水线未经本项目测试之外独立验证** —— 欢迎提交 issue。
 
-- **Code-switching mid-sentence is not supported.** The router picks one
-  language per utterance; a sentence that mixes Japanese and English within
-  itself will have the minority-language portion mangled or dropped.
-  Utterance-level switching (e.g. an interpreter alternating full sentences)
-  works well; word-level switching within one sentence does not.
-- **Very short utterances after a jingle/sting/BGM burst can misroute.**
-  The language-switch guard (`--lang-switch-guard`, paired with
-  `--lid-switch-confirm`) mitigates this but confidently-wrong LID+decode
-  combinations (where the garbled text happens to match the wrong
-  language's character set) remain a known blind spot -- see
-  `docs/BENCHMARKS.md`'s iteration #29 for a quantified before/after.
-  `--lid-switch-confirm 1 --lang-switch-guard 0` fully disables the sticky
-  hysteresis (every detection switches the session immediately), trading
-  noise robustness for maximum responsiveness -- useful when validating
-  whether the lock itself, rather than its tuning, is the right call for
-  your setup.
-- **A session's very first utterance always confirms against SenseVoice
-  before deciding the language** (see `docs/NOISE.md`'s dual-LID confirm
-  section), so a whisper-tiny bootstrap misfire can no longer route the
-  session to a language with no matching model. Languages outside
-  SenseVoice's 5 (ja/en/zh/ko/yue) -- European/`--minimal`-uncovered ones --
-  still need `--lang-switch-guard`-length segments repeated
-  `--lid-switch-confirm` times to become the session's confirmed language,
-  so a legitimate European-language session establishes with a short delay
-  at startup rather than instantly.
-- **`--hotwords` currently has no effect on the ja (ReazonSpeech) tier.**
-  ReazonSpeech's `tokens.txt` is byte-level BPE, incompatible with the
-  `modeling_unit=cjkchar` encoding hayamimi uses for hotwords, so every
-  hotword fails to encode (sherpa-onnx only reports this as stderr warnings
-  and still exits 0 -- see GitHub issue #1). hayamimi now prints a startup
-  warning telling you how many hotwords failed to encode; use `--replace`
-  for ja proper nouns instead. A real fix needs either a matching
-  `bpe.model` for the ReazonSpeech release (not currently shipped) or a
-  from-scratch byte-BPE hotword encoder -- tracked as future work.
-- **Two overlapping speakers are not separated.** `--speakers` does
-  turn-taking speaker labeling (one embedding per finalized VAD segment,
-  nearest-centroid assignment), not true diarization -- simultaneous speech
-  gets one label.
-- **Translation quality has a real ceiling**, not just a tuning one.
-  FuguMT (ja->en) and M2M-100 (ja->zh/ko) are small models; repetition loops
-  are suppressed but not eliminated, and numeric values are not reliably
-  preserved in ja->zh/ko translation (see `docs/TRANSLATE.md` and
-  `docs/TRANSLATE_M2M.md` for measured failure cases before you rely on this
-  for anything numeric or financial).
-- **The end-to-end mic pipeline has not been independently verified beyond
-  this project's own testing** -- see `docs/GOALS.md`'s remaining-work
-  section. File an issue if your results differ from the numbers above.
+## 许可证
 
-## License
+源码为 MIT（`LICENSE`，copyright oboroge0）。本仓库不包含任何模型权重 ——
+`scripts/download_models.py` 在安装时从其原始发布方获取，每个模型自带许可证（见 `THIRD_PARTY_NOTICES.md`）。
 
-Source code is MIT (`LICENSE`, copyright oboroge0). No model weights are
-committed to this repository -- `scripts/download_models.py` fetches them
-from their original publishers at install time, and each carries its own
-license (`THIRD_PARTY_NOTICES.md` has the full table).
+**有一个模型并非宽松许可**：ja->en 翻译模型（`mojicast-fugumt-ja-en-ct2`）为
+**CC BY-SA 4.0**；再分发权重时须保留署名并以相同许可分发。这不影响 hayamimi 代码本身。
 
-**One model is not permissive:** the ja->en translation model
-(`mojicast-fugumt-ja-en-ct2`, used by `--translate en`) is
-**CC BY-SA 4.0 (share-alike)**. If you redistribute that model's weights,
-you must keep attribution and license any redistribution under CC BY-SA 4.0
-too. This does not affect hayamimi's own code license, and does not affect
-any other `--translate` target (M2M-100, MIT).
+## 致谢
 
-## Credits
+- [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) —— 所有模型运行的 ONNX 推理引擎
+- [ReazonSpeech](https://research.reazon.jp/) —— 日语 ASR 模型
+- [NVIDIA NeMo / Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) —— 英语及 24 种欧洲语言
+- [Meta AI Omnilingual ASR](https://github.com/facebookresearch/omnilingual-asr) —— ~1600 种语言兜底
+- [FunASR / SenseVoice](https://github.com/FunAudioLLM/SenseVoice)（阿里达摩院）—— 中文、韩语、粤语 ASR
+- [Mojicast](https://github.com/ishiki-emo/mojicast)（ishiki-emo）—— 设计灵感与标点/翻译模型制品来源
+- [Silero VAD](https://github.com/snakers4/silero-vad) —— 语音活动检测
+- [3D-Speaker](https://github.com/modelscope/3D-Speaker)（阿里达摩院）—— CAM++ 说话人嵌入
+- [Kiwi](https://github.com/bab2min/kiwipiepy) —— 韩语形态分析分词器
 
-hayamimi exists on top of, and would not exist without:
+## 参与贡献
 
-- [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) -- the ONNX
-  Runtime inference engine every model here runs through.
-- [ReazonSpeech](https://research.reazon.jp/) (Reazon Human Interaction Lab)
-  -- the Japanese ASR model that anchors this project's accuracy claim.
-- [NVIDIA NeMo / Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
-  -- English + 24 European languages.
-- [Meta AI Omnilingual ASR](https://github.com/facebookresearch/omnilingual-asr)
-  -- the ~1600-language fallback that makes "multilingual" not a lie.
-- [FunASR / SenseVoice](https://github.com/FunAudioLLM/SenseVoice) (Alibaba
-  DAMO Academy) -- Chinese, Korean, and Cantonese ASR.
-- [Mojicast](https://github.com/ishiki-emo/mojicast) (ishiki-emo) -- design
-  inspiration for the live-captioning pipeline, and the source of the
-  converted punctuation/translation model artifacts this project uses.
-  Mojicast is itself a full offline real-time captioning app worth checking
-  out.
-- [Silero VAD](https://github.com/snakers4/silero-vad) -- voice activity
-  detection.
-- [3D-Speaker](https://github.com/modelscope/3D-Speaker) (Alibaba DAMO
-  Academy) -- the CAM++ speaker embedding model behind `--speakers`.
-- [Kiwi](https://github.com/bab2min/kiwipiepy) -- Korean morphological
-  tokenizer, used to fix SenseVoice's token-spaced Korean output.
-
-## Contributing
-
-See `CONTRIBUTING.md`.
+见 `CONTRIBUTING.md`。

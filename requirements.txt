@@ -1,6 +1,14 @@
 # Runtime dependencies for hayamimi (early hearing / 早耳).
-# Pinned to versions verified working on Windows 11 / Python 3.11 (CPU-only).
-# See THIRD_PARTY_NOTICES.md for the license of each package.
+#
+# This file is the COMPLETE runtime set needed for deployment:
+#   python -m venv .venv
+#   .venv\Scripts\pip install -r requirements.txt      (Windows)
+#   .venv\bin\pip install -r requirements.txt          (macOS/Linux)
+#   .venv\Scripts\python scripts\download_models.py    (fetch the ONNX weights)
+#
+# Pinned to versions verified working on Windows 11 with Python 3.11/3.12
+# (CPU-only; no GPU / CUDA / PyTorch). Evaluation and test extras live in
+# requirements-dev.txt. See THIRD_PARTY_NOTICES.md for each package's license.
 
 numpy==2.4.6
 soundfile==0.14.0
