@@ -1,11 +1,11 @@
 {
   "name": "hayamimi-desktop-subtitle",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Transparent always-on-top desktop subtitle window for hayamimi's OBS overlay",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win zip && node tools/publish-flat.js",
+    "dist": "electron-builder --win zip && node tools/make-7z.js && node tools/publish-flat.js",
     "flat": "node tools/publish-flat.js"
   },
   "build": {
@@ -14,6 +14,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "preload-panel.js",
       "package.json"
     ],
     "directories": {

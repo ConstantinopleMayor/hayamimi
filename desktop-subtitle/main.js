@@ -48,18 +48,18 @@ const LANGS = ["zh", "en", "ko", "off"]; // button cycle: OFF -> ZH -> EN -> KO
 const LANG_LABEL = { en: "EN", zh: "ZH", ko: "KO", off: "OFF" };
 const SIZE_CHOICES = [12, 16, 20, 24, 32, 40, 48, 56, 64];
 const FONT_CHOICES = [
-  { label: "默认（跟随页面）", family: "" },
-  { label: "微软雅黑", family: '"Microsoft YaHei", sans-serif' },
+  { label: "默认（跟随）", family: "" },
+  { label: "雅黑", family: '"Microsoft YaHei", sans-serif' },
   { label: "等线", family: '"DengXian", sans-serif' },
   { label: "黑体", family: '"SimHei", sans-serif' },
   { label: "宋体", family: '"SimSun", serif' },
   { label: "楷体", family: '"KaiTi", serif' },
   { label: "幼圆", family: '"YouYuan", sans-serif' },
   { label: "隶书", family: '"LiSu", serif' },
-  { label: "华文行楷", family: '"STXingkai", serif' },
+  { label: "行楷", family: '"STXingkai", serif' },
   { label: "Arial", family: "Arial, sans-serif" },
   { label: "Georgia", family: "Georgia, serif" },
-  { label: "Consolas 等宽", family: "Consolas, monospace" },
+  { label: "Consolas", family: "Consolas, monospace" },
 ];
 
 // Subtitle text-style tiers (settings-menu radios; --text-* CLI options).
@@ -235,6 +235,36 @@ function detectApiConfig() {
     return !!(cfg && String(cfg.base_url || "").trim() && String(cfg.model || "").trim());
   } catch (_) {
     return false;
+  }
+}
+
+// Raw connection fields for the settings panel's 翻译 API form (URL / model
+// / key only -- everything else in the file is preserved on save).
+function readApiConfig() {
+  const empty = { base_url: "", model: "", api_key: "", thinking: "default", context_on: true };
+  try {
+    const root = findProjectRoot(launchDir());
+    if (!root) return empty;
+    const cfg = JSON.parse(fs.readFileSync(path.join(root, "openai_translate.json"), "utf8"));
+    if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return empty;
+    // enable_thinking is tri-state: the KEY ABSENT means "don't send the
+    // field at all" (strict MT endpoints like Hunyuan-MT reject it with
+    // HTTP 400 20015); present true/false = explicitly on/off.
+    const th = cfg.enable_thinking;
+    let thinking = "default";
+    if (th !== undefined && th !== null) {
+      thinking = (th === true || th === "true" || th === 1 || th === "1") ? "on" : "off";
+    }
+    const cn = Number(cfg.context_n);
+    return {
+      base_url: String(cfg.base_url || ""),
+      model: String(cfg.model || ""),
+      api_key: String(cfg.api_key || ""),
+      thinking,
+      context_on: Number.isFinite(cn) ? cn > 0 : true, // load_config default 6 = on
+    };
+  } catch (_) {
+    return empty;
   }
 }
 
@@ -1489,114 +1519,641 @@ function applyFontSize(px) {
 
 function applyFont(family) {
   opts.font = family;
-  const css = family ? `#box{font-family:${family}!important;} #hmy-txt-flow,#hmy-tr-flow{font-family:${family}!important;}` : "";
+  // insertCSS is "insert-only, later wins": switching BACK to the page
+  // default must insert a rule too, otherwise the previously inserted
+  // font-family !important rule stays in force forever (2026-10-19 report:
+  // choosing 默认 after another font had no effect). The reset re-states the
+  // overlay page's own stack (subtitle_server.py: #box font-family).
+  const stack = family || '"Yu Gothic UI", "Meiryo", sans-serif';
+  const css = `#box{font-family:${stack}!important;} #hmy-txt-flow,#hmy-tr-flow{font-family:${stack}!important;}`;
   win.webContents.insertCSS(css).catch(() => {});
 }
 
+// ---------------------------------------------------------------------------
+// Settings panel (modern HTML panel window; replaces the native Menu.popup,
+// whose OS-drawn look could not be styled and clashed with the dark card).
+// One flat scrolling page in three sections; the current value of every
+// setting is highlighted inline (no second-level submenus to hunt through).
+
+// Panel page: inlined data-URL document (same packaging story as the
+// makeCss/makeInitJs templates -- electron-builder's files list stays
+// main.js/preload.js only). The choice constants (SIZE_CHOICES, ...) are the
+// single source of truth: they are interpolated at open time, so a new tier
+// added there shows up here automatically.
+function panelHtml() {
+  const state = panelState();
+  // pill-grid row builder: one <button class="pill" data-act data-val>,
+  // the selected tier carrying .on (amber fill)
+  const pills = (act, choices, current, labels) => choices.map((c) => {
+    const val = typeof c === "object" ? (c.family !== undefined ? c.family : c.key) : c;
+    const lab = labels ? labels(val, c) : String(c);
+    const on = val === current || (act === "font" && val === (current || ""));
+    return `<button class="pill${on ? " on" : ""}" data-act="${act}" data-val="${String(val).replace(/"/g, "&quot;")}">${lab}</button>`;
+  }).join("");
+  const fontPills = FONT_CHOICES.map((f) =>
+    `<button class="pill${(state.font || "") === f.family ? " on" : ""}" data-act="font" data-val="${f.family.replace(/"/g, "&quot;")}">${f.label}</button>`).join("");
+  const langLabels = { en: "英语", zh: "中文", ko: "韩语", off: "关闭" };
+  return `<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{background:transparent;font-family:'Segoe UI','Microsoft YaHei',sans-serif;
+    -webkit-user-select:none;user-select:none;overflow:hidden;}
+  /* Palette as variables: :root is the dark glass (matches the subtitle
+     card); @media(prefers-color-scheme:light) overrides when Windows runs
+     its light theme. The amber accent + red destructive colors are shared
+     (both hold on light and dark). html.light forces the light palette for
+     the ?theme=light preview probe. */
+  :root{--bg:rgba(24,26,33,.92);--border:rgba(255,255,255,.09);
+    --text:rgba(255,255,255,.95);--text-dim:rgba(255,255,255,.42);
+    --lab:rgba(255,255,255,.85);--hint:rgba(255,255,255,.35);
+    --pill-bg:rgba(255,255,255,.06);--pill-border:rgba(255,255,255,.14);
+    --pill-text:rgba(255,255,255,.82);--pill-hover:rgba(255,255,255,.13);
+    --pill-hover-border:rgba(255,255,255,.3);--track:rgba(255,255,255,.18);
+    --scroll:rgba(255,255,255,.22);--close-dim:rgba(255,255,255,.55);
+    --shadow:0 6px 18px rgba(0,0,0,.24),0 1px 4px rgba(0,0,0,.14);}
+  html.light{--bg:rgba(248,249,252,.95);--border:rgba(0,0,0,.1);
+    --text:#25272e;--text-dim:rgba(0,0,0,.4);
+    --lab:rgba(0,0,0,.72);--hint:rgba(0,0,0,.38);
+    --pill-bg:rgba(0,0,0,.045);--pill-border:rgba(0,0,0,.14);
+    --pill-text:rgba(0,0,0,.75);--pill-hover:rgba(0,0,0,.09);
+    --pill-hover-border:rgba(0,0,0,.28);--track:rgba(0,0,0,.16);
+    --scroll:rgba(0,0,0,.22);--close-dim:rgba(0,0,0,.5);
+    --shadow:0 6px 18px rgba(0,0,0,.16),0 1px 4px rgba(0,0,0,.08);}
+  @media (prefers-color-scheme: light) {
+    html:not(.dark){--bg:rgba(248,249,252,.95);--border:rgba(0,0,0,.1);
+      --text:#25272e;--text-dim:rgba(0,0,0,.4);
+      --lab:rgba(0,0,0,.72);--hint:rgba(0,0,0,.38);
+      --pill-bg:rgba(0,0,0,.045);--pill-border:rgba(0,0,0,.14);
+      --pill-text:rgba(0,0,0,.75);--pill-hover:rgba(0,0,0,.09);
+      --pill-hover-border:rgba(0,0,0,.28);--track:rgba(0,0,0,.16);
+      --scroll:rgba(0,0,0,.22);--close-dim:rgba(0,0,0,.5);
+      --shadow:0 6px 18px rgba(0,0,0,.16),0 1px 4px rgba(0,0,0,.08);}
+  }
+  #panel{position:fixed;inset:8px;display:flex;flex-direction:column;
+    background:var(--bg);
+    -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);
+    border:1px solid var(--border);border-radius:12px;
+    box-shadow:var(--shadow);
+    animation:hmy-in .13s ease-out;}
+  @keyframes hmy-in{from{opacity:0;transform:scale(.97) translateY(-4px);}
+                    to{opacity:1;transform:none;}}
+  /* the head doubles as the drag handle... */
+  #head{display:flex;align-items:center;justify-content:space-between;
+    padding:12px 16px 10px;flex:none;-webkit-app-region:drag;}
+  /* ...but the close button inside it must stay clickable */
+  #close{-webkit-app-region:no-drag;width:24px;height:24px;border:none;border-radius:6px;
+    cursor:pointer;background:transparent;color:var(--close-dim);
+    font-family:'Segoe MDL2 Assets';font-size:11px;line-height:24px;text-align:center;}
+  #close:hover{background:rgba(220,60,60,.85);color:#fff;}
+  #body{flex:1;overflow-y:auto;overflow-x:hidden;padding:0 16px 6px;scrollbar-width:thin;
+    scrollbar-color:var(--scroll) transparent;}
+  #body::-webkit-scrollbar{width:6px;}
+  #body::-webkit-scrollbar-thumb{background:var(--scroll);border-radius:3px;}
+  .sec{font-size:10px;font-weight:700;letter-spacing:2px;color:var(--text-dim);
+    text-transform:uppercase;margin:14px 0 8px;}
+  .row{display:flex;align-items:flex-start;justify-content:flex-start;
+    min-height:30px;padding:4px 0;gap:18px 24px;flex-wrap:wrap;}
+  /* a label and ITS controls stay one unbreakable unit: rows wrap between
+     groups, never between a label and its pills (2026-10-19 report: the
+     "显示模式" label stranded at a line end while its 双语/仅译文 pills
+     wrapped to the next line) */
+  .grp{display:flex;align-items:flex-start;gap:10px;flex:0 1 auto;min-width:0;}
+  /* top-align the label with the FIRST pill row (multi-line pill grids
+     otherwise leave the label floating mid-row) */
+  .row .lab{font-size:12.5px;line-height:28px;color:var(--lab);flex:none;}
+  .pills{display:flex;flex-wrap:wrap;gap:6px;min-width:0;}
+  .pill{border:1px solid var(--pill-border);background:var(--pill-bg);
+    color:var(--pill-text);font-size:12px;padding:5px 10px;border-radius:14px;
+    cursor:pointer;font-family:inherit;transition:background .12s ease,border-color .12s ease,
+    color .12s ease,transform .06s ease;}
+  .pill:hover{background:var(--pill-hover);border-color:var(--pill-hover-border);}
+  .pill:active{transform:translateY(1px);}
+  .pill.on{background:#e8a87c;border-color:#e8a87c;color:#1d1410;font-weight:600;}
+  .pill.on:hover{background:#f0b58a;border-color:#f0b58a;}
+  .pill.dis{opacity:.35;cursor:default;pointer-events:none;}
+  .switch{position:relative;width:38px;height:21px;border-radius:11px;flex:none;
+    background:var(--track);border:none;cursor:pointer;transition:background .15s ease;
+    margin-top:4px;}
+  .switch::after{content:"";position:absolute;top:2.5px;left:3px;width:16px;height:16px;
+    border-radius:50%;background:#fff;transition:left .15s ease;}
+  .switch.on{background:#e8a87c;}
+  .switch.on::after{left:19px;}
+  #foot{flex:none;padding:9px 16px 12px;border-top:1px solid var(--border);
+    display:flex;align-items:center;justify-content:space-between;}
+  #hint{font-size:10.5px;color:var(--hint);max-width:260px;}
+  #quit{border:1px solid rgba(220,80,70,.35);background:transparent;color:rgba(255,150,140,.9);
+    font-size:12px;padding:5px 13px;border-radius:8px;cursor:pointer;font-family:inherit;
+    transition:background .12s ease,color .12s ease;}
+  #quit:hover{background:rgba(220,60,60,.85);border-color:rgba(255,120,110,.6);color:#fff;}
+  html.light #quit{border-color:rgba(220,80,70,.45);color:#c2392c;}
+  html.light #quit:hover{color:#fff;}
+  /* 翻译 API form (URL / model / key + save&test) */
+  #api-grid{display:flex;flex-direction:column;gap:8px;padding:2px 0;}
+  .api-line{display:flex;align-items:center;gap:8px;}
+  .api-line .lab{font-size:12.5px;color:var(--lab);flex:none;width:56px;line-height:28px;}
+  .api-line .lab.auto{width:auto;}
+  .api-field{flex:1;min-width:0;background:var(--pill-bg);border:1px solid var(--pill-border);
+    color:var(--text);border-radius:8px;padding:6px 10px;
+    font-family:'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;outline:none;
+    transition:border-color .12s ease;}
+  .api-field:focus{border-color:#e8a87c;}
+  .api-field::placeholder{color:var(--hint);}
+  #hmy-api-save{border:none;background:#e8a87c;color:#1d1410;font-weight:600;
+    border-radius:8px;padding:6px 14px;cursor:pointer;font-family:inherit;font-size:12px;
+    flex:none;transition:background .12s ease,opacity .12s ease;}
+  #hmy-api-save:hover{background:#f0b58a;}
+  #hmy-api-save:disabled{opacity:.5;cursor:default;}
+  #hmy-api-status{font-size:11px;color:var(--hint);flex:1;min-width:80px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  #hmy-api-status.ok{color:#3f9d63;}
+  #hmy-api-status.err{color:#d05a4e;}
+</style></head>
+<body><div id="panel">
+  <div id="head"><span class="title">字幕设置</span>
+    <button id="close" title="关闭 (Esc)">&#xE8BB;</button></div>
+  <div id="body">
+    <div class="sec">字幕样式</div>
+    <div class="row"><span class="lab">字号</span>
+      <span class="pills">${pills("size", SIZE_CHOICES, state.size)}</span></div>
+    <div class="row"><span class="lab">字体</span>
+      <span class="pills">${fontPills}</span></div>
+    <div class="row"><span class="grp"><span class="lab">阴影</span>
+      <span class="pills">${pills("textShadow", TEXT_SHADOW_CHOICES, state.textShadow, (v, c) => c.label)}</span></span>
+      <span class="grp"><span class="lab">描边</span>
+      <span class="pills">${pills("textStroke", TEXT_STROKE_CHOICES, state.textStroke, (v, c) => c.label)}</span></span>
+      <span class="grp"><span class="lab">重墨</span>
+      <span class="pills">${pills("textInk", TEXT_INK_CHOICES, state.textInk, (v, c) => c.label)}</span></span></div>
+    <div class="row"><span class="grp"><span class="lab">粗体</span>
+      <button class="switch${state.bold ? " on" : ""}" data-act="bold" data-toggle="1"></button></span>
+      <span class="grp"><span class="lab">文字透明度</span>
+      <span class="pills">${pills("textOpacity", TEXT_OPACITY_CHOICES, state.textOpacity, (v) => v + "%")}</span></span></div>
+
+    <div class="sec">翻译</div>
+    <div class="row"><span class="grp"><span class="lab">目标语言</span>
+      <span class="pills">${pills("lang", LANGS, state.lang, (v) => langLabels[v] || v)}</span></span>
+      <span class="grp"><span class="lab">通道</span>
+      <span class="pills">
+        <button class="pill${!state.apiMode ? " on" : ""}" data-act="apiMode" data-val="0">本地模型</button>
+        <button class="pill${state.apiMode ? " on" : ""}${state.apiAvailable ? "" : " dis"}" data-act="apiMode" data-val="1"${state.apiAvailable ? "" : " title=\"未找到 openai_translate.json\""}>OpenAI API</button>
+      </span></span>
+      <span class="grp"><span class="lab">显示模式</span>
+      <span class="pills">
+        <button class="pill${state.mode === "both" ? " on" : ""}" data-act="mode" data-val="both">双语</button>
+        <button class="pill${state.mode === "tr" ? " on" : ""}" data-act="mode" data-val="tr">仅译文</button>
+      </span></span></div>
+
+    <div class="sec">翻译 API（OpenAI 兼容）</div>
+    <div id="api-grid">
+      <div class="api-line"><span class="lab">地址</span>
+        <input id="hmy-api-url" class="api-field" type="text" spellcheck="false"
+               placeholder="https://api.siliconflow.cn/v1">
+        <span class="lab auto">模型</span>
+        <input id="hmy-api-model" class="api-field" type="text" spellcheck="false"
+               placeholder="tencent/Hunyuan-MT-7B"></div>
+      <div class="api-line"><span class="lab">密钥</span>
+        <input id="hmy-api-key" class="api-field" type="password" spellcheck="false"
+               placeholder="sk-...（本地模型可留空）">
+        <button id="hmy-api-save">保存并测试</button>
+        <span id="hmy-api-status"></span></div>
+      <div class="api-line"><span class="lab">思考模式</span>
+        <span class="pills" id="hmy-api-thinking"
+              title="默认=不发送 enable_thinking（最兼容，严格 MT 端点如 Hunyuan-MT 用它）；开/关=随请求携带该参数，模型不支持时保存测试会报 HTTP 错误">
+          <button class="pill tpill" data-thinking="default">默认（不发送）</button>
+          <button class="pill tpill" data-thinking="on">开</button>
+          <button class="pill tpill" data-thinking="off">关</button>
+        </span>
+        <span class="lab auto">上下文翻译</span>
+        <button class="switch" id="hmy-api-context" title="带上下文翻译（最近对话作为参考）"></button></div>
+    </div>
+
+    <div class="sec">背景与窗口</div>
+    <div class="row"><span class="grp"><span class="lab">背景</span>
+      <span class="pills">${pills("bg", BG_MENU_CHOICES, state.bg, (v) => v === 0 ? "纯透明" : v + "%")}</span></span>
+      <span class="grp"><span class="lab">点击穿透</span>
+      <button class="switch${state.passthrough ? " on" : ""}" data-act="passthrough" data-toggle="1"></button></span></div>
+  </div>
+  <div id="foot">
+    <span id="hint">穿透时左上角按钮区仍可点 / 可右键</span>
+    <button id="quit">退出字幕窗</button>
+  </div>
+</div>
+<script>
+(function(){
+  var qs = new URLSearchParams(location.search);
+  // snapshot injected by openPanel() (data URLs cannot fetch anything)
+  var S = ${JSON.stringify(state)};
+  window.__hmySetState = function(next){
+    S = next;
+    document.querySelectorAll(".pill").forEach(function(p){
+      var act = p.getAttribute("data-act"), val = p.getAttribute("data-val");
+      if (!act) return; // form pills (hmy-api-thinking .tpill) manage their own state
+      var cur = S[act];
+      if (act === "apiMode" || act === "mode") return; // handled below (string/value kinds)
+      var v = isNaN(Number(val)) ? val : Number(val);
+      if (act === "font") { p.classList.toggle("on", (val === (S.font || ""))); return; }
+      if (act === "textShadow" || act === "textStroke" || act === "textInk" || act === "lang") {
+        p.classList.toggle("on", val === cur); return;
+      }
+      p.classList.toggle("on", v === cur);
+    });
+    document.querySelectorAll('[data-act="apiMode"]').forEach(function(p){
+      p.classList.toggle("on", (p.getAttribute("data-val") === "1") === !!S.apiMode);
+    });
+    document.querySelectorAll('[data-act="mode"]').forEach(function(p){
+      p.classList.toggle("on", p.getAttribute("data-val") === S.mode);
+    });
+    document.querySelectorAll(".switch").forEach(function(s){
+      var act = s.getAttribute("data-act");
+      if (!act) return; // form switches (e.g. hmy-api-context) manage their own state
+      s.classList.toggle("on", !!S[act]);
+    });
+    var api = document.querySelector('[data-act="apiMode"][data-val="1"]');
+    if (api) api.classList.toggle("dis", !S.apiAvailable);
+  };
+  function apply(act, val){
+    if (window.hmyPanel) window.hmyPanel.apply(act, val);
+    if (!qs.get("e2e")) { /* live mode: main syncs state back */ }
+  }
+  document.addEventListener("click", function(ev){
+    // API-form controls must be handled BEFORE the apply pills/switches:
+    // they only take effect on 保存并测试, not immediately.
+    var tp = ev.target.closest(".tpill");
+    if (tp) { setThinking(tp.getAttribute("data-thinking")); return; }
+    if (ev.target.closest("#hmy-api-context")) {
+      document.getElementById("hmy-api-context").classList.toggle("on");
+      return;
+    }
+    var el = ev.target.closest(".pill, .switch");
+    if (el) {
+      var act = el.getAttribute("data-act");
+      var val = el.hasAttribute("data-toggle")
+        ? !el.classList.contains("on")
+        : el.getAttribute("data-val");
+      apply(act, val);
+      // optimistic local flip for toggles (main sends the authoritative state)
+      if (el.hasAttribute("data-toggle")) el.classList.toggle("on", !!val);
+      return;
+    }
+    if (ev.target.closest("#hmy-api-save")) { saveTest(); return; }
+    if (ev.target.closest("#close")) { if (window.hmyPanel) window.hmyPanel.close(); }
+    if (ev.target.closest("#quit")) { if (window.hmyPanel) window.hmyPanel.apply("quit", 1); }
+  });
+  // "保存并测试": test the typed URL/model/key with a live chat-completions
+  // call FIRST; only a passing test writes openai_translate.json (main does
+  // the merge+write+hot-reload). A failing test leaves the working config
+  // untouched. The tri-state thinking choice (default/on/off) rides along:
+  // "开/关" are sent in the TEST payload too, so a model that rejects the
+  // field fails visibly here instead of silently after saving.
+  function setThinking(v){
+    document.querySelectorAll('#hmy-api-thinking .tpill').forEach(function(b){
+      b.classList.toggle('on', b.getAttribute('data-thinking') === v);
+    });
+  }
+  function thinkingValue(){
+    var on = document.querySelector('#hmy-api-thinking .tpill.on');
+    return on ? on.getAttribute('data-thinking') : 'default';
+  }
+  function saveTest(){
+    var btn = document.getElementById('hmy-api-save');
+    var st = document.getElementById('hmy-api-status');
+    var vals = {
+      base_url: document.getElementById('hmy-api-url').value.trim(),
+      model: document.getElementById('hmy-api-model').value.trim(),
+      api_key: document.getElementById('hmy-api-key').value,
+      thinking: thinkingValue(),
+      context_on: document.getElementById('hmy-api-context').classList.contains('on')
+    };
+    btn.disabled = true;
+    st.className = '';
+    st.textContent = '测试中…';
+    (window.hmyPanel ? window.hmyPanel.apiSaveTest(vals) : Promise.reject(new Error('bridge missing')))
+      .then(function(r){
+        if (r && r.ok) {
+          st.className = 'ok';
+          var sample = r.sample ? String(r.sample) : '';
+          var short = sample.length > 16 ? sample.slice(0, 16) + '…' : sample;
+          st.textContent = '✓ 可用' + (short ? ' · 返回「' + short + '」' : '');
+        } else {
+          st.className = 'err';
+          st.textContent = '✗ ' + ((r && r.error) || '未知错误');
+        }
+      })
+      .catch(function(e){
+        st.className = 'err';
+        st.textContent = '✗ ' + ((e && e.message) || e);
+      })
+      .then(function(){ btn.disabled = false; });
+  }
+  // prefill the form from the project-root openai_translate.json
+  if (window.hmyPanel && window.hmyPanel.apiGet) {
+    window.hmyPanel.apiGet().then(function(c){
+      if (!c) return;
+      document.getElementById('hmy-api-url').value = c.base_url || '';
+      document.getElementById('hmy-api-model').value = c.model || '';
+      document.getElementById('hmy-api-key').value = c.api_key || '';
+      setThinking(c.thinking || 'default');
+      document.getElementById('hmy-api-context').classList.toggle('on', c.context_on !== false);
+    }).catch(function(){});
+  }
+  __hmySetState(S);
+})();
+</script></body></html>`;
+}
+
+const PANEL_W = 860;   // panel window css width — deliberately WIDE and
+                       // short (height < width): all pill groups (font size
+                       // 9 / fonts 12 / backdrop 14) fit on one line each
+                       // after the label abbreviations, so nothing scrolls
+const PANEL_PAD = 14;  // popup offset below the subtitle window's top-left
+
+let panelWin = null;   // the single settings-panel instance
+let panelStateSeq = 0; // guards against a stale async apply ack
+let panelFit = null;   // openPanel's fit closure, re-run when content changes
+
+// Full settings snapshot for the panel renderer. Every apply* below already
+// converges the subtitle window; the snapshot just mirrors the resulting
+// state so the panel's checked pills stay truthful after each action.
+function panelState() {
+  return {
+    size: opts.size,
+    font: opts.font || "",
+    bold,
+    textShadow, textStroke, textInk, textOpacity,
+    lang,
+    apiMode, apiAvailable,
+    mode,
+    bg,
+    passthrough,
+    barAutohide,
+  };
+}
+
+// The panel is a second top-level window: skip the taskbar, no frame, no
+// shadow (the CSS shadow inside the transparent window draws it), not
+// resizable, and ALWAYS mapped at a concrete screen position by openPanel().
+function openPanel() {
+  if (panelWin && !panelWin.isDestroyed()) {
+    panelWin.show();
+    panelWin.focus();
+    return;
+  }
+  const { workArea } = screen.getPrimaryDisplay();
+  const winB = win && !win.isDestroyed() ? win.getBounds() : workArea;
+  // default: under the subtitle window's top-left corner, nudged inside the
+  // work area so the panel never opens half off-screen or over the taskbar
+  let x = winB.x + PANEL_PAD;
+  let y = winB.y + PANEL_PAD + BTN_Y0 + BTN_S;
+  const PANEL_H = 700; // creation height; re-fitted to the real content below
+  x = Math.max(workArea.x, Math.min(x, workArea.x + workArea.width - PANEL_W - 8));
+  y = Math.max(workArea.y, Math.min(y, workArea.y + workArea.height - PANEL_H - 8));
+  panelWin = new BrowserWindow({
+    x, y,
+    width: PANEL_W,
+    height: Math.min(PANEL_H, workArea.height - 16),
+    show: false,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    hasShadow: false,
+    webPreferences: {
+      preload: path.join(__dirname, "preload-panel.js"),
+      backgroundThrottling: false,
+    },
+  });
+  panelWin.setAlwaysOnTop(true, "screen-saver");
+  panelWin.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(panelHtml()));
+  // Fit the window to the REAL content height (static page, never grows):
+  // measured body height + the 8px css inset on each side. #body is the
+  // flex:1 overflow scroller, so #panel.scrollHeight only reports the
+  // CLIPPED height -- sum the fixed chrome (head/foot offsetHeights) plus
+  // #body's true scrollHeight. Runs TWICE: once at load and once 80ms
+  // later, because the first measurement can race font/scrollbar layout
+  // (a 2-3px error left visible scrollbars; 2026-10-19 report). The
+  // overflow-y:auto fallback only matters when content exceeds the work
+  // area. HMY_PANEL_LIGHT=1 forces the light palette (dev probe).
+  const fitPanel = () => {
+    if (!panelWin || panelWin.isDestroyed()) return;
+    panelWin.webContents
+      .executeJavaScript(
+        // #body is a flex:1 scroller: when the CONTENT is shorter than the
+        // window, body.scrollHeight equals the stretched clientHeight, not
+        // the content height -- the fit could then only ever grow and the
+        // window kept the initial 700px blank at the bottom (2026-10-19
+        // report). Un-flex it and let it size to content for one
+        // synchronous read, then restore (nothing paints in between).
+        "(function(){var h=document.getElementById('head');" +
+        "var b=document.getElementById('body');" +
+        "var f=document.getElementById('foot');" +
+        "var of=b.style.flex,oh=b.style.height,oo=b.style.overflow;" +
+        "b.style.flex='none';b.style.height='auto';b.style.overflow='visible';" +
+        "var ch=b.offsetHeight;" +
+        "b.style.flex=of;b.style.height=oh;b.style.overflow=oo;" +
+        "return [h.offsetHeight,ch,f.offsetHeight];})()"
+      )
+      .then(([head, body, foot]) => {
+        if (!panelWin || panelWin.isDestroyed()) return;
+        if (process.env.HMY_PANEL_LIGHT === "1") {
+          panelWin.webContents.executeJavaScript(
+            "document.documentElement.classList.add('light')").catch(() => {});
+        }
+        // +22 = 16px inset + 2px border + 4px safety against sub-pixel
+        // scrollbar oscillation
+        const fitH = Math.min(head + body + foot + 22, workArea.height - 16);
+        const b = panelWin.getBounds();
+        // growing the height must not push the bottom edge past the work
+        // area (over the taskbar): reclaim y so the bottom stays inside
+        const fitY = Math.max(workArea.y,
+          Math.min(b.y, workArea.y + workArea.height - fitH - 8));
+        panelWin.setBounds({ x: b.x, y: fitY, width: PANEL_W, height: fitH });
+        diag("panel: fitted h=" + fitH + " y=" + fitY + " (head=" + head + " body=" + body + " foot=" + foot + ")");
+      })
+      .catch(() => {});
+  };
+  panelWin.webContents.once("did-finish-load", () => {
+    panelFit = fitPanel;
+    fitPanel();
+    setTimeout(fitPanel, 80);
+  });
+  // NOTE: no blur-close. The panel is a persistent topmost tool window
+  // (2026-10-19 user request: clicking elsewhere must not dismiss it while
+  // adjusting subtitles); it closes via its ✕, Esc, or the gear toggle.
+  panelWin.once("closed", () => { panelWin = null; panelFit = null; });
+  panelWin.once("ready-to-show", () => panelWin.showInactive());
+  // showInactive: never steal focus from the user's typing app; the first
+  // click IN the panel focuses it via the webContents click.
+  panelWin.webContents.on("before-input-event", (_e, input) => {
+    if (input.type === "keyDown" && input.key === "Escape") {
+      diag("panel: esc -> close");
+      closePanel();
+    }
+  });
+}
+
+function closePanel() {
+  if (panelWin && !panelWin.isDestroyed()) {
+    try { panelWin.close(); } catch (_) {}
+  }
+  panelWin = null;
+}
+
 function showMenu() {
-  const template = [
-    {
-      label: "字号",
-      submenu: SIZE_CHOICES.map((px) => ({
-        label: px + " px", type: "radio", checked: opts.size === px,
-        click: () => applyFontSize(px),
-      })),
-    },
-    {
-      label: "字体",
-      submenu: FONT_CHOICES.map((f) => ({
-        label: f.label, type: "radio", checked: opts.font === f.family,
-        click: () => applyFont(f.family),
-      })),
-    },
-    {
-      label: "字幕粗体",
-      type: "checkbox",
-      checked: bold,
-      click: (i) => applyBold(i.checked),
-    },
-    {
-      label: "阴影",
-      submenu: TEXT_SHADOW_CHOICES.map((c) => ({
-        label: c.label, type: "radio", checked: textShadow === c.key,
-        click: () => applyTextShadow(c.key),
-      })),
-    },
-    {
-      label: "描边",
-      submenu: TEXT_STROKE_CHOICES.map((c) => ({
-        label: c.label, type: "radio", checked: textStroke === c.key,
-        click: () => applyTextStroke(c.key),
-      })),
-    },
-    {
-      label: "重墨",
-      submenu: TEXT_INK_CHOICES.map((c) => ({
-        label: c.label, type: "radio", checked: textInk === c.key,
-        click: () => applyTextInk(c.key),
-      })),
-    },
-    {
-      label: "文字透明度",
-      submenu: TEXT_OPACITY_CHOICES.map((p) => ({
-        label: p + "%", type: "radio", checked: textOpacity === p,
-        click: () => applyTextOpacity(p),
-      })),
-    },
-    {
-      label: "翻译语言",
-      submenu: LANGS.map((l) => ({
-        label: { en: "英语 EN", zh: "中文 ZH", ko: "韩语 KO", off: "关闭 OFF" }[l],
-        type: "radio", checked: lang === l,
-        click: () => {
-          lang = l;
-          notifyServerTranslation(translateSpec(lang)); // also switch server-side
+  diag("show-menu -> panel");
+  openPanel();
+}
+
+// Push the fresh state snapshot to an open panel after any apply*. Re-fit
+// the window height too: state changes can alter row content (e.g. the API
+// test status line) and a slightly-grown body must lengthen the window
+// instead of showing a scrollbar (2026-10-19 report).
+function syncPanel() {
+  if (!panelWin || panelWin.isDestroyed() || !panelWin.isVisible()) return;
+  const seq = ++panelStateSeq;
+  panelWin.webContents
+    .executeJavaScript(`window.__hmySetState(${JSON.stringify(panelState())}, ${seq})`)
+    .catch(() => {});
+  if (panelFit) setTimeout(panelFit, 40);
+}
+
+// IPC from the panel renderer: read state / apply one setting / self-close.
+// Every apply goes through THE SAME functions the old native menu used, so
+// behavior (incl. server notification + button sync) is byte-identical.
+function registerPanelIpc() {
+  ipcMain.handle("hmy:panel-get-state", () => panelState());
+  ipcMain.handle("hmy:panel-api-get", () => readApiConfig());
+  // "保存并测试": live-test the typed endpoint FIRST; only a passing test
+  // merges {base_url, model, api_key} into openai_translate.json (all other
+  // fields preserved), re-detects availability, and hot-applies the channel
+  // on the running server (apply_translation_spec re-reads the file since
+  // the 2026-10-18 reload fix). A failing test leaves the working config
+  // untouched.
+  ipcMain.handle("hmy:panel-api-save-test", async (_e, values) => {
+    const base = String((values && values.base_url) || "").trim().replace(/\/+$/, "");
+    const model = String((values && values.model) || "").trim();
+    const key = String((values && values.api_key) || "").trim();
+    const thinking = String((values && values.thinking) || "default"); // default|on|off
+    const contextOn = !(values && values.context_on === false);
+    if (!base || !model) return { ok: false, error: "地址和模型不能为空" };
+    if (!/^https?:\/\//i.test(base)) return { ok: false, error: "地址需以 http:// 或 https:// 开头" };
+    // 1) live test against the OpenAI-compatible chat endpoint. The thinking
+    // choice rides along when explicit: a model that rejects the field
+    // (Hunyuan-MT: HTTP 400 20015) must fail HERE, not after saving.
+    let sample = "";
+    try {
+      const url = /\/chat\/completions$/.test(base) ? base : base + "/chat/completions";
+      const ctrl = new AbortController();
+      // reasoning models can take longer to produce their first content token
+      // (thinking runs inside max_tokens): give the explicit-thinking test
+      // more room so a slow-but-working endpoint is not reported as a failure
+      const timeoutMs = thinking === "default" ? 10000 : 15000;
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      const payload = {
+        model,
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: thinking === "default" ? 8 : 32,
+        temperature: 0,
+      };
+      if (thinking === "on") payload.enable_thinking = true;
+      else if (thinking === "off") payload.enable_thinking = false;
+      let resp;
+      try {
+        resp = await fetch(url, {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" },
+                              key ? { Authorization: "Bearer " + key } : {}),
+          body: JSON.stringify(payload),
+          signal: ctrl.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!resp.ok) {
+        let detail = "";
+        try { detail = (await resp.text()).slice(0, 160).replace(/\s+/g, " "); } catch (_) {}
+        diag("panel: api test failed HTTP " + resp.status);
+        return { ok: false, error: "HTTP " + resp.status + (detail ? " · " + detail : "") };
+      }
+      try {
+        const j = await resp.json();
+        sample = String((j.choices && j.choices[0] && j.choices[0].message
+                         && j.choices[0].message.content) || "").trim().slice(0, 40);
+      } catch (_) { /* 2xx without JSON body: still usable */ }
+    } catch (e) {
+      const msg = (e && e.name === "AbortError") ? "超时（" + Math.round(timeoutMs / 1000) + " 秒）"
+        : String((e && e.message) || e);
+      diag("panel: api test error " + msg);
+      // a slow reasoning model is "working" but useless for live subtitles:
+      // say so instead of leaving a bare timeout
+      const hint = (e && e.name === "AbortError" && thinking !== "default")
+        ? "（端点可能在思考；推理模型用于实时字幕建议选「默认」或「关」）" : "";
+      return { ok: false, error: msg + hint };
+    }
+    // 2) test passed: merge-save into the project-root config
+    try {
+      const root = findProjectRoot(launchDir());
+      if (!root) return { ok: false, error: "找不到项目根目录（openai_translate.json 位置）" };
+      const p = path.join(root, "openai_translate.json");
+      let cfg = {};
+      try {
+        cfg = JSON.parse(fs.readFileSync(p, "utf8"));
+      } catch (_) { cfg = {}; }
+      if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) cfg = {};
+      cfg.base_url = base;
+      cfg.model = model;
+      cfg.api_key = key;
+      // tri-state thinking: default = the key must be ABSENT (don't send the
+      // field -- strict MT endpoints reject it), on/off = explicit boolean
+      if (thinking === "default") delete cfg.enable_thinking;
+      else cfg.enable_thinking = thinking === "on";
+      // context switch: 0 disables translation context; turning it back on
+      // restores the previous count (>0) or the load_config default 6
+      const prevN = Number(cfg.context_n);
+      const keepN = Number.isFinite(prevN) && prevN > 0 ? prevN : 6;
+      cfg.context_n = contextOn ? keepN : 0;
+      fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n", "utf8");
+      apiAvailable = detectApiConfig();
+      if (apiAvailable) apiMode = true;
+      diag("panel: api config saved -> " + p + " available=" + apiAvailable);
+      try { notifyServerTranslation(translateSpec(lang)); } catch (_) {}
+      syncPanel();
+      return { ok: true, sample };
+    } catch (e) {
+      return { ok: false, error: "保存失败: " + ((e && e.message) || e) };
+    }
+  });
+  ipcMain.on("hmy:panel-apply", (_e, action, value) => {
+    try {
+      switch (action) {
+        case "size": applyFontSize(parseInt(value, 10)); break;
+        case "font": applyFont(value); break;
+        case "bold": applyBold(!!value); break;
+        case "textShadow": applyTextShadow(value); break;
+        case "textStroke": applyTextStroke(value); break;
+        case "textInk": applyTextInk(value); break;
+        case "textOpacity": applyTextOpacity(parseInt(value, 10)); break;
+        case "lang":
+          lang = value;
+          notifyServerTranslation(translateSpec(lang));
           setPageButtons();
           win.webContents.executeJavaScript(`(function(){window.__hmyLang=${JSON.stringify(lang)};if(window.__hmyShowTr)window.__hmyShowTr();})();`).catch(() => {});
-        },
-      })),
-    },
-    {
-      label: "翻译通道",
-      submenu: [
-        { label: "本地模型", type: "radio", checked: !apiMode,
-          enabled: true, click: () => applyApiMode(false) },
-        { label: "OpenAI API", type: "radio", checked: apiMode,
-          enabled: apiAvailable,
-          click: () => applyApiMode(true) },
-      ],
-      // API entry is disabled (greyed) and not toggleable when no config file
-      // exists; label reflects that in the menu label itself.
-      ...(apiAvailable ? {} : { toolTip: "未找到 openai_translate.json，API 通道不可用" }),
-    },
-    {
-      label: "显示模式",
-      submenu: [
-        { label: "双语（原文 + 译文）", type: "radio", checked: mode === "both",
-          click: () => applyMode("both") },
-        { label: "仅译文", type: "radio", checked: mode === "tr",
-          click: () => applyMode("tr") },
-      ],
-    },
-    {
-      label: "背景透明度",
-      submenu: BG_MENU_CHOICES.map((a) => ({
-        label: a === 0 ? "纯透明（无背景）" : a + "%",
-        type: "radio", checked: bg === a,
-        click: () => applyBg(a),
-      })),
-      // menu keeps common tiers; the top-center slider is 1%-stepped 0..60
-    },
-    {
-      label: "点击穿透", type: "checkbox", checked: passthrough,
-      click: (i) => applyPassthrough(i.checked),
-    },
-    { type: "separator" },
-    { label: "穿透时左上角按钮区仍可点/可右键", enabled: false },
-    { type: "separator" },
-    { label: "退出字幕窗", click: () => app.quit() },
-  ];
-  Menu.buildFromTemplate(template).popup({ window: win });
+          break;
+        case "apiMode": applyApiMode(!!value); break;
+        case "mode": applyMode(value); break;
+        case "bg": applyBg(parseInt(value, 10)); break;
+        case "passthrough": applyPassthrough(!!value); break;
+        case "quit": app.quit(); break;
+        default: diag("panel: unknown action " + action);
+      }
+    } catch (e) {
+      diag("panel apply error: " + (e && e.message));
+    }
+    syncPanel();
+  });
+  ipcMain.on("hmy:panel-close", () => closePanel());
 }
 
 // ---------------------------------------------------------------------------
@@ -1718,7 +2275,20 @@ app.whenReady().then(() => {
   const winX = workArea.x + Math.floor((workArea.width - winW) / 2);
   const winY = workArea.y + workArea.height - winH;
 
-  ipcMain.on("hmy:show-menu", () => { diag("IPC: show-menu"); showMenu(); });
+  ipcMain.on("hmy:show-menu", () => {
+    diag("IPC: show-menu");
+    // gear button toggles: an open panel closes, a closed one opens (the
+    // panel no longer auto-closes on blur, so the gear is the quick
+    // dismiss/reopen handle). Right-click still opens/focuses without
+    // closing (see win.webContents context-menu -> showMenu()).
+    if (panelWin && !panelWin.isDestroyed() && panelWin.isVisible()) {
+      diag("panel: gear toggle -> close");
+      closePanel();
+    } else {
+      openPanel();
+    }
+  });
+  registerPanelIpc();
   ipcMain.on("hmy:toggle-passthrough", () => { diag("IPC: toggle-passthrough"); applyPassthrough(!passthrough); });
   ipcMain.on("hmy:toggle-pin", () => {
     // pin button: armed (auto-hide) <-> pinned (bar never hides)
@@ -1886,6 +2456,7 @@ app.on("before-quit", () => {
   // Only processes whose command line matches "realtime_transcribe" are
   // killed -- other pythons (MCP servers, etc.) are left alone.
   diag("before-quit: stopping transcribe servers (停止早耳.bat semantics)");
+  closePanel();
   serverKillSync();
 });
 
