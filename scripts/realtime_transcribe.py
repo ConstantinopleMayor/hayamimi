@@ -26,7 +26,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 import numpy as np
 import sherpa_onnx
 
-from asr_engine import RoutedASR
+from asr_engine import LEGACY_LANG_MODEL, MANUAL_MODELS, RoutedASR
 from audio_utils import resample_linear
 
 SAMPLE_RATE = 16000
@@ -1186,6 +1186,36 @@ def apply_translation_spec(spec: str, worker: "TranslationWorker",
         print("[cmd] no supported targets", file=sys.stderr, flush=True)
 
 
+def apply_lid_mode(asr: "RoutedASR", spec: str) -> dict:
+    """"auto" | "<model>" | "<legacy lang>" -> runtime recognition switch.
+
+    Shared by the settings panel's POST /api/lang-mode and (potential)
+    stdin commands. Manual pins one ASR model and releases every model the
+    pin cannot route to (see RoutedASR.set_forced_model); "auto" rebuilds
+    LID and reloads the default set in the background.
+
+    Model codes are validated against MANUAL_MODELS (pz/rz/v2/sv/v3/omni).
+    A legacy language code (zh/ja/en/ko/yue, the 24 Parakeet-v3 European
+    codes, omni) is migrated through LEGACY_LANG_MODEL so an old panel or
+    lid_mode.json keeps working.
+    """
+    code = (spec or "").strip().lower()
+    if code in ("", "auto"):
+        asr.set_forced_model(None)
+        print("[lid] mode=auto (LID + language switching re-enabled)",
+              file=sys.stderr, flush=True)
+        return {"mode": "auto", "model": "", "lang": "", "tier": "",
+                "resident": asr.resident_models, "en_tier": asr.en_tier}
+    model = code if code in MANUAL_MODELS else LEGACY_LANG_MODEL.get(code)
+    if model is None:
+        raise ValueError(f"unsupported model/language {code!r}")
+    asr.set_forced_model(model)
+    print(f"[lid] mode=manual model={model} resident={asr.resident_models}",
+          file=sys.stderr, flush=True)
+    return {"mode": "manual", "model": model, "lang": "", "tier": model,
+            "resident": asr.resident_models, "en_tier": asr.en_tier}
+
+
 # Queue sentinel for the "daemon thread(s) draining a Queue forever" workers
 # below (TranslationWorker, Refiner). They used to loop with no way out,
 # which meant the thread's frame held its owner -- and through the Refiner,
@@ -1541,9 +1571,24 @@ class Refiner:
         Raises RuntimeError after close() -- see maybe_refine().
         """
         self._check_open()
-        corrected = script_corrected_lang(lang, text)
+        # Manual (panel-pinned) mode: the user chose the recognizer, so the
+        # script of its output must not re-label the segment (a pinned zh
+        # session decoding Japanese audio yields Han-ish text, and a pinned
+        # ja session reading English yields romaji -- correcting those would
+        # split groups on noise and tag them with a language that was never
+        # run). A pinned SenseVoice session legitimately switches tags
+        # between zh/ja/ko/yue/en, so group on its own tag, not on a forced
+        # one.
+        pinned = getattr(self.asr, "pinned_tier", None)
+        if pinned is not None:
+            corrected = lang
+        else:
+            corrected = script_corrected_lang(lang, text)
         if self.spans:
-            group_lang = script_corrected_lang(self.spans[-1][2], self.spans[-1][3])
+            if pinned is not None:
+                group_lang = self.spans[-1][2]
+            else:
+                group_lang = script_corrected_lang(self.spans[-1][2], self.spans[-1][3])
             if corrected != group_lang:
                 # flush the previous group off the hot path; it belongs to
                 # a different language and must not accumulate this span
@@ -1588,9 +1633,15 @@ class Refiner:
         buf = self.history.buf[lo - self.history.offset:last_end - self.history.offset].copy()
         # LID tags lie under BGM; trust the script of the decoded text over
         # the tag (an "en" span full of kanji was misdetected Japanese, an
-        # ALL-CAPS "ja" span was misdetected English).
-        langs = [script_corrected_lang(lang, text)
-                 for _, _, lang, text, _ in self.spans]
+        # ALL-CAPS "ja" span was misdetected English). A pinned model's tag
+        # is what the panel promised (SenseVoice's own LID included), so it
+        # is taken at face value.
+        pinned = getattr(self.asr, "pinned_tier", None)
+        if pinned is not None:
+            langs = [lang for _, _, lang, _, _ in self.spans]
+        else:
+            langs = [script_corrected_lang(lang, text)
+                     for _, _, lang, text, _ in self.spans]
         lang = max(set(langs), key=langs.count)
         # a genuinely mixed-language group must not be re-decoded in one
         # language: the per-segment finals already used the right model per
@@ -1611,8 +1662,21 @@ class Refiner:
             # _worker_thread, which serializes it against every other queued
             # refine in enqueue (== chronological) order -- see the comment
             # on _task_queue in __init__.
+            #
+            # Manual mode pins the model: no LID, no SenseVoice probe, no
+            # resolve_refine_lang (whisper-tiny is released, and the probe
+            # would reload models the pin released). Decode the group with
+            # the pinned model and use the language tag transcribe() derived
+            # from its output (a model pin can legitimately switch tags,
+            # e.g. SenseVoice zh/ja/ko); an empty result is dropped instead
+            # of falling back to fast_joined, which may belong to segments
+            # decoded before the pin.
             refine_lang = lang
-            if mixed:
+            if pinned is not None:
+                res = self.asr.transcribe(buf, self.sr, live=False)
+                text = res["text"]
+                refine_lang = res.get("lang") or lang
+            elif mixed:
                 text = fast_joined
             else:
                 # re-run LID on the merged (longer, higher-confidence)
@@ -1673,12 +1737,19 @@ class Refiner:
                     text = self.asr.transcribe(buf, self.sr, known_lang=lang,
                                                 live=False)["text"]
             # a merged re-decode must never LOSE content; if it comes back
-            # much shorter than the fast finals combined, trust those
-            if len(text.strip()) < 0.7 * len(fast_joined):
-                text = fast_joined
-                refine_lang = lang
-            if not text.strip():
-                return
+            # much shorter than the fast finals combined, trust those -- but
+            # never in manual mode: fast_joined can hold segments from
+            # before the pin (another language), and showing those under the
+            # pinned tag is exactly the "final flips back to Japanese" bug.
+            if pinned is not None:
+                if not text.strip():
+                    return
+            else:
+                if len(text.strip()) < 0.7 * len(fast_joined):
+                    text = fast_joined
+                    refine_lang = lang
+                if not text.strip():
+                    return
             if refine_lang != lang and self.stats is not None:
                 self.stats.refine_lang_corrections += 1
                 print(f"[refine] language corrected {lang}->{refine_lang}", flush=True)
@@ -1779,11 +1850,11 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
             cur = np.asarray(vad.current_segment.samples, dtype=np.float32)
             if len(cur) > int(PARTIAL_WINDOW_S * sample_rate):
                 cur = cur[-int(PARTIAL_WINDOW_S * sample_rate):]
-            # --mode single (asr.forced_lang set): every segment is forced to
-            # one language, so the early-LID probe (whisper-tiny plus a
+            # --mode single (asr.pinned_tier set): every segment is forced to
+            # one model, so the early-LID probe (whisper-tiny plus a
             # background model prefetch) would just be wasted work -- asr.partial()
-            # already routes straight to forced_lang without needing a hint.
-            if asr.forced_lang is None and early_lang is None and len(cur) >= int(2.0 * sample_rate):
+            # already routes straight to the pin without needing a hint.
+            if asr.pinned_tier is None and early_lang is None and len(cur) >= int(2.0 * sample_rate):
                 early_lang = asr.identify(cur, sample_rate)
             if printer.enabled and len(cur) >= sample_rate // 2:
                 partial_text = strip_draft_tail_marks(
@@ -1872,16 +1943,20 @@ def main():
                     help="user dictionary: 'wrong=right' per line, applied to all output")
     ap.add_argument("--mode", choices=["single", "balanced", "fast"], default="balanced",
                     help="language-switch policy preset (default balanced). single: fixed to "
-                         "--lang, no LID/switching at all. balanced: dual-LID switch "
+                         "--model (or legacy --lang), no LID/switching at all. balanced: dual-LID switch "
                          "confirmation for ja/en/zh/ko/yue via SenseVoice, length+repeat-count "
                          "hysteresis for other languages (docs/LID.md). fast: switch "
                          "immediately on any whisper-tiny detection, no confirmation "
                          "(equivalent to --lid-switch-confirm 1 --lang-switch-guard 0). "
                          "The individual --lang-switch-guard/--lid-switch-confirm flags below "
                          "still override the preset's values when passed explicitly.")
+    ap.add_argument("--model", choices=list(MANUAL_MODELS), default=None,
+                    help="with --mode single: pin this ASR model (pz/rz/v2/sv/v3/omni) and "
+                         "release every other one; output language is derived from the "
+                         "model's own detection. Replaces the language-level --lang pin.")
     ap.add_argument("--lang", metavar="CODE", default=None,
-                    help="required by --mode single: force every segment to this language "
-                         "code, skipping LID and switch logic entirely")
+                    help="legacy --mode single pin: force this language's model, skipping "
+                         "LID and switch logic entirely (prefer --model)")
     ap.add_argument("--lang-switch-guard", type=float, default=None, metavar="SEC",
                     help="treat a new-language detection shorter than SEC as noise: it never "
                          "counts toward confirming a switch (see --lid-switch-confirm) and it "
@@ -1956,8 +2031,12 @@ def main():
                 print(f"\n(soundcard loopback devices unavailable: {exc})", file=sys.stderr)
         return
 
-    if args.mode == "single" and not args.lang:
-        ap.error("--mode single requires --lang CODE")
+    if args.mode == "single" and not (args.lang or args.model):
+        ap.error("--mode single requires --model NAME (or legacy --lang CODE)")
+    if args.lang and args.model:
+        ap.error("--lang and --model are mutually exclusive; use --model")
+    if args.model and args.mode != "single":
+        ap.error("--model requires --mode single")
     if args.input in ("speaker", "mix") and sys.platform != "win32":
         ap.error("--input speaker/mix needs Windows (WASAPI loopback)")
     # --mode bundles defaults for the two hysteresis knobs; an explicitly
@@ -2011,6 +2090,7 @@ def main():
                     lid_switch_confirm=max(args.lid_switch_confirm, 1),
                     dual_confirm=(args.mode != "fast"),
                     forced_lang=args.lang if args.mode == "single" else None,
+                    forced_model=args.model if args.mode == "single" else None,
                     en_tier=args.en_tier)
     asr.min_switch_s = max(args.lang_switch_guard, 0.0)
     vad = build_vad(args.min_silence, args.max_speech)
@@ -2066,6 +2146,17 @@ def main():
         server.set_translate_callback(
             lambda langs: apply_translation_spec(langs, translator_worker,
                                                  lambda: refiner))
+        # Settings-panel recognition-language switch: manual pins one model
+        # and releases the rest, auto restores LID + the default set.
+        server.set_lang_mode_callback(lambda spec: apply_lid_mode(asr, spec))
+        server.set_lang_mode_getter(lambda: {
+            "mode": "manual" if asr.pinned_tier else "auto",
+            "model": asr.forced_model or asr.pinned_tier or "",
+            "lang": asr.forced_lang or "",
+            "tier": asr.pinned_tier or "",
+            "resident": asr.resident_models,
+            "en_tier": asr.en_tier,
+        })
 
     history = AudioHistory(SAMPLE_RATE)
     refiner = None if args.no_refine else Refiner(asr, history, SAMPLE_RATE, printer,

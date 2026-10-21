@@ -342,6 +342,7 @@ def test_partial_forced_lang_routes_directly_without_lid_or_sv_probe():
     # path on every draft.
     class _Stub:
         forced_lang = "ko"
+        pinned_tier = "sv"
         last_lang = "en"  # deliberately different, to prove it's ignored
         # transcribe()/partial() now refuse to run on a closed engine
         # (RoutedASR.close()); borrowed rather than faked so this stub
@@ -616,6 +617,7 @@ def test_transcribe_bootstrap_too_short_decodes_but_does_not_seed_last_lang():
     # switch" docstring for too-short candidates.
     class _Stub:
         forced_lang = None
+        pinned_tier = None
         dual_confirm = True
         last_lang = None
         _pending_lang = None
@@ -667,6 +669,7 @@ def test_transcribe_bootstrap_zh_yue_reuses_single_sv_probe_decode():
 
     class _Stub:
         forced_lang = None
+        pinned_tier = None
         dual_confirm = True
         last_lang = None
         _pending_lang = None
@@ -795,6 +798,9 @@ def test_refine_reuses_sv_probe_text_for_ko_yue_instead_of_redecoding():
     # refine worker must reuse it instead of a redundant SenseVoice pass --
     # regression for the redundant re-decode found in code review.
     class _FakeAsr:
+        forced_lang = None  # auto mode: refine LID/probe path exercised
+        pinned_tier = None
+
         def __init__(self):
             self.transcribe_calls = 0
             self.decode_full_calls = 0
@@ -840,6 +846,11 @@ class _FakeRefiner:
     maybe_refine stubbed out so no model/audio-buffer work happens (mirrors
     the real method's effect on self.spans: a forced flush empties it)."""
 
+    class _Asr:
+        forced_lang = None  # auto mode: script correction drives grouping
+        pinned_tier = None
+
+    asr = _Asr()
     add_span = Refiner.add_span
     # add_span() now refuses to run on a closed Refiner (Refiner.close());
     # borrowed, same as add_span itself, so this stub checks what the real
@@ -915,6 +926,7 @@ def test_refiner_worker_prints_groups_in_enqueue_order_despite_slower_first_deco
 
     class _FakeAsr:
         forced_lang = None
+        pinned_tier = None
 
         def _identify_lang(self, buf, sr):
             # report agreement with the caller's own language so
@@ -964,15 +976,23 @@ def test_refiner_worker_prints_groups_in_enqueue_order_despite_slower_first_deco
     assert len(worker_threads) == 1
 
 
-def _omni_safety_net_stub(omni_available: bool):
+def _omni_safety_net_stub(omni_available: bool, forced: bool = False):
     """RoutedASR stub for the empty-specialist safety net in transcribe():
-    --mode single (forced ja), the ja route returns nothing, and the only
-    question is what happens when the omni fallback is or is not installed."""
+    auto mode with a stable ja session, the ja route returns nothing, and the
+    only question is what happens when the omni fallback is or is not
+    installed. forced=True pins ja manually: the net must then stay off
+    (manual mode must never resurrect the generalist it just released)."""
     asked = []
 
     class _Stub:
-        forced_lang = "ja"
-        last_lang = None
+        forced_lang = "ja" if forced else None
+        pinned_tier = "rz" if forced else None
+        last_lang = "ja"
+        dual_confirm = False
+        min_switch_s = 0.0
+        lid_switch_confirm = 1
+        _pending_lang = None
+        _pending_count = 0
         _unavailable = set() if omni_available else {"omni"}
         # transcribe()/partial() now refuse to run on a closed engine
         # (RoutedASR.close()); borrowed rather than faked so this stub
@@ -982,6 +1002,10 @@ def _omni_safety_net_stub(omni_available: bool):
         _itn_overrides = asr_engine.itn_cjk.EMPTY_OVERRIDES
         ko_spacer = None
         punct = None
+        punct_zh = None
+
+        def _identify_lang(self, samples, sample_rate):
+            return "ja"
 
         def _get(self, name):
             asked.append(name)
@@ -994,7 +1018,7 @@ def _omni_safety_net_stub(omni_available: bool):
             return ("<rz>", "rz")
 
         def _decode(self, rec, samples, sample_rate):
-            return "omni text" if rec == "<omni>" else ""
+            return "オムニ結果" if rec == "<omni>" else ""
 
         def _replace(self, text, zh=False):
             return text
@@ -1007,7 +1031,7 @@ def test_empty_specialist_falls_through_to_omni_when_installed():
     result = asr_engine.RoutedASR.transcribe(
         stub, np.zeros(16000, dtype=np.float32), 16000, live=True)
     assert asked == ["omni"]
-    assert result["text"] == "omni text"
+    assert result["text"] == "オムニ結果"
     assert result["tier"] == "omni"
 
 
@@ -1020,6 +1044,60 @@ def test_empty_specialist_stays_empty_on_a_minimal_install():
     result = asr_engine.RoutedASR.transcribe(
         stub, np.zeros(16000, dtype=np.float32), 16000, live=True)
     assert asked == ["omni"]
+    assert result["text"] == ""
+    assert result["tier"] == "rz"
+
+
+def test_empty_specialist_never_loads_omni_in_manual_mode():
+    """Manual pinning releases omni; an empty specialist decode (music/
+    silence) must stay empty instead of reloading the generalist and
+    defeating the resident-model release."""
+    stub, asked = _omni_safety_net_stub(omni_available=True, forced=True)
+    result = asr_engine.RoutedASR.transcribe(
+        stub, np.zeros(16000, dtype=np.float32), 16000, live=True)
+    assert asked == []
+    assert result["text"] == ""
+    assert result["tier"] == "rz"
+
+
+def test_empty_specialist_never_loads_omni_with_a_model_pin():
+    """Same safety net as the language-pin test above, but through the new
+    forced_model path: transcribe() must not touch omni (or any other tier)
+    when the pinned model returns empty."""
+    asked = []
+
+    class _Stub:
+        forced_model = "rz"
+        forced_lang = None
+        pinned_tier = "rz"
+        last_lang = "ja"
+        _pending_lang = None
+        _pending_count = 0
+        _unavailable = set()
+        _closed = False
+        _check_open = asr_engine.RoutedASR._check_open
+        _decode_pinned = asr_engine.RoutedASR._decode_pinned
+        _itn_overrides = asr_engine.itn_cjk.EMPTY_OVERRIDES
+        punct = None
+        ko_spacer = None
+
+        def _get_with_fallback(self, name):
+            asked.append(name)
+            return ("<rz>", "rz")
+
+        def _get(self, name):
+            raise AssertionError(f"model pin must not load {name}")
+
+        def _decode(self, rec, samples, sample_rate):
+            return ""
+
+        def _replace(self, text, zh=False):
+            return text
+
+    stub = _Stub()
+    result = asr_engine.RoutedASR.transcribe(
+        stub, np.zeros(16000, dtype=np.float32), 16000, live=True)
+    assert asked == ["rz"]
     assert result["text"] == ""
     assert result["tier"] == "rz"
 
@@ -1179,3 +1257,326 @@ def test_build_stamp_names_dir_and_newest_mtime():
     stamp = realtime_transcribe._build_stamp()
     assert os.path.isabs(stamp.split("  (")[0].replace("[build] ", ""))
     assert realtime_transcribe._re.search(r"newest \.py \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\)$", stamp), stamp
+
+
+# --- manual recognition language (settings panel) ---------------------------
+
+def test_tier_for_lang_routes_head_languages_and_eu_to_expected_models():
+    # Current app default is --en-tier v2 (realtime_transcribe's CLI default),
+    # so English must home on v2 -- a previous plan draft wrongly assumed v3.
+    assert asr_engine.tier_for_lang("en", "v2") == "v2"
+    assert asr_engine.tier_for_lang("en", "v3") == "v3"
+    assert asr_engine.tier_for_lang("zh", "v2") == "pz"
+    assert asr_engine.tier_for_lang("ja", "v2") == "rz"
+    assert asr_engine.tier_for_lang("ko", "v2") == "sv"
+    assert asr_engine.tier_for_lang("yue", "v2") == "sv"
+    # 24 EU languages ride Parakeet v3 regardless of the en tier
+    for code in ("fr", "de", "es", "ru", "uk", "el"):
+        assert asr_engine.tier_for_lang(code, "v2") == "v3"
+    # the omnilingual sentinel and any unknown code fall through to omni
+    assert asr_engine.tier_for_lang(asr_engine.MANUAL_OMNI, "v2") == "omni"
+    assert asr_engine.tier_for_lang("xx", "v2") == "omni"
+
+
+def test_manual_models_and_legacy_language_migration():
+    assert asr_engine.MANUAL_MODELS == ("pz", "rz", "v2", "sv", "v3", "omni")
+    # legacy panel files / --lang still map onto a model
+    assert asr_engine.LEGACY_LANG_MODEL["zh"] == "pz"
+    assert asr_engine.LEGACY_LANG_MODEL["ja"] == "rz"
+    assert asr_engine.LEGACY_LANG_MODEL["en"] == "v2"
+    assert asr_engine.LEGACY_LANG_MODEL["ko"] == "sv"
+    assert asr_engine.LEGACY_LANG_MODEL["yue"] == "sv"
+    assert asr_engine.LEGACY_LANG_MODEL["fr"] == "v3"
+    assert asr_engine.LEGACY_LANG_MODEL["omni"] == "omni"
+    assert len(asr_engine.LEGACY_LANG_MODEL) == 30  # 5 head + 24 EU (en overlap) + omni
+    assert "xx" not in asr_engine.LEGACY_LANG_MODEL
+
+
+def test_guess_lang_from_text_recognizes_scripts():
+    guess = asr_engine.guess_lang_from_text
+    assert guess("hello world") == "en"
+    assert guess("你好，世界") == "zh"
+    assert guess("こんにちは世界") == "ja"   # kana wins over the shared Han
+    assert guess("안녕하세요") == "ko"
+    assert guess("привет") == "ru"
+    assert guess("γειά σου") == "el"
+    assert guess("123 !!!") == "en"          # no letters: default
+    assert guess("", "fr") == "fr"
+
+
+def test_apply_lid_mode_switches_and_validates():
+    class _Stub:
+        en_tier = "v2"
+        resident_models = ["pz", "rz"]
+
+        def __init__(self):
+            self.calls = []
+            self.forced_model = None
+
+        def set_forced_model(self, model):
+            self.calls.append(model)
+            self.forced_model = model
+
+    stub = _Stub()
+    out = realtime_transcribe.apply_lid_mode(stub, "auto")
+    assert out["mode"] == "auto" and out["model"] == ""
+    assert stub.calls == [None]
+
+    out = realtime_transcribe.apply_lid_mode(stub, "SV")
+    assert out == {"mode": "manual", "model": "sv", "lang": "", "tier": "sv",
+                   "resident": ["pz", "rz"], "en_tier": "v2"}
+    assert stub.calls == [None, "sv"]
+
+    out = realtime_transcribe.apply_lid_mode(stub, "JA")  # legacy language
+    assert out["model"] == "rz" and stub.calls[-1] == "rz"
+
+    out = realtime_transcribe.apply_lid_mode(stub, "fr")
+    assert out["model"] == "v3" and stub.calls[-1] == "v3"
+
+    stub.calls.clear()
+    with pytest.raises(ValueError):
+        realtime_transcribe.apply_lid_mode(stub, "xx")
+    assert stub.calls == []  # invalid codes never reach the engine
+
+
+def _bare_engine(**attrs):
+    """RoutedASR instance without building any model: every attribute
+    set_forced_model touches is injected by the test."""
+    eng = object.__new__(asr_engine.RoutedASR)
+    eng._load_lock = __import__("threading").Lock()
+    eng._models = {}
+    eng._last_used = {}
+    eng._punct = None
+    eng._punct_zh = None
+    eng._ko_spacer = None
+    eng._punctuate = True
+    eng._ko_spacer_ok = True
+    eng._max_resident = None
+    eng._closed = False
+    eng._residency_epoch = 0
+    eng.en_tier = "v2"
+    eng._threads = 4
+    eng._hotwords_file = ""
+    eng.forced_lang = None
+    eng.forced_model = None
+    eng.last_lang = "ja"
+    eng._pending_lang = "zh"
+    eng._pending_count = 2
+    eng.lid = object()
+    eng.spawned = []
+    eng._spawn_bg = lambda target, *args: eng.spawned.append((target, args))
+    for k, v in attrs.items():
+        setattr(eng, k, v)
+    return eng
+
+
+def test_set_forced_model_releases_unselected_models_and_helpers():
+    sv = object()
+    eng = _bare_engine()
+    eng._models = {"pz": object(), "sv": sv, "rz": object(), "v3": object()}
+    eng._last_used = {n: 1.0 for n in eng._models}
+    eng._punct = object()          # ja restorer: unused when pinned to sv
+    eng._punct_zh = object()       # zh only
+    eng._ko_spacer = object()      # needed by SenseVoice ko output
+
+    eng.set_forced_model("sv")
+
+    assert eng.forced_model == "sv" and eng.forced_lang is None
+    assert eng.pinned_tier == "sv"
+    assert set(eng._models) == {"sv"} and eng._models["sv"] is sv
+    assert eng._last_used == {"sv": 1.0}  # released tiers lose their LRU stamps
+    assert eng.lid is None         # whisper-tiny released too
+    assert eng._punct is None and eng._punct_zh is None
+    assert eng._ko_spacer is not None
+    assert eng.last_lang is None
+    assert (eng._pending_lang, eng._pending_count) == (None, 0)
+    assert eng._residency_epoch == 1
+    # the pinned tier is warmed on a background thread
+    assert eng.spawned and eng.spawned[0][0] == eng._warm_pinned
+    assert eng.spawned[0][1] == ("sv",)
+
+
+def test_set_forced_lang_legacy_maps_to_model_and_keeps_its_helper():
+    rz = object()
+    eng = _bare_engine()
+    eng._models = {"pz": object(), "sv": object(), "rz": rz, "v3": object()}
+    eng._punct = object()
+    eng._punct_zh = object()
+    eng._ko_spacer = object()
+
+    eng.set_forced_lang("ja")
+
+    assert eng.forced_lang == "ja" and eng.forced_model is None
+    assert eng.pinned_tier == "rz"
+    assert set(eng._models) == {"rz"} and eng._models["rz"] is rz
+    assert eng._punct is not None and eng._punct_zh is None
+    assert eng._ko_spacer is None
+    assert eng.spawned[0][0] == eng._warm_pinned and eng.spawned[0][1] == ("rz",)
+
+
+def test_set_forced_model_auto_rebuilds_lid_before_clearing_and_reloads(monkeypatch):
+    eng = _bare_engine()
+    eng.forced_model = "v3"
+    eng.lid = None
+    monkeypatch.setattr(asr_engine, "_build_lid", lambda threads: "fresh-lid")
+
+    eng.set_forced_model(None)
+
+    assert eng.lid == "fresh-lid"           # rebuilt BEFORE the pin is cleared
+    assert eng.forced_model is None and eng.forced_lang is None
+    assert (eng._pending_lang, eng._pending_count) == (None, 0)
+    assert eng.spawned and eng.spawned[0][0] == eng._reload_for_auto
+
+
+def test_pinned_model_gates_punctuation_and_spacer_properties():
+    eng = _bare_engine()
+    eng._punct = object()
+    eng._punct_zh = object()
+    eng._ko_spacer = object()
+
+    def gates():
+        return (asr_engine.RoutedASR.punct.fget(eng),
+                asr_engine.RoutedASR.punct_zh.fget(eng),
+                asr_engine.RoutedASR.ko_spacer.fget(eng))
+
+    # pinned to v2: ja/zh restorers and Kiwi are all out of scope
+    eng.forced_model = "v2"
+    assert gates() == (None, None, None)
+
+    # pz: only the zh restorer survives
+    eng.forced_model = "pz"
+    assert gates() == (None, eng._punct_zh, None)
+
+    # rz: only the ja restorer survives
+    eng.forced_model = "rz"
+    assert gates() == (eng._punct, None, None)
+
+    # sv: SenseVoice can emit ko, so Kiwi stays; no punctuators needed
+    eng.forced_model = "sv"
+    assert gates() == (None, None, eng._ko_spacer)
+
+    # omni: CJK drafts use the zh restorer
+    eng.forced_model = "omni"
+    assert gates() == (None, eng._punct_zh, None)
+
+    # legacy yue pin routes to sv but never emits ko: no Kiwi
+    eng.forced_model = None
+    eng.forced_lang = "yue"
+    assert gates() == (None, None, None)
+
+    # auto restores normal lazy behavior
+    eng.forced_lang = None
+    assert gates() == (eng._punct, eng._punct_zh, eng._ko_spacer)
+
+
+def test_decode_pinned_derives_language_from_sensevoice_and_script():
+    class _Stub:
+        en_tier = "v2"
+        forced_model = None
+
+        @property
+        def pinned_tier(self):
+            return self.forced_model
+
+        def _get_with_fallback(self, name):
+            return (f"<{name}>", self.actual)
+
+        def _decode(self, rec, samples, sample_rate):
+            return "plain text"
+
+        def _decode_full(self, rec, samples, sample_rate):
+            return self.text, self.tag
+
+    stub = _Stub()
+    stub.forced_model = "sv"
+    stub.actual = "sv"
+    stub.text, stub.tag = "你好，世界。", "<|zh|>0.9"
+    assert asr_engine.RoutedASR._decode_pinned(
+        stub, np.zeros(1600, dtype=np.float32), 16000) == ("你好，世界。", "zh", "sv")
+    stub.text, stub.tag = "안녕하세요", "<|ko|>0.9"
+    assert asr_engine.RoutedASR._decode_pinned(
+        stub, np.zeros(1600, dtype=np.float32), 16000)[1] == "ko"
+
+    # v3 has no reliable language tag: derive it from the script
+    stub.forced_model = "v3"
+    stub.actual = "v3"
+    stub.text, stub.tag = "bonjour tout le monde", ""
+    assert asr_engine.RoutedASR._decode_pinned(
+        stub, np.zeros(1600, dtype=np.float32), 16000)[1] == "en"
+    stub.text = "привет"
+    assert asr_engine.RoutedASR._decode_pinned(
+        stub, np.zeros(1600, dtype=np.float32), 16000)[1] == "ru"
+
+    # a specialised model implies its language
+    stub.forced_model = "pz"
+    stub.actual = "pz"
+    assert asr_engine.RoutedASR._decode_pinned(
+        stub, np.zeros(1600, dtype=np.float32), 16000) == ("plain text", "zh", "pz")
+
+
+def test_refiner_manual_mode_does_not_split_groups_by_script():
+    """Pinned language: the refine group must not be split by the script of
+    the decoder's output (a zh pin reading Japanese emits Han-ish text; a ja
+    pin reading English emits romaji). Splitting there produced groups tagged
+    with languages the session never ran, and refine re-decodes them."""
+    import realtime_transcribe as rt
+
+    class _Asr:
+        forced_lang = None
+        forced_model = "pz"
+        pinned_tier = "pz"
+
+    class _History:
+        offset = 0
+        buf = np.zeros(48000, dtype=np.float32)
+
+    refiner = rt.Refiner(_Asr(), _History(), 16000, rt.PartialPrinter(enabled=False))
+    try:
+        flushes = []
+        refiner.maybe_refine = lambda *a, **k: flushes.append(a)
+        refiner.add_span(0, 16000, "zh", "日本語のテキスト", "")
+        refiner.add_span(16000, 32000, "zh", "もう一文", "")
+        assert flushes == [], "manual mode must keep one refine group"
+        assert [s[2] for s in refiner.spans] == ["zh", "zh"]
+    finally:
+        refiner.close()
+
+
+def test_refiner_manual_mode_decodes_pinned_without_lid_or_sv_probe():
+    """Refine in manual mode must call transcribe(live=False) directly: no
+    whisper LID (released), no SenseVoice probe (would resurrect sv behind
+    set_forced_lang), no language relabel, and no fast_joined fallback."""
+    import realtime_transcribe as rt
+
+    class _Asr:
+        forced_lang = None
+        forced_model = "pz"
+        pinned_tier = "pz"
+
+        def __init__(self):
+            self.calls = []
+
+        def transcribe(self, buf, sr, known_lang=None, live=True):
+            self.calls.append((known_lang, live))
+            return {"text": "中文结果", "lang": "zh", "tier": "pz"}
+
+        def _identify_lang(self, *a):
+            raise AssertionError("manual refine must not run LID")
+
+        def _get(self, name):
+            raise AssertionError("manual refine must not probe/load models")
+
+    class _History:
+        offset = 0
+
+        def __init__(self):
+            self.buf = np.zeros(64000, dtype=np.float32)
+
+    asr = _Asr()
+    refiner = rt.Refiner(asr, _History(), 16000, rt.PartialPrinter(enabled=False))
+    try:
+        refiner.spans = [(0, 64000, "zh", "中文", "")]
+        refiner.maybe_refine(64000, force=True, force_sync=True)
+        assert asr.calls == [(None, False)]
+    finally:
+        refiner.close()

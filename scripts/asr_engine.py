@@ -6,13 +6,15 @@ each audio segment to the best model for that language.
   tier 0  ja                   -> ReazonSpeech k2 zipformer (best real-speech ja, fastest)
   tier 1  zh                   -> Paraformer-zh (best real-speech zh)
   tier 1  ko/yue               -> SenseVoice small
-  tier 2  en + 24 EU langs     -> Parakeet TDT v3 (casing + punctuation)
+  tier 2  en                   -> Parakeet TDT v2 (en-only; --en-tier v3 for the
+                                  multilingual model) / 24 EU langs -> v3
   tier 3  everything else      -> Omnilingual ASR 300M CTC (1600+ languages)
 
 Models are loaded lazily on first use and, when `max_resident` is set, the
 least-recently-used ones are unloaded so memory stays bounded no matter how
 many languages a session wanders through.
 """
+import gc
 import glob
 import os
 import sys
@@ -59,6 +61,75 @@ V3_LANGS = {
     "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu",
     "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
 }
+
+# Sentinel for "no specific language: keep the 1600-language omnilingual
+# fallback" in the settings panel's manual model list. A real language
+# code is never "omni", so it can't collide with LID output.
+MANUAL_OMNI = "omni"
+
+# Models the settings panel may pin manually. Codes are the internal tier
+# names, shared by --model and POST /api/lang-mode; "omni" is the
+# 1600-language generalist. Keep this next to the routing sets so a new
+# tier shows up in one place.
+MANUAL_MODELS = ("pz", "rz", "v2", "sv", "v3", MANUAL_OMNI)
+
+# Language -> model migration for lid_mode.json files written by the
+# earlier language-based panel (and for --mode single --lang, which stays
+# supported). "en" homes on v2 by default, matching the CLI.
+LEGACY_LANG_MODEL = {"zh": "pz", "ja": "rz", "en": "v2", "ko": "sv",
+                     "yue": "sv", MANUAL_OMNI: MANUAL_OMNI}
+LEGACY_LANG_MODEL.update({code: "v3" for code in V3_LANGS if code != "en"})
+
+
+def guess_lang_from_text(text: str, default: str = "en") -> str:
+    """Best-effort output-language tag for pinned models whose decoder
+    doesn't report one (Parakeet v3 / Omnilingual).
+
+    Only decides the tag used for ITN/translation routing; the transcript
+    itself is unchanged. Kana wins over Han (Japanese mixes both); Han
+    alone defaults to zh (yue/ja are indistinguishable without kana).
+    """
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return default
+
+    def frac(lo: str, hi: str) -> float:
+        return sum(1 for c in letters if lo <= c <= hi) / len(letters)
+
+    if frac("\u3040", "\u30ff") > 0.02:
+        return "ja"
+    if frac("\uac00", "\ud7af") > 0.3:
+        return "ko"
+    if frac("\u4e00", "\u9fff") > 0.3:
+        return "zh"
+    if frac("\u0400", "\u04ff") > 0.3:
+        return "ru"
+    if frac("\u0370", "\u03ff") > 0.3:
+        return "el"
+    return default
+
+
+def tier_for_lang(lang: str, en_tier: str = "v3") -> str:
+    """Model tier `RoutedASR._route` requests for `lang` -- pure, no model
+    access (unit-testable, and used by the manual-mode residency policy to
+    compute which model to keep BEFORE anything is loaded).
+
+    "en" homes on the en-only v2 by default in the CLI (realtime_transcribe
+    passes --en-tier v2); v3 keeps it on the multilingual model. A missing
+    v2 degrades to v3 through _TIER_FALLBACK. The v2 check deliberately
+    precedes the V3_LANGS membership test (en is in both sets).
+    """
+    if lang in RZ_LANGS:
+        return "rz"
+    if lang in PARA_LANGS:
+        return "pz"
+    if lang in SV_LANGS:
+        return "sv"
+    if lang == "en" and en_tier == "v2":
+        return "v2"
+    if lang in V3_LANGS:
+        return "v3"
+    return "omni"
 
 # Valid values for RoutedASR(en_tier=...) / --en-tier. "v3" (default) keeps
 # "en" on the multilingual Parakeet TDT v3 model alongside the other
@@ -563,11 +634,16 @@ class RoutedASR:
                  max_resident: int | None = None, punctuate: bool = True,
                  hotwords_file: str = "", replace_file: str = "",
                  lid_switch_confirm: int = 2, dual_confirm: bool = True,
-                 forced_lang: str | None = None, en_tier: str = "v3"):
+                 forced_lang: str | None = None, en_tier: str = "v3",
+                 forced_model: str | None = None):
+        if forced_model is not None and forced_model not in MANUAL_MODELS:
+            raise ValueError(f"unknown model '{forced_model}' "
+                             f"(choose from {', '.join(MANUAL_MODELS)})")
         self._threads = threads
         self.dual_confirm = dual_confirm  # --mode balanced (default); False = --mode fast
-        self.forced_lang = forced_lang    # --mode single: skip all LID/switch logic
-        self.en_tier = resolve_en_tier(en_tier)  # --en-tier: v3 (default) / v2 opt-in
+        self.en_tier = resolve_en_tier(en_tier)  # CLI defaults to v2; v2 opt-out is --en-tier v3
+        self.forced_lang = forced_lang    # legacy --mode single --lang: skip all LID/switch logic
+        self.forced_model = forced_model  # --mode single --model / panel: pin one model
         self._models: dict[str, object] = {}
         self._last_used: dict[str, float] = {}
         self._max_resident = max_resident
@@ -594,14 +670,37 @@ class RoutedASR:
         self._pending_lang = None   # candidate new language awaiting confirmation
         self._pending_count = 0
         self.lid_switch_confirm = lid_switch_confirm  # consecutive detections to accept a switch
-        self.lid = _build_lid(threads)
+        # Bumped whenever the manual-mode residency policy releases models;
+        # a load that started before the bump must not re-install its tier
+        # afterwards (see _get's install step).
+        self._residency_epoch = 0
+        # Forced single-model start (CLI --mode single / a saved panel
+        # choice): skip the LID model and the all-tier preload entirely --
+        # a session that can only route to one model never needs them.
+        pinned = self.pinned_tier
+        self.lid = None if pinned is not None else _build_lid(threads)
         if warmup:
-            # LID + tier-0 pay their one-time kernel/allocation costs here
-            # so the first real segment isn't penalized.
+            # pay one-time kernel/allocation costs for whatever THIS mode
+            # can actually route to, so the first real segment isn't
+            # penalized.
             silence = np.zeros(16000, dtype=np.float32)
-            self._identify_lang(silence, 16000)
-            self._decode(self._get("rz"), silence, 16000)
-        if preload:
+            if self.lid is not None:
+                self._identify_lang(silence, 16000)
+            if pinned is not None:
+                try:
+                    self._decode(self._get_with_fallback(pinned)[0],
+                                 silence, 16000)
+                except ModelUnavailable:
+                    pass  # --minimal install: first real segment retries the chain
+            else:
+                self._decode(self._get("rz"), silence, 16000)
+            if pinned is not None:
+                # Load the pin's punctuation/spacing helper at startup too:
+                # otherwise the first final pays its lazy load (Kiwi ~2.5s,
+                # measured on --model sv with Korean audio). _warm_pinned
+                # already gates on pinned_tier, so a concurrent switch is safe.
+                self._warm_pinned(pinned)
+        if preload and pinned is None:
             # pull the other tiers in on a daemon thread so the first
             # non-tier-0 utterance doesn't pay the ~2s model-load cost.
             # Registered with _spawn_bg so close() can wait for it: this
@@ -610,6 +709,21 @@ class RoutedASR:
             # RoutedASR whose preload is still in flight is not
             # collectable no matter what the caller drops.
             self._spawn_bg(self._preload_rest)
+
+    @property
+    def pinned_tier(self) -> str | None:
+        """The model this session is pinned to (--mode single / panel), or
+        None in auto mode. forced_model (a model picked in the panel) takes
+        precedence; forced_lang is the legacy language-level pin and maps
+        through tier_for_lang. Both stubs and the real engine can use this,
+        so every residency/LID check reads one attribute."""
+        model = getattr(self, "forced_model", None)
+        if model:
+            return model
+        lang = getattr(self, "forced_lang", None)
+        if lang:
+            return tier_for_lang(lang, getattr(self, "en_tier", "v2"))
+        return None
 
     def _spawn_bg(self, target, *args) -> "threading.Thread | None":
         """Start a daemon worker and remember it, so close() can join it.
@@ -728,16 +842,20 @@ class RoutedASR:
         # self._closed is re-read at every step so close() doesn't have to
         # wait out the whole preload, only whatever single load is already
         # inside sherpa-onnx's C++ constructor. A plain bool read needs no
-        # lock (one pointer store under the GIL).
+        # lock (one pointer store under the GIL). pinned_tier is checked the
+        # same way: a manual-mode switch mid-preload means "stop bringing in
+        # models this session can no longer route to".
+        if self._closed or self.pinned_tier is not None:
+            return
         if self._punctuate and not self._closed:
             self.punct  # first: ja finals need this almost immediately
-        if self._closed:
+        if self._closed or self.pinned_tier is not None:
             return
         self.ko_spacer  # cheap (~1s); fixes SenseVoice's over-split Korean
         silence = np.zeros(16000, dtype=np.float32)
         budget = None if self._max_resident is None else self._max_resident
         for name in _PRELOAD_ORDER:
-            if self._closed:
+            if self._closed or self.pinned_tier is not None:
                 break
             if budget is not None and budget <= 0:
                 break
@@ -745,12 +863,186 @@ class RoutedASR:
                 self._decode(self._get(name), silence, 16000)
             except ModelUnavailable:
                 continue  # --minimal install: this tier simply isn't there
+            if self.pinned_tier is not None:
+                # A manual switch landed while this tier was loading: the
+                # registry may now hold a model the pinned language can't
+                # route to (the epoch guard only covers loads that STARTED
+                # before the switch).
+                self._drop_stale(name)
+                break
             if budget is not None:
                 budget -= 1
+
+    def _drop_stale(self, name: str) -> bool:
+        """Background warmers install through _get() like any decode; if a
+        manual switch happened while the load was in flight, undo it unless
+        it is the newly pinned tier. Returns True when it removed the tier."""
+        pinned = self.pinned_tier
+        if pinned is None or not name:
+            return False
+        if name == pinned:
+            return False
+        with self._load_lock:
+            self._models.pop(name, None)
+            self._last_used.pop(name, None)
+        return True
+
+    def set_forced_lang(self, lang: str | None) -> None:
+        """Legacy language-level pin (--mode single --lang, old panel
+        payloads). Maps the language to the model it routes to and pins that
+        model; the decode still reports `lang` as the output-language tag."""
+        if lang is None:
+            self.set_forced_model(None)
+            return
+        lang = str(lang).lower()
+        self._apply_pinned(tier_for_lang(lang, self.en_tier), lang=lang)
+
+    def set_forced_model(self, model: str | None) -> None:
+        """Runtime auto/manual model switch (settings panel / --model).
+        Thread-safe against the transcribe thread; see the class docstring.
+
+        manual (model set):
+          * forced_model first -- in-flight/live decodes immediately route
+            to the pinned model instead of touching LID or SenseVoice probes;
+          * release every recognizer that is not the pinned tier (rz
+            included: it is the default draft model in auto mode but a
+            forced session never drafts through it), plus the LID model and
+            any punctuation/spacing helper the pinned model cannot use;
+          * warm the pinned tier on a background thread so the first
+            utterance doesn't pay the load.
+
+        auto (None):
+          * rebuild LID BEFORE clearing the pin, so a concurrent transcribe
+            that sees pinned_tier=None can never find self.lid missing
+            mid-_identify_lang;
+          * reload the default residency set in the background (rz first,
+            then the regular preload tiers + zh punctuation).
+
+        Memory note: dropping the dict reference is what reclaims the native
+        allocations (same mechanism as _evict_if_needed/close); gc.collect()
+        just helps break any Python-side cycles promptly. ONNX Runtime may
+        hand arenas back to the OS lazily, so Task Manager can lag.
+        """
+        if model is None:
+            self._apply_pinned(None)
+            return
+        model = str(model).lower()
+        if model not in MANUAL_MODELS:
+            raise ValueError(f"unknown model '{model}' "
+                             f"(choose from {', '.join(MANUAL_MODELS)})")
+        self._apply_pinned(model, model=model)
+
+    def _apply_pinned(self, tier: str | None, lang: str | None = None,
+                      model: str | None = None) -> None:
+        current = self.pinned_tier
+        if tier is None:
+            if current is None:
+                return
+            if self.lid is None:
+                self.lid = _build_lid(self._threads)
+            self.forced_lang = None
+            self.forced_model = None
+            self._pending_lang, self._pending_count = None, 0
+            self.last_lang = None
+            self._spawn_bg(self._reload_for_auto)
+            print("[models] auto: reloading the default model set in the "
+                  "background", file=sys.stderr)
+            return
+
+        if current == tier and (
+                (model is not None and self.forced_model == model)
+                or (lang is not None and self.forced_lang == lang)):
+            return  # already pinned to exactly this choice: keep the warm state
+
+        # zh punctuation also restores CJK-dominant omnilingual drafts, so
+        # the omnilingual model keeps it too.
+        keep_punct_zh = tier in ("pz", MANUAL_OMNI)
+        keep_punct_ja = tier == "rz"
+        # Kiwi only matters for ko output: a SenseVoice model pin can produce
+        # ko (keep it), but the legacy yue pin routes to sv without ever
+        # emitting ko (release it).
+        keep_ko_spacer = tier == "sv" and (model == "sv" or lang == "ko")
+        self.forced_lang = lang  # first: no new LID/SV-probe decodes from now on
+        self.forced_model = model
+        self._pending_lang, self._pending_count = None, 0
+        self.last_lang = None
+        released = []
+        with self._load_lock:
+            self._residency_epoch += 1
+            for name in list(self._models):
+                if name != tier:
+                    del self._models[name]
+                    self._last_used.pop(name, None)
+                    released.append(name)
+            if not keep_punct_ja:
+                self._punct = None
+            if not keep_punct_zh:
+                self._punct_zh = None
+            if not keep_ko_spacer:
+                self._ko_spacer = None
+        self.lid = None
+        gc.collect()
+        label = f"model={model}" if model is not None else f"lang={lang}"
+        print(f"[models] manual {label} tier={tier} "
+              f"released={sorted(released)} resident={self.resident_models}",
+              file=sys.stderr)
+        self._spawn_bg(self._warm_pinned, tier)
+
+    def _warm_pinned(self, tier: str) -> None:
+        """Load the pinned tier (and its punctuation helper) off the decode
+        thread so the first utterance after a manual switch is fast."""
+        if self._closed or self.pinned_tier != tier:
+            return
+        silence = np.zeros(16000, dtype=np.float32)
+        loaded = ""
+        try:
+            rec, loaded = self._get_with_fallback(tier)
+            self._decode(rec, silence, 16000)
+        except ModelUnavailable:
+            return
+        if self.pinned_tier != tier:
+            # another switch won while the model was loading: undo the load
+            self._drop_stale(loaded)
+            return
+        if tier == "rz":
+            self.punct
+        elif tier in ("pz", MANUAL_OMNI):
+            self.punct_zh
+        elif tier == "sv":
+            self.ko_spacer  # property gate skips it for a legacy yue pin
+        print(f"[models] manual warm tier={tier} "
+              f"resident={self.resident_models}", file=sys.stderr)
+
+    def _reload_for_auto(self) -> None:
+        """Restore the auto-mode residency set after a manual session."""
+        if self._closed or self.pinned_tier is not None:
+            return
+        silence = np.zeros(16000, dtype=np.float32)
+        loaded = ""
+        try:
+            rec, loaded = self._get_with_fallback("rz")
+            self._decode(rec, silence, 16000)
+        except ModelUnavailable:
+            pass
+        if self._closed or self.pinned_tier is not None:
+            self._drop_stale(loaded)
+            return
+        self._preload_rest()
+        if self._closed or self.pinned_tier is not None:
+            return
+        if self._punctuate:
+            self.punct_zh  # not part of _preload_rest; zh finals want it hot
+        print(f"[models] auto reload done: resident={self.resident_models}",
+              file=sys.stderr)
 
     @property
     def punct(self):
         """Japanese punctuation restorer (BERT ONNX); None if unavailable."""
+        # Manual residency gate: a pinned non-rz session must not lazily
+        # rebuild what the switch just released.
+        pinned = self.pinned_tier
+        if pinned is not None and pinned != "rz":
+            return None
         if self._punct is None and self._punctuate:
             with self._load_lock:
                 if self._punct is None:
@@ -770,6 +1062,9 @@ class RoutedASR:
     def punct_zh(self):
         """Chinese/English punctuation restorer (CT-Transformer ONNX);
         None if unavailable."""
+        pinned = self.pinned_tier
+        if pinned is not None and pinned not in ("pz", MANUAL_OMNI):
+            return None
         if self._punct_zh is None and self._punctuate:
             with self._load_lock:
                 if self._punct_zh is None:
@@ -784,6 +1079,12 @@ class RoutedASR:
     @property
     def ko_spacer(self):
         """Kiwi morphological analyzer used to re-space Korean output."""
+        pinned = self.pinned_tier
+        if pinned is not None:
+            if pinned != "sv":
+                return None
+            if self.forced_model is None and self.forced_lang != "ko":
+                return None  # legacy yue pin: SenseVoice can't emit ko
         if self._ko_spacer is None and self._ko_spacer_ok:
             with self._load_lock:
                 if self._ko_spacer is None and self._ko_spacer_ok:
@@ -811,6 +1112,9 @@ class RoutedASR:
             with self._model_locks[name]:
                 rec = self._models.get(name)
                 if rec is None:
+                    # A load already in flight when a manual switch releases
+                    # the registry must not re-install its tier afterwards.
+                    epoch = self._residency_epoch
                     try:
                         if name == "rz":
                             rec = _build_reazon(self._threads, self._hotwords_file)
@@ -824,6 +1128,10 @@ class RoutedASR:
                               file=sys.stderr)
                         raise ModelUnavailable(name) from exc
                     with self._load_lock:
+                        if epoch != self._residency_epoch:
+                            # still usable for the caller that needed it,
+                            # just not retained
+                            return rec
                         self._evict_if_needed(incoming=name)
                         self._models[name] = rec
         self._last_used[name] = time.monotonic()
@@ -870,6 +1178,10 @@ class RoutedASR:
         return sorted(self._models)
 
     def _identify_lang(self, samples: np.ndarray, sample_rate: int) -> str:
+        if self.lid is None:
+            # Manual/forced mode releases whisper-tiny; identify() should
+            # never be reached there, but never crash a live stream if it is.
+            return ""
         clip = samples
         # skip the leading quiet (preroll padding): it eats into the 4s LID
         # window and cost the demo capture its first-utterance language
@@ -929,21 +1241,39 @@ class RoutedASR:
         return result, (time.perf_counter() - t0) * 1000
 
     def _route(self, lang: str) -> tuple[object, str]:
-        if lang in RZ_LANGS:
-            return self._get_with_fallback("rz")
-        if lang in PARA_LANGS:
-            return self._get_with_fallback("pz")
-        if lang in SV_LANGS:
-            return self._get_with_fallback("sv")
-        if lang == "en" and self.en_tier == "v2":
-            # opt-in en-only tier; deliberately checked before the V3_LANGS
-            # membership test rather than by removing "en" from V3_LANGS, so
-            # routing-set callers keep seeing "en" homed on v3 at the default.
-            # A missing v2 lands on v3 via _TIER_FALLBACK.
-            return self._get_with_fallback("v2")
-        if lang in V3_LANGS:
-            return self._get_with_fallback("v3")
-        return self._get_with_fallback("omni")
+        # Language->tier lives in the pure tier_for_lang() helper, shared
+        # with the manual-residency policy (which must know the tier
+        # WITHOUT loading it).
+        return self._get_with_fallback(tier_for_lang(lang, self.en_tier))
+
+    def _decode_pinned(self, samples: np.ndarray, sample_rate: int) -> tuple[str, str, str]:
+        """Decode with the panel-pinned model and derive the output-language
+        tag from what that model actually produced.
+
+        A language pin (legacy --lang) already knows its tag and takes the
+        old route-by-language path; a model pin only forces the decoder, so
+        pz/rz/v2 imply zh/ja/en while Sv/V3/Omni self-detect (SenseVoice's
+        <|xx|> tag, or a script guess for V3/Omni). The tag only drives
+        ITN/translation/postprocessing; choosing SenseVoice for Chinese is
+        therefore valid and keeps SenseVoice's own punctuation.
+        """
+        tier = self.pinned_tier
+        if tier is None:
+            raise RuntimeError("_decode_pinned called in auto mode")
+        rec, actual = self._get_with_fallback(tier)
+        if actual in ("sv", "v3", MANUAL_OMNI):
+            text, reported = self._decode_full(rec, samples, sample_rate)
+            if actual == "sv":
+                lang = sv_lid_tag(reported) or guess_lang_from_text(text, "en")
+            else:
+                lang = guess_lang_from_text(text, "en")
+            return text, lang, actual
+        lang = {"pz": "zh", "rz": "ja", "v2": "en"}.get(actual)
+        if lang is None:
+            # requested tier was missing and fell back to a multilingual one
+            text, _reported = self._decode_full(rec, samples, sample_rate)
+            return text, guess_lang_from_text(text, "en"), actual
+        return self._decode(rec, samples, sample_rate), lang, actual
 
     def _draft_punct(self, text: str, lang: str | None, tier: str) -> str:
         """Draft-text punctuation for the tiers that emit bare text.
@@ -992,16 +1322,21 @@ class RoutedASR:
         blank after an English section (the sticky en model returns nothing
         for Korean speech).
 
-        --mode single (self.forced_lang set) skips all of the above: the
-        draft always routes straight to the forced language, same as
+        --mode single (pinned_tier set) skips all of the above: the draft
+        always routes straight to the pinned model/language, same as
         transcribe(), with no LID/SenseVoice probing at all.
         """
         self._check_open()
-        if self.forced_lang is not None:
-            rec, tier = self._route(self.forced_lang)
-            text = self._replace(self._decode(rec, samples, sample_rate),
-                                 zh=self.forced_lang == "zh")
-            return self._draft_punct(text, self.forced_lang, tier)
+        pinned = self.pinned_tier
+        if pinned is not None:
+            if getattr(self, "forced_model", None) is not None:
+                text, lang, tier = self._decode_pinned(samples, sample_rate)
+            else:
+                lang = self.forced_lang or ""
+                rec, tier = self._route(lang)
+                text = self._decode(rec, samples, sample_rate)
+            text = self._replace(text, zh=lang == "zh")
+            return self._draft_punct(text, lang, tier)
 
         if lang_hint is not None:
             # this utterance's language is confirmed: use its specialist
@@ -1125,9 +1460,12 @@ class RoutedASR:
         """live=False (e.g. the refine pass re-decoding past audio) must not
         touch the sticky/pending language state of the live stream."""
         self._check_open()
-        if self.forced_lang is not None:
-            # --mode single: no LID, no switch logic, ever.
-            lang, lid_ms = self.forced_lang, 0.0
+        pinned = self.pinned_tier
+        if pinned is not None:
+            # --mode single / pinned model: no LID, no switch logic, ever.
+            # A model pin derives the output-language tag after decoding
+            # (_decode_pinned); a legacy language pin already knows it.
+            lang, lid_ms = "", 0.0
         elif known_lang is not None and (speech_s is None or speech_s < 4.0):
             # trust the mid-utterance early LID only for short utterances; a
             # long one gives the full 4s window a chance to overrule the
@@ -1151,8 +1489,8 @@ class RoutedASR:
         # lock the whole session onto whatever it happened to guess).
         suppress_bootstrap_seed = False
         was_bootstrap = self.last_lang is None
-        if self.forced_lang is not None or not live:
-            pass  # out-of-band decode / forced single-language: no switch resolution
+        if pinned is not None or not live:
+            pass  # out-of-band decode / pinned model: no switch resolution
         else:
             if self.last_lang is None and self.dual_confirm:
                 # session bootstrap: whisper-tiny alone is unreliable at short
@@ -1203,11 +1541,15 @@ class RoutedASR:
 
         t0 = time.perf_counter()
         sv_text, sv_lang2 = (sv_probe if sv_probe is not None else (None, None))
-        if self.forced_lang is not None:
-            # --mode single: route straight to the forced language, no
-            # zh/yue arbitration and no script-based re-decode below.
-            rec, tier = self._route(lang)
-            text = self._decode(rec, samples, sample_rate)
+        if pinned is not None:
+            # --mode single: route straight to the pinned model, no zh/yue
+            # arbitration and no script-based re-decode below.
+            if getattr(self, "forced_model", None) is not None:
+                text, lang, tier = self._decode_pinned(samples, sample_rate)
+            else:
+                lang = self.forced_lang or ""
+                rec, tier = self._route(lang)
+                text = self._decode(rec, samples, sample_rate)
         elif lang == "zh":
             # whisper-tiny LID labels Cantonese as "zh" (measured 0/12 correct
             # on FLEURS yue), so let SenseVoice's internal LID arbitrate: keep
@@ -1237,12 +1579,16 @@ class RoutedASR:
         else:
             rec, tier = self._route(lang)
             text = self._decode(rec, samples, sample_rate)
-        if not text.strip() and tier != "omni" and not suppress_fallback:
+        if (not text.strip() and tier != "omni" and not suppress_fallback
+                and pinned is None):
             # safety net: the specialist came back empty (likely LID mistake);
             # the 1600-language generalist gets the last word. On a minimal
             # install (no omni model) the empty result stands: every other
             # _get() caller already tolerates ModelUnavailable, and letting
             # it escape here killed the whole live process mid-stream.
+            # Manual mode pins ONE language: an empty decode (music, silence,
+            # background noise) must stay empty instead of loading the
+            # generalist that set_forced_lang just released.
             try:
                 omni = self._get("omni")
             except ModelUnavailable:
@@ -1251,7 +1597,7 @@ class RoutedASR:
                 text = self._decode(omni, samples, sample_rate)
                 tier = "omni"
         corrected = script_corrected_lang(lang, text)
-        if self.forced_lang is None and live and text.strip() and corrected != lang:
+        if pinned is None and live and text.strip() and corrected != lang:
             # the decoded script contradicts the LID tag (romaji-mangled
             # English under a ja tag, CJK under a non-CJK tag): re-decode
             # with the right model before anyone sees the final.

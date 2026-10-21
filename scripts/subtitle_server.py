@@ -91,11 +91,24 @@ class SubtitleServer:
         self._lock = threading.Lock()
         self._httpd = None
         self._translate_cb = None  # injected by realtime_transcribe: cb(langs_spec)
+        self._lang_cb = None       # injected: cb("" for auto | lang code)
+        self._lang_getter = None   # injected: () -> {mode, model, resident, en_tier}
 
     def set_translate_callback(self, cb):
         """Register a runtime translation-switch handler, e.g. to hot-enable
         translation from the desktop subtitle window via POST /api/translate."""
         self._translate_cb = cb
+
+    def set_lang_mode_callback(self, cb):
+        """Register the runtime recognition-model handler used by the
+        settings panel's POST /api/lang-mode ("" = back to auto LID)."""
+        self._lang_cb = cb
+
+    def set_lang_mode_getter(self, getter):
+        """Register the state reader for GET /api/lang-mode so a panel that
+        opens later (or a launcher started with --mode single) sees the
+        engine's REAL mode, not what the UI last clicked."""
+        self._lang_getter = getter
 
     def publish(self, event: dict):
         data = json.dumps(event, ensure_ascii=False)
@@ -173,6 +186,23 @@ class SubtitleServer:
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
+                elif self.path == "/api/lang-mode":
+                    # read back the engine's real recognition-language state
+                    getter = server._lang_getter
+                    payload: dict[str, object] = {"ok": getter is not None}
+                    if getter is not None:
+                        try:
+                            payload.update(getter() or {})
+                        except Exception as exc:
+                            payload = {"ok": False, "err": str(exc)}
+                    else:
+                        payload["err"] = "no lang-mode getter registered"
+                    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
                 else:
                     body = OVERLAY_HTML.encode("utf-8")
                     self.send_response(200)
@@ -208,6 +238,47 @@ class SubtitleServer:
                         err = "no translate callback registered"
                     body = json.dumps({"ok": ok, "langs": langs, "err": err},
                                       ensure_ascii=False).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path == "/api/lang-mode":
+                    """POST /api/lang-mode  {mode:"auto"} |
+                    {mode:"manual", model:"sv"}  -- hot-switch the recognition
+                    model from the settings panel. Manual pins one ASR model
+                    and releases the rest (see RoutedASR.set_forced_model);
+                    auto restores LID + the default model set in the
+                    background. A legacy "lang" key is accepted for old
+                    panels and mapped to its model."""
+                    length = int(self.headers.get("Content-Length") or 0)
+                    raw = self.rfile.read(length) if length else b"{}"
+                    mode, spec = "auto", ""
+                    try:
+                        payload = json.loads(raw.decode("utf-8") or "{}")
+                        mode = str(payload.get("mode", "auto")).strip().lower()
+                        if mode == "manual":
+                            spec = str(payload.get("model")
+                                       or payload.get("lang") or "").strip().lower()
+                    except Exception:
+                        pass
+                    cb = server._lang_cb
+                    result: dict[str, object] = {"ok": False, "mode": mode,
+                                                 "model": spec, "err": ""}
+                    if mode not in ("auto", "manual"):
+                        result["err"] = f"unknown mode {mode!r}"
+                    elif mode == "manual" and not spec:
+                        result["err"] = "manual mode requires a model code"
+                    elif cb is None:
+                        result["err"] = "no lang-mode callback registered"
+                    else:
+                        try:
+                            result.update(cb(spec if mode == "manual" else "") or {})
+                            result["ok"] = True
+                        except Exception as exc:
+                            result["err"] = str(exc)
+                    body = json.dumps(result, ensure_ascii=False).encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
                     self.send_header("Content-Length", str(len(body)))

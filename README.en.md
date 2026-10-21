@@ -267,6 +267,16 @@ another window does NOT dismiss it; close with Esc / ✕ / the gear again):
     endpoints (HTTP 400 code 20015)
   - **Context translation** switch: equivalent to `context_n`
     (on = keep the last 6 pairs, off = 0)
+- **Recognition model**: automatic switching (whisper-tiny LID + SenseVoice
+  confirmation) or pin one model: Paraformer (zh/en), ReazonSpeech (ja/en),
+  Parakeet v2 (en), SenseVoice (zh/ja/en/ko/yue, built-in punctuation),
+  Parakeet v3 (24 European languages), Omnilingual (1600+). Pinning releases
+  every other model and the LID model (about 1.4GB saved); switching back to
+  auto reloads them in the background. The pin chooses a MODEL, not an output
+  language: SenseVoice/v3/Omni detect their own language. For v3/Omni the
+  output-language tag is inferred from the script: Latin-script languages are
+  tagged `en` (the transcript is unchanged, but API translation may report en
+  as its source). The choice is saved in `lid_mode.json` and survives restarts.
 - **Backdrop & window**: backdrop opacity tiers, click-through
 
 **Developer mode** (needs Node.js):

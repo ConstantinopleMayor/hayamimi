@@ -14,3 +14,6 @@ Thumbs.db
 # local API-translation config (may contain api keys); commit the example instead
 openai_translate.json
 /openai_translate.jsonc
+
+# desktop panel's persisted recognition-language choice (written at runtime)
+lid_mode.json

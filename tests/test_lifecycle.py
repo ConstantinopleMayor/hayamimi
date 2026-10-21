@@ -61,6 +61,7 @@ class _FakeAsr:
     """Stands in for RoutedASR in the Refiner tests: no models, no threads."""
 
     forced_lang = "ja"
+    pinned_tier = "rz"
 
     def _identify_lang(self, buf, sample_rate):
         return "ja"

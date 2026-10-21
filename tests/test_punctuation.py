@@ -31,6 +31,7 @@ class _Recorder:
     """
 
     forced_lang = "zh"  # --mode single: skip all LID/switch logic
+    pinned_tier = "pz"
     last_lang = None
     _pending_lang = None
     _pending_count = 0

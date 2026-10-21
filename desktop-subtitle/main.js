@@ -136,6 +136,40 @@ const RBTN_W = BTN_S * 2 + BTN_GAP; // total width of the two right buttons
 const MODES = ["both", "tr"];
 const MODE_LABEL = { both: "双语", tr: "译文" };
 
+// Recognition model (settings panel). Mirrors asr_engine.MANUAL_MODELS: the
+// four everyday models stay as pills, v3/omni live in the "more" dropdown.
+// "auto" is not a model -- it re-enables whisper-tiny LID + SenseVoice
+// confirmation + model switching.
+const LID_PILLS = [
+  ["pz", "Paraformer"], ["rz", "ReazonSpeech"], ["v2", "Parakeet v2"], ["sv", "SenseVoice"],
+];
+const LID_MORE = [
+  ["v3", "Parakeet v3（欧洲 24 语）"], ["omni", "Omnilingual（1600+ 语种）"],
+];
+const LID_MODEL_LABEL = Object.fromEntries([...LID_PILLS, ...LID_MORE]);
+const LID_MODEL_HINT = {
+  pz: "中英 · 专用模型（CT 标点补全）",
+  rz: "日英 · 专用模型",
+  v2: "英语专用",
+  sv: "中/日/英/韩/粤 · 内置标点，按自身判定",
+  v3: "欧洲 24 语 · 自动判定",
+  omni: "1600+ 语种 · 自动判定",
+};
+
+// Legacy lid_mode.json written by the language-based panel: migrate the saved
+// language to the model it used to route to. en follows the engine's default
+// (--en-tier v2); the 24 Parakeet-v3 EU codes all meant the same model.
+const LEGACY_LANG_MODEL = Object.assign(
+  { zh: "pz", ja: "rz", en: "v2", ko: "sv", yue: "sv", omni: "omni" },
+  Object.fromEntries([
+    "fr", "de", "es", "ru", "it", "pt", "nl", "pl", "cs", "sk", "sl", "hr",
+    "bg", "ro", "hu", "el", "da", "sv", "fi", "et", "lv", "lt", "uk", "mt",
+  ].map((code) => [code, "v3"])));
+
+function lidModelLabel(model) {
+  return LID_MODEL_LABEL[model] || model;
+}
+
 // Subtitle-card background opacity levels (percent; 0 = fully transparent,
 // 30 = a soft black card). Text itself is ALWAYS opaque; only the backdrop
 // behind the source+translation block changes. The top-center slider is
@@ -404,6 +438,10 @@ function findProjectRoot(fromDir) {
 // which keeps polling (a server started by hand meanwhile is picked up
 // automatically).
 function startUpFlow() {
+  // Restore the persisted recognition-model choice BEFORE the first
+  // spawn: a manual choice must start the engine in --mode single (no LID,
+  // no all-tier preload), not be applied after the models are already up.
+  readLidModeFile();
   probeServer(1200, (up) => {
     if (up) {
       diag("server already up; loading the overlay");
@@ -452,6 +490,10 @@ function warmTick() {
 function loadOverlay() {
   win.loadURL(buildUrl(opts.url, opts.show));
   if (!win.isVisible()) win.show();
+  // Reflect the engine's REAL mode once its callbacks are registered (a
+  // launcher may have forced --mode single via --serve-args, or a server
+  // was already running: the panel must show that, not our last click).
+  syncLidModeFromServer(8);
 }
 
 // Spawn argv for the transcribe server. serveArgs (the user's --serve-args
@@ -463,11 +505,17 @@ function loadOverlay() {
 // when the button is OFF.
 function serverSpawnArgs(applyButtonState) {
   const raw = String((opts && opts.serveArgs) || "").split(/\s+/).filter(Boolean);
+  // A persisted manual recognition choice owns --mode/--model: the panel's
+  // state is the source of truth, so any launcher-supplied pin is dropped
+  // (same precedence rule as --input).
+  const manual = lidMode === "manual" && !!lidModel;
   const kept = [];
   for (let i = 0; i < raw.length; i++) {
     const a = raw[i];
-    const spaceForm = a === "--input" || (applyButtonState && a === "--translate");
-    const eqForm = a.startsWith("--input=") || (applyButtonState && a.startsWith("--translate="));
+    const spaceForm = a === "--input" || (applyButtonState && a === "--translate")
+      || (manual && (a === "--mode" || a === "--model" || a === "--lang"));
+    const eqForm = a.startsWith("--input=") || (applyButtonState && a.startsWith("--translate="))
+      || (manual && (a.startsWith("--mode=") || a.startsWith("--model=") || a.startsWith("--lang=")));
     if (spaceForm || eqForm) {
       if (spaceForm && raw[i + 1] && !raw[i + 1].startsWith("--")) i++; // eat the value
       continue;
@@ -476,6 +524,7 @@ function serverSpawnArgs(applyButtonState) {
   }
   const args = [path.join("scripts", "realtime_transcribe.py"), "--serve", "8833"];
   if (audioInput !== "mic") args.push("--input", audioInput);
+  if (manual) args.push("--mode", "single", "--model", lidModel);
   if (applyButtonState) {
     const spec = translateSpec(lang);
     if (spec) args.push("--translate", spec);
@@ -614,6 +663,7 @@ function reviveServer(prev) {
       setPageButtons();
       diag("restart: server back up; replaying translation state");
       replayTranslation(10);
+      syncLidModeFromServer(6); // spawn args already carried the choice; belt only
       return;
     }
     if (Date.now() > back) {
@@ -666,6 +716,14 @@ let win = null;
 let opts = null;
 let passthrough = false;
 let lang = "off"; // default: no translation (button cycles OFF/ZH/EN/KO)
+// Recognition model (panel; persisted in the project root's lid_mode.json so
+// a manual choice survives restarts). Manual is passed to the engine as
+// --mode single --model X at spawn time, which also tells it to skip LID and
+// preload only X.
+let lidMode = "auto";   // "auto" | "manual"
+let lidModel = "";      // manual model (pz/rz/v2/sv/v3/omni)
+let lidEnTier = "v2";   // engine's en tier, reported by GET /api/lang-mode
+let lidErr = "";        // last apply failure, shown in the panel status line
 let audioInput = "mic"; // capture source (mic/speaker/mix); switching restarts the server
 let serverBusy = false; // audio-source restart in flight: the audio button shows the hourglass icon, re-entry blocked
 let mode = "both";  // "both" = bilingual rows, "tr" = translation only
@@ -1363,6 +1421,101 @@ function notifyServerTranslation(spec) {
   } catch (_) {}
 }
 
+// --- Recognition model (manual pinning + model residency) ------------------
+
+const LID_MODE_FILE = "lid_mode.json"; // project-root state, next to openai_translate.json
+
+function readLidModeFile() {
+  try {
+    const root = findProjectRoot(launchDir());
+    if (!root) return;
+    const c = JSON.parse(fs.readFileSync(path.join(root, LID_MODE_FILE), "utf8"));
+    const saved = c && c.mode === "manual" ? String(c.model || "") : "";
+    // legacy language-based file: c.lang was a language code, not a model
+    const legacy = c && c.mode === "manual" && c.lang
+      ? LEGACY_LANG_MODEL[String(c.lang).toLowerCase()] : "";
+    const model = LID_MODEL_LABEL[saved] ? saved : (legacy || "");
+    if (model) {
+      lidMode = "manual";
+      lidModel = model;
+    } else {
+      lidMode = "auto";
+      lidModel = "";
+    }
+    diag("lid: restored mode=" + lidMode + (lidModel ? " model=" + lidModel : ""));
+  } catch (_) { /* absent file: auto */ }
+}
+
+function saveLidModeFile() {
+  try {
+    const root = findProjectRoot(launchDir());
+    if (!root) return;
+    fs.writeFileSync(path.join(root, LID_MODE_FILE),
+      JSON.stringify({ mode: lidMode, model: lidModel }, null, 2) + "\n", "utf8");
+  } catch (e) {
+    diag("lid: save FAILED " + e.message);
+  }
+}
+
+// POST the choice; the server acks with the authoritative state. On success
+// persist it and resync the panel; on failure keep the old state and show
+// lidErr in the panel's status line.
+function applyLidMode(value) {
+  const manual = !!(value && value !== "auto");
+  const model = manual ? String(value) : "";
+  lidErr = "";
+  try {
+    fetch(`http://localhost:${SERVER_PORT}/api/lang-mode`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(manual ? { mode: "manual", model } : { mode: "auto" }),
+    })
+      .then((r) => r.json())
+      .then((j) => {
+        if (!j || !j.ok) throw new Error((j && (j.err || j.error)) || "服务器拒绝切换");
+        lidMode = j.mode === "manual" ? "manual" : "auto";
+        lidModel = j.model || "";
+        if (j.en_tier) lidEnTier = j.en_tier;
+        saveLidModeFile();
+        diag("lid: mode=" + lidMode + (lidModel ? " model=" + lidModel : "") +
+             " resident=" + ((j.resident || []).join(",") || "-"));
+        syncPanel();
+      })
+      .catch((e) => {
+        lidErr = String((e && e.message) || e);
+        diag("lid: apply FAILED " + lidErr);
+        syncPanel();
+      });
+  } catch (e) {
+    lidErr = String((e && e.message) || e);
+    diag("lid: apply FAILED " + lidErr);
+    syncPanel();
+  }
+}
+
+// Re-read the engine's real state (e.g. --serve-args forced --mode single,
+// or a server that was already running). Retries while the model callbacks
+// aren't registered yet (models still loading).
+function syncLidModeFromServer(attempts) {
+  fetch(`http://localhost:${SERVER_PORT}/api/lang-mode`)
+    .then((r) => r.json())
+    .then((j) => {
+      if (!j || !j.ok) {
+        if (attempts > 1) setTimeout(() => syncLidModeFromServer(attempts - 1), 2000);
+        return;
+      }
+      lidMode = j.mode === "manual" ? "manual" : "auto";
+      lidModel = j.model || "";
+      if (j.en_tier) lidEnTier = j.en_tier;
+      diag("lid: server state mode=" + lidMode + (lidModel ? " model=" + lidModel : "") +
+           " resident=" + ((j.resident || []).join(",") || "-"));
+      syncPanel();
+    })
+    .catch(() => {
+      if (attempts > 1) setTimeout(() => syncLidModeFromServer(attempts - 1), 2000);
+    });
+}
+
 function cycleLang() {
   const idx = LANGS.indexOf(lang);
   lang = LANGS[(idx + 1) % LANGS.length];
@@ -1553,6 +1706,14 @@ function panelHtml() {
   const fontPills = FONT_CHOICES.map((f) =>
     `<button class="pill${(state.font || "") === f.family ? " on" : ""}" data-act="font" data-val="${f.family.replace(/"/g, "&quot;")}">${f.label}</button>`).join("");
   const langLabels = { en: "英语", zh: "中文", ko: "韩语", off: "关闭" };
+  const lidPills = [
+    `<button class="pill${state.lidMode === "auto" ? " on" : ""}" data-act="lid" data-val="auto">自动切换</button>`,
+    ...LID_PILLS.map(([code, label]) =>
+      `<button class="pill${state.lidMode === "manual" && state.lidModel === code ? " on" : ""}" data-act="lid" data-val="${code}">${label}</button>`),
+  ].join("");
+  const lidMoreOpts =
+    `<option value="">更多模型…</option>`
+    + LID_MORE.map(([code, label]) => `<option value="${code}">${label}</option>`).join("");
   return `<!doctype html>
 <html><head><meta charset="utf-8">
 <style>
@@ -1564,30 +1725,39 @@ function panelHtml() {
      its light theme. The amber accent + red destructive colors are shared
      (both hold on light and dark). html.light forces the light palette for
      the ?theme=light preview probe. */
-  :root{--bg:rgba(24,26,33,.92);--border:rgba(255,255,255,.09);
+  /* color-scheme makes Chromium paint NATIVE controls (the "更多模型"
+     select popup most visibly, plus scrollbars) with the current palette.
+     Without it the closed select followed our variables but its popup used
+     the browser default -- under a light Windows theme the language list
+     stayed black (2026-10-21 report). */
+  :root{color-scheme:dark;
+    --bg:rgba(24,26,33,.92);--border:rgba(255,255,255,.09);
     --text:rgba(255,255,255,.95);--text-dim:rgba(255,255,255,.42);
     --lab:rgba(255,255,255,.85);--hint:rgba(255,255,255,.35);
     --pill-bg:rgba(255,255,255,.06);--pill-border:rgba(255,255,255,.14);
     --pill-text:rgba(255,255,255,.82);--pill-hover:rgba(255,255,255,.13);
     --pill-hover-border:rgba(255,255,255,.3);--track:rgba(255,255,255,.18);
     --scroll:rgba(255,255,255,.22);--close-dim:rgba(255,255,255,.55);
+    --menu-bg:#20222a;--menu-text:#e8e8ec;
     --shadow:0 6px 18px rgba(0,0,0,.24),0 1px 4px rgba(0,0,0,.14);}
-  html.light{--bg:rgba(248,249,252,.95);--border:rgba(0,0,0,.1);
+  html.light{color-scheme:light;--bg:rgba(248,249,252,.95);--border:rgba(0,0,0,.1);
     --text:#25272e;--text-dim:rgba(0,0,0,.4);
     --lab:rgba(0,0,0,.72);--hint:rgba(0,0,0,.38);
     --pill-bg:rgba(0,0,0,.045);--pill-border:rgba(0,0,0,.14);
     --pill-text:rgba(0,0,0,.75);--pill-hover:rgba(0,0,0,.09);
     --pill-hover-border:rgba(0,0,0,.28);--track:rgba(0,0,0,.16);
     --scroll:rgba(0,0,0,.22);--close-dim:rgba(0,0,0,.5);
+    --menu-bg:#f6f7fa;--menu-text:#222;
     --shadow:0 6px 18px rgba(0,0,0,.16),0 1px 4px rgba(0,0,0,.08);}
   @media (prefers-color-scheme: light) {
-    html:not(.dark){--bg:rgba(248,249,252,.95);--border:rgba(0,0,0,.1);
+    html:not(.dark){color-scheme:light;--bg:rgba(248,249,252,.95);--border:rgba(0,0,0,.1);
       --text:#25272e;--text-dim:rgba(0,0,0,.4);
       --lab:rgba(0,0,0,.72);--hint:rgba(0,0,0,.38);
       --pill-bg:rgba(0,0,0,.045);--pill-border:rgba(0,0,0,.14);
       --pill-text:rgba(0,0,0,.75);--pill-hover:rgba(0,0,0,.09);
       --pill-hover-border:rgba(0,0,0,.28);--track:rgba(0,0,0,.16);
       --scroll:rgba(0,0,0,.22);--close-dim:rgba(0,0,0,.5);
+      --menu-bg:#f6f7fa;--menu-text:#222;
       --shadow:0 6px 18px rgba(0,0,0,.16),0 1px 4px rgba(0,0,0,.08);}
   }
   #panel{position:fixed;inset:8px;display:flex;flex-direction:column;
@@ -1668,11 +1838,32 @@ function panelHtml() {
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   #hmy-api-status.ok{color:#3f9d63;}
   #hmy-api-status.err{color:#d05a4e;}
+  /* recognition-model row: everyday models as pills + one dropdown for
+     v3/omnilingual (the longer labels would wrap into a wall) */
+  .lid-select{background:var(--pill-bg);border:1px solid var(--pill-border);
+    color:var(--text);border-radius:14px;padding:3px 8px;font-family:inherit;
+    font-size:12px;outline:none;height:27px;max-width:250px;cursor:pointer;}
+  .lid-select:focus{border-color:#e8a87c;}
+  /* popup rows follow the SAME variables as the panel (media-query light
+     included -- the old html.light-only override left the list black under
+     a light Windows theme); color-scheme above covers the native drawing */
+  .lid-select option,.lid-select optgroup{background:var(--menu-bg);color:var(--menu-text);}
+  #hmy-lid-status{font-size:11px;color:var(--hint);min-height:12px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
+  #hmy-lid-status.err{color:#d05a4e;}
 </style></head>
 <body><div id="panel">
   <div id="head"><span class="title">字幕设置</span>
     <button id="close" title="关闭 (Esc)">&#xE8BB;</button></div>
   <div id="body">
+    <div class="sec">识别模型</div>
+    <div class="row"><span class="grp"><span class="lab">模型</span>
+      <span class="pills">${lidPills}</span></span>
+      <span class="grp"><span class="lab">更多</span>
+      <select id="hmy-lid-more" class="lid-select"
+        title="手动固定一个模型：引擎只保留该模型并释放其余模型；自动则恢复 LID 与全部模型">${lidMoreOpts}</select></span></div>
+    <div class="row"><span id="hmy-lid-status"></span></div>
+
     <div class="sec">字幕样式</div>
     <div class="row"><span class="lab">字号</span>
       <span class="pills">${pills("size", SIZE_CHOICES, state.size)}</span></div>
@@ -1752,6 +1943,12 @@ function panelHtml() {
       if (act === "apiMode" || act === "mode") return; // handled below (string/value kinds)
       var v = isNaN(Number(val)) ? val : Number(val);
       if (act === "font") { p.classList.toggle("on", (val === (S.font || ""))); return; }
+      if (act === "lid") {
+        p.classList.toggle("on", val === "auto"
+          ? S.lidMode === "auto"
+          : (S.lidMode === "manual" && val === S.lidModel));
+        return;
+      }
       if (act === "textShadow" || act === "textStroke" || act === "textInk" || act === "lang") {
         p.classList.toggle("on", val === cur); return;
       }
@@ -1770,6 +1967,18 @@ function panelHtml() {
     });
     var api = document.querySelector('[data-act="apiMode"][data-val="1"]');
     if (api) api.classList.toggle("dis", !S.apiAvailable);
+    // "更多模型" dropdown mirrors a manual v3/omni choice; the four pill
+    // models leave it on the placeholder.
+    var sel = document.getElementById("hmy-lid-more");
+    if (sel) {
+      var inPills = ${JSON.stringify(LID_PILLS.map((p) => p[0]))}.indexOf(S.lidModel) >= 0;
+      sel.value = (S.lidMode === "manual" && S.lidModel && !inPills) ? S.lidModel : "";
+    }
+    var lid = document.getElementById("hmy-lid-status");
+    if (lid) {
+      lid.textContent = S.lidHint + (S.lidErr ? " · ✗ " + S.lidErr : "");
+      lid.className = "lid-status" + (S.lidErr ? " err" : "");
+    }
   };
   function apply(act, val){
     if (window.hmyPanel) window.hmyPanel.apply(act, val);
@@ -1799,6 +2008,14 @@ function panelHtml() {
     if (ev.target.closest("#close")) { if (window.hmyPanel) window.hmyPanel.close(); }
     if (ev.target.closest("#quit")) { if (window.hmyPanel) window.hmyPanel.apply("quit", 1); }
   });
+  // The "更多模型" dropdown applies on pick (no extra OK button); the empty
+  // placeholder is ignored. Main syncs the selected pill back.
+  var lidSel = document.getElementById("hmy-lid-more");
+  if (lidSel) {
+    lidSel.addEventListener("change", function(){
+      if (this.value) apply("lid", this.value);
+    });
+  }
   // "保存并测试": test the typed URL/model/key with a live chat-completions
   // call FIRST; only a passing test writes openai_translate.json (main does
   // the merge+write+hot-reload). A failing test leaves the working config
@@ -1886,6 +2103,14 @@ function panelState() {
     bg,
     passthrough,
     barAutohide,
+    lidMode,
+    lidModel,
+    enTier: lidEnTier,
+    lidErr,
+    lidHint: lidMode === "manual" && lidModel
+      ? "手动：" + lidModelLabel(lidModel) + "（"
+        + (LID_MODEL_HINT[lidModel] || "") + "）· 其他模型已释放"
+      : "自动：whisper-tiny 判定 + SenseVoice 复核（新语种需 2 秒确认）",
   };
 }
 
@@ -2143,6 +2368,7 @@ function registerPanelIpc() {
           break;
         case "apiMode": applyApiMode(!!value); break;
         case "mode": applyMode(value); break;
+        case "lid": applyLidMode(value); break;
         case "bg": applyBg(parseInt(value, 10)); break;
         case "passthrough": applyPassthrough(!!value); break;
         case "quit": app.quit(); break;

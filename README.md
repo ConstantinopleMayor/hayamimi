@@ -172,6 +172,16 @@ npm run dist
     推理模型（DeepSeek-R1 等）选"关"可显著降低延迟；不支持该参数的模型会忽略它（布尔值），
     字符串值会被严格端点拒绝（HTTP 400 code 20015）
   - **上下文翻译**开关：等价于 `context_n`（开=保留最近 6 条对照，关=0）
+- **识别模型**：自动切换（whisper-tiny 判定 + SenseVoice 复核）或手动固定一个模型：
+  Paraformer（中英）、ReazonSpeech（日英）、Parakeet v2（英语）、SenseVoice（中/日/英/韩/粤，
+  内置标点）、Parakeet v3（欧洲 24 语）、Omnilingual（1600+ 语种）。手动时引擎只保留所选模型
+  并释放其余模型与 LID（约省 1.4GB 内存），切回自动会后台重载。
+  手动固定的是**模型**而不是输出语言：SenseVoice/v3/Omni 按自身判定输出语言；
+  Paraformer 的中文 CER 略低于 SenseVoice（本仓库小样本 5.6% vs 7.5%），
+  但标点由 CT 模型补全，SenseVoice 则自带标点——可按听感自行选择。
+  Parakeet v3 / Omnilingual 的输出语言标签按文字脚本推断：拉丁语系统一按 `en`
+  标记（识别文本不变，API 翻译的源语言可能显示为 en）。
+  选择会写入项目根 `lid_mode.json`，重启后保持。
 - **背景与窗口**：背景透明度档位、点击穿透
 
 ### 4. OBS 覆盖层
