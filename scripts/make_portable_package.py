@@ -97,11 +97,11 @@ USAGE_TXT = """hayamimi 整合包 {ver} —— 解压即用
 - 端口 8833 / 8766 被占用：先关掉已在运行的旧实例或占用进程
 - 首次运行.bat 提示 “PACKAGE INCOMPLETE”：把整个包重新完整解压（别只拷 exe）
 - 首次运行.bat 提示依赖检查失败：把窗口里的报错原样发给开发者
-- 更多细节见包内 docs\\（README.zh.md、PORTABLE.md 等）
+- 更多细节见包内 README.md、docs\\PORTABLE.md 等
 """
 
 META_FILES = [
-    "README.md", "README.zh.md", "README.ja.md", "LICENSE",
+    "README.md", "README.en.md", "README.ja.md", "LICENSE",
     "THIRD_PARTY_NOTICES.md", "CONTRIBUTING.md", "requirements.txt",
     "openai_translate.example.json", "首次运行.bat",
 ]

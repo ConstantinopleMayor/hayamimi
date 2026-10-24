@@ -181,7 +181,7 @@ soft shadow, bilibili-style outline). Startup defaults: translation OFF
 (cycle the language button to EN/ZH/KO), bilingual display, 24pt.
 
 **Quickest start (no Node.js needed)**: download
-`hayamimi-subtitle-0.3.4-win-x64.7z` from [GitHub
+`hayamimi-subtitle-0.3.5-win-x64.7z` from [GitHub
 Releases](https://github.com/ConstantinopleMayor/hayamimi/releases),
 extract its contents **directly into** `hayamimi\desktop-subtitle\` (e.g.
 with 7-Zip: "Extract here" while that folder is the target -- never run the
@@ -207,7 +207,7 @@ npm install
 npm run dist
 ```
 
-which produces `dist/hayamimi-subtitle-0.3.4-win-x64.7z` (the user-facing
+which produces `dist/hayamimi-subtitle-0.3.5-win-x64.7z` (the user-facing
 format), an internal zip, and publishes the flat exe layout into
 `desktop-subtitle/`.
 

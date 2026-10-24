@@ -119,7 +119,7 @@ Windows 用户也可直接双击项目根的 **`启动早耳.bat`**：自动拉�
 GitHub Release 提供**独立便携包**（只含桌面窗，不含服务器/模型）：
 
 1. 从 [GitHub Releases](https://github.com/ConstantinopleMayor/hayamimi/releases) 下载
-   `hayamimi-subtitle-0.3.4-win-x64.7z`
+   `hayamimi-subtitle-0.3.5-win-x64.7z`
 2. **完整解压进** 源码目录的 `desktop-subtitle\`（合并，勿嵌套、勿只拷 exe；
    用 7-Zip / NanaZip 时选中该文件夹后"解压到当前文件夹"）
 3. 双击 `desktop-subtitle\早耳字幕.exe`
@@ -140,7 +140,7 @@ npm install
 npm run dist
 ```
 
-产出 `dist\hayamimi-subtitle-0.3.4-win-x64.7z`（用户分发格式）、内部 zip（整合包脚本依赖），
+产出 `dist\hayamimi-subtitle-0.3.5-win-x64.7z`（用户分发格式）、内部 zip（整合包脚本依赖），
 并自动把 exe 及相关文件平铺发布到 `desktop-subtitle\`。开发调试可用 `npm start`。
 
 **窗内操作**
