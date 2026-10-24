@@ -677,6 +677,44 @@ def test_transcribe_bootstrap_too_short_decodes_but_does_not_seed_last_lang():
     assert stub.last_lang is None
 
 
+def test_transcribe_ignores_empty_and_tiny_audio_before_loading_a_model():
+    # A VAD flush can hand the finalizer zero or a handful of samples during
+    # silence. Omni's native CTC graph crashes the whole process on an empty
+    # waveform (0xC0000094) and raises on a few samples, so transcribe() must
+    # return before routing/probing/loading anything.
+    class _Stub:
+        forced_model = "omni"
+        forced_lang = None
+        pinned_tier = "omni"
+        last_lang = None
+        _closed = False
+        _check_open = asr_engine.RoutedASR._check_open
+
+        def _decode_pinned(self, samples, sample_rate):
+            raise AssertionError("empty/short audio must not reach the decoder")
+
+        def _get(self, name):
+            raise AssertionError("empty/short audio must not load a model")
+
+    for n in (0, 160, 800, 1599):
+        result = asr_engine.RoutedASR.transcribe(
+            _Stub(), np.zeros(n, dtype=np.float32), 16000, live=True)
+        assert result["text"] == ""
+        assert result["tier"] == "omni"
+        assert result["text_source"] == "omni"
+        assert result["sv_timestamps"] == []
+
+
+def test_decode_full_meta_short_circuits_empty_audio():
+    class _Rec:
+        def create_stream(self):
+            raise AssertionError("empty/short audio must not create a stream")
+
+    for n in (0, 160, 800, 1599):
+        assert asr_engine.RoutedASR._decode_full_meta(
+            _Rec(), np.zeros(n, dtype=np.float32), 16000) == ("", "", [])
+
+
 def test_sv_probe_retains_timestamps_without_extra_decode():
     class _Stub:
         def _get(self, name):

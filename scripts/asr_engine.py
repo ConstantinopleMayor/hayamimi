@@ -153,6 +153,13 @@ def resolve_en_tier(requested: str) -> str:
 
 LID_MAX_SECONDS = 4.0  # only feed the first N seconds of a segment to the LID model
 
+# Never hand a zero-length or near-zero segment to a recognizer. Omnilingual's
+# CTC graph crashes the native process on an empty waveform (0xC0000094 in
+# _sherpa_onnx) and raises "Invalid input shape: {1}" on a few samples; a VAD
+# flush can produce exactly such a segment during silence. 100 ms also keeps
+# meaningless blips out of every other model.
+MIN_DECODE_SECONDS = 0.1
+
 
 def _find(model_dir: str, pattern: str) -> str:
     hits = glob.glob(os.path.join(model_dir, pattern))
@@ -1199,6 +1206,8 @@ class RoutedASR:
     def _decode_full_meta(
             rec, samples: np.ndarray,
             sample_rate: int) -> tuple[str, str, list[float]]:
+        if samples is None or len(samples) < int(MIN_DECODE_SECONDS * sample_rate):
+            return "", "", []
         stream = rec.create_stream()
         stream.accept_waveform(sample_rate, samples)
         rec.decode_stream(stream)
@@ -1483,6 +1492,15 @@ class RoutedASR:
         """live=False (e.g. the refine pass re-decoding past audio) must not
         touch the sticky/pending language state of the live stream."""
         self._check_open()
+        if samples is None or len(samples) < int(MIN_DECODE_SECONDS * sample_rate):
+            # An empty/short VAD flush is not speech. In particular, Omni's
+            # native CTC decoder crashes the whole process on an empty
+            # waveform, so this must happen before any routing/probe/decode.
+            tier = getattr(self, "pinned_tier", None) or ""
+            lang = getattr(self, "forced_lang", None) or known_lang or ""
+            return {"text": "", "lang": lang, "tier": tier,
+                    "lid_ms": 0.0, "decode_ms": 0.0, "probe_ms": 0.0,
+                    "text_source": tier, "sv_timestamps": []}
         pinned = self.pinned_tier
         if pinned is not None:
             # --mode single / pinned model: no LID, no switch logic, ever.
