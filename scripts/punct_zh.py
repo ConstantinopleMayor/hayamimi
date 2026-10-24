@@ -18,6 +18,7 @@ asr_engine.py / realtime_transcribe.py -- integration is done elsewhere.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import sherpa_onnx
@@ -31,6 +32,25 @@ DEFAULT_MODEL_DIR = SCRIPT_DIR.parent / "models" / "sherpa-onnx-punct-ct-transfo
 # ("新。模型" is always bogus; "东西很新。" is a real end).
 _ATTRIB_FINALS = set("新旧整半全该本另某每各此")
 _PRED_MARKERS = set("很太真不没得更挺蛮好也又较够还都最")
+
+# High-precision guards for CT periods that cut a phrase in two. These are
+# deliberately suffix/prefix lists, not a general "period after X" rule:
+# false-positive repair only where the continuation is unambiguous.
+_PERIOD_RE = re.compile(r"[ \u3000]*。[ \u3000]*")
+_CJK_START_RE = re.compile(r"^[\u3400-\u9fff]")
+_PRONOUN_START_RE = re.compile(r"^(?:我们|你们|他们|她们|它们|我|你|他|她|它|这|那|其|此)")
+_PARTICLE_LEFT_RE = re.compile(
+    r"(?:今天|昨天|明天|目前|当前|现在|未来|本次|这次|上次|下次|"
+    r"我们|你们|他们|她们|它们|我|你|他|她|它|屏幕|视频|文章|"
+    r"公司|产品|系统|平台|版本)的$")
+_ATTRIB_LEFT_RE = re.compile(r"(?:新版|旧版|主要|全新|现有|原来|当前|本次|这次|下次)$")
+_TIME_LEFT_RE = re.compile(r"第[0-9零〇一二两三四五六七八九十百]+[天周月年届]$")
+_VERB_LEFT_RE = re.compile(
+    r"(?:限制|开放|宣布|回复|表示|包括|进行|支持|接入|针对|涉及|"
+    r"实现|提供|使用|取消|重置)$")
+_CONT_VERB_RE = re.compile(
+    r"^(?:宣布|表示|发布|推出|完成|开始|结束|进行|开放|上线|更新|"
+    r"回复|指出|称|说|将|已|正|在|于|从|为|至|到)")
 
 
 def _latin_letter(c: str) -> bool:
@@ -189,12 +209,61 @@ class PunctuatorZh:
             text = new
         return text
 
+    @staticmethod
+    def _repair_false_periods(text: str, aggressive: bool = False) -> str:
+        """Remove/demote CT periods that clearly cut a phrase.
+
+        Only internal `。` with a following CJK clause is considered. A
+        pronoun/`这`/`那` after the mark is treated as a new sentence and
+        left alone; otherwise the preceding suffix decides:
+          - time/noun + 的  -> drop the period (今天的。主要内容)
+          - attributive     -> drop the period (新版。模型)
+          - 第N天 + verb    -> comma (第13天。宣布)
+          - transitive verb -> comma (限制。开放)
+          - verb + 至       -> drop the period (开放。至10月31日)
+        Terminal periods and explicit yes/no endings (是的。目的。) survive.
+        """
+        def repl(m: re.Match) -> str:
+            left = m.string[:m.start()].rstrip(" 　")
+            right = m.string[m.end():]
+            if not right or not _CJK_START_RE.match(right):
+                return "。"
+            if _PRONOUN_START_RE.match(right):
+                return "。"
+            if _PARTICLE_LEFT_RE.search(left) or _ATTRIB_LEFT_RE.search(left):
+                return ""
+            if _TIME_LEFT_RE.search(left) and _CONT_VERB_RE.match(right):
+                return "，"
+            if _VERB_LEFT_RE.search(left):
+                if right.startswith("至"):
+                    return ""
+                if _CONT_VERB_RE.match(right):
+                    return "，"
+            return "。"
+
+        text = _PERIOD_RE.sub(repl, text)
+        # A final can also END on a fragment because VAD closed the segment
+        # at a short pause (第13天。/新版。/昨天的。). There is no following
+        # text to repair, but the terminal period still reads as a false
+        # sentence end. Drop it for the same high-confidence suffixes;
+        # complete short replies (明天见。是的。对的。) are untouched.
+        stripped = text.rstrip()
+        if stripped.endswith("。"):
+            left = stripped[:-1].rstrip()
+            if (_PARTICLE_LEFT_RE.search(left) or _ATTRIB_LEFT_RE.search(left)
+                    or _TIME_LEFT_RE.search(left) or _VERB_LEFT_RE.search(left)
+                    or left.endswith(("大规模", "资讯"))
+                    or (aggressive and left.endswith(("主要内容",)))):
+                return stripped[:-1]
+        return text
+
     def restore(self, text: str) -> str:
         """Return `text` with ，。？！ inserted; never strips anything
         except the word-splitting marks _repair_word_splits() removes."""
         if not text:
             return text
-        return self._repair_word_splits(self._punctuator.add_punctuation(text))
+        text = self._repair_word_splits(self._punctuator.add_punctuation(text))
+        return self._repair_false_periods(text)
 
 
 if __name__ == "__main__":

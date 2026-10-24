@@ -1196,16 +1196,28 @@ class RoutedASR:
         return self.lid.compute(stream)
 
     @staticmethod
-    def _decode_full(rec, samples: np.ndarray, sample_rate: int) -> tuple[str, str]:
+    def _decode_full_meta(
+            rec, samples: np.ndarray,
+            sample_rate: int) -> tuple[str, str, list[float]]:
         stream = rec.create_stream()
         stream.accept_waveform(sample_rate, samples)
         rec.decode_stream(stream)
-        text = stream.result.text
+        result = stream.result
+        text = result.text
         # ReazonSpeech models emit TV-subtitle annotation brackets around
         # boundary words; they carry no speech content.
         for junk in ("［", "］", "〈", "〉"):
             text = text.replace(junk, "")
-        return text, getattr(stream.result, "lang", "") or ""
+        # SenseVoice exposes token times; pz returns an empty list. Keep only
+        # Python floats here -- never retain the native result/stream.
+        timestamps = [float(t) for t in (getattr(result, "timestamps", None) or [])]
+        return text, getattr(result, "lang", "") or "", timestamps
+
+    @classmethod
+    def _decode_full(cls, rec, samples: np.ndarray,
+                     sample_rate: int) -> tuple[str, str]:
+        text, lang, _timestamps = cls._decode_full_meta(rec, samples, sample_rate)
+        return text, lang
 
     @classmethod
     def _decode(cls, rec, samples: np.ndarray, sample_rate: int) -> str:
@@ -1225,17 +1237,27 @@ class RoutedASR:
         call site rather than being cached as a permanent failure, matching
         the pre-refactor behavior.
 
-        Returns (probe_result, elapsed_ms) where probe_result is the
-        (text, tag) pair from _decode_full, or None if the probe hasn't run
+        Returns (probe_result, elapsed_ms) where probe_result is a
+        (text, tag, timestamps) triple, or None if the probe hasn't run
         (cached was None and unavailable) or ran but the sv model is
-        unavailable (minimal install).
+        unavailable (minimal install). The timestamps are the ones the
+        same SenseVoice decode already returned; retaining them costs no
+        extra model pass.
         """
         if cached is not None:
             return cached, 0.0
         t0 = time.perf_counter()
         result = None
         try:
-            result = self._decode_full(self._get("sv"), samples, sample_rate)
+            rec = self._get("sv")
+            meta = getattr(self, "_decode_full_meta", None)
+            if meta is not None:
+                result = meta(rec, samples, sample_rate)
+            else:
+                # Test stubs / older hosts only provide the two-value
+                # decoder; keep the probe usable without timestamps.
+                text, tag = self._decode_full(rec, samples, sample_rate)
+                result = (text, tag, [])
         except ModelUnavailable:
             pass  # minimal install: no probe possible
         return result, (time.perf_counter() - t0) * 1000
@@ -1301,12 +1323,13 @@ class RoutedASR:
             return text
         try:
             if lang == "zh" and tier == "pz" and self.punct_zh is not None:
-                return self.punct_zh.restore(text)
+                return normalize_zh_spaces(self.punct_zh.restore(text))
             if lang == "ja" and tier == "rz" and self.punct is not None:
                 return self.punct.restore(text)
             if (tier == "omni" and self.punct_zh is not None
                     and _cjk_dominant(text)):
-                return self.punct_zh.restore(self._replace(text, zh=True))
+                return normalize_zh_spaces(
+                    self.punct_zh.restore(self._replace(text, zh=True)))
         except Exception:
             pass  # a punctuation failure must never lose the draft
         return text
@@ -1540,7 +1563,11 @@ class RoutedASR:
                 )
 
         t0 = time.perf_counter()
-        sv_text, sv_lang2 = (sv_probe if sv_probe is not None else (None, None))
+        sv_text = sv_probe[0] if sv_probe is not None else None
+        sv_lang2 = sv_probe[1] if sv_probe is not None else None
+        sv_timestamps = (sv_probe[2] if sv_probe is not None
+                         and len(sv_probe) > 2 else [])
+        text_source = ""
         if pinned is not None:
             # --mode single: route straight to the pinned model, no zh/yue
             # arbitration and no script-based re-decode below.
@@ -1550,6 +1577,7 @@ class RoutedASR:
                 lang = self.forced_lang or ""
                 rec, tier = self._route(lang)
                 text = self._decode(rec, samples, sample_rate)
+            text_source = tier
         elif lang == "zh":
             # whisper-tiny LID labels Cantonese as "zh" (measured 0/12 correct
             # on FLEURS yue), so let SenseVoice's internal LID arbitrate: keep
@@ -1558,9 +1586,13 @@ class RoutedASR:
             # this exact audio through SenseVoice instead of a second pass.
             if sv_text is None:
                 sv_probe, _elapsed_ms = self._sv_probe(sv_probe, samples, sample_rate)
-                sv_text, sv_lang2 = sv_probe if sv_probe is not None else (None, None)
+                sv_text = sv_probe[0] if sv_probe is not None else None
+                sv_lang2 = sv_probe[1] if sv_probe is not None else None
+                sv_timestamps = (sv_probe[2] if sv_probe is not None
+                                 and len(sv_probe) > 2 else [])
             if sv_text is not None:
                 text = sv_text
+                text_source = "sv"
                 if "yue" in sv_lang2:
                     lang, tier = "yue", "sv"
                 else:
@@ -1568,17 +1600,21 @@ class RoutedASR:
                     text2 = self._decode(rec, samples, sample_rate)
                     if text2.strip():
                         text = text2
+                        text_source = "pz"
             else:
                 rec, tier = self._route(lang)
                 text = self._decode(rec, samples, sample_rate)
+                text_source = tier
         elif lang in ("ko", "yue") and sv_text is not None and sv_lid_tag(sv_lang2) == lang:
             # the switch-confirmation probe already decoded this exact audio
             # through the tier "ko"/"yue" routes to anyway; reuse it instead
             # of a second SenseVoice pass over the same samples.
             text, tier = sv_text, "sv"
+            text_source = "sv"
         else:
             rec, tier = self._route(lang)
             text = self._decode(rec, samples, sample_rate)
+            text_source = tier
         if (not text.strip() and tier != "omni" and not suppress_fallback
                 and pinned is None):
             # safety net: the specialist came back empty (likely LID mistake);
@@ -1596,6 +1632,7 @@ class RoutedASR:
             if omni is not None:
                 text = self._decode(omni, samples, sample_rate)
                 tier = "omni"
+                text_source = "omni"
         corrected = script_corrected_lang(lang, text)
         if pinned is None and live and text.strip() and corrected != lang:
             # the decoded script contradicts the LID tag (romaji-mangled
@@ -1614,19 +1651,24 @@ class RoutedASR:
                 if text2.strip():
                     if "yue" in sv_lang:
                         lang, tier, text = "yue", "sv", text2
+                        text_source = "sv"
                     elif "zh" in sv_lang:
                         text3 = self._decode(self._get_with_fallback("pz")[0], samples, sample_rate)
                         lang, tier, text = "zh", "pz", (text3 if text3.strip() else text2)
+                        text_source = "pz" if text3.strip() else "sv"
                     elif "ja" in sv_lang:
                         text3 = self._decode(self._get_with_fallback("rz")[0], samples, sample_rate)
                         lang, tier, text = "ja", "rz", (text3 if text3.strip() else text2)
+                        text_source = "rz" if text3.strip() else "sv"
                     elif "ko" in sv_lang:
                         lang, tier, text = "ko", "sv", text2
+                        text_source = "sv"
             else:
                 rec2, tier2 = self._route(corrected)
                 text2 = self._decode(rec2, samples, sample_rate)
                 if text2.strip():
                     lang, tier, text = corrected, tier2, text2
+                    text_source = tier2
 
         # Fixed postprocessing order (see itn_cjk.py's module docstring):
         #   CJK ITN -> punctuation restore (ja/zh) -> user --replace, applied
@@ -1648,14 +1690,29 @@ class RoutedASR:
                 text = self.punct.restore(text)
             except Exception:
                 pass  # a punctuation failure must never lose the transcription
-        if lang == "zh" and text.strip() and self.punct_zh is not None:
+        if (lang == "zh" and text.strip() and self.punct_zh is not None
+                and text_source != "sv"):
             try:
                 # Paraformer-zh emits no punctuation; restore 、。？！ like
                 # SenseVoice's partial drafts do (user report: finals lost
-                # the punctuation the 0-2s draft had).
+                # the punctuation the 0-2s draft had). When pz came back
+                # empty and this text is SenseVoice's, its own punctuation
+                # is authoritative -- running CT again would mix two
+                # punctuation models on one line.
                 text = self.punct_zh.restore(text)
             except Exception:
                 pass  # a punctuation failure must never lose the transcription
+        elif lang == "zh" and text.strip() and text_source == "sv":
+            # Manual SenseVoice (or the pz-empty fallback) carries native
+            # punctuation. CT is deliberately not loaded here, but the
+            # pure false-period rules are model-free and still apply:
+            # 第13天。/新版。/今天的。 must not read as sentence ends.
+            try:
+                from punct_zh import PunctuatorZh
+
+                text = PunctuatorZh._repair_false_periods(text, aggressive=True)
+            except Exception:
+                pass
         text = self._replace(text, lang == "zh")
         decode_ms = (time.perf_counter() - t0) * 1000
 
@@ -1664,4 +1721,6 @@ class RoutedASR:
             # must a too-short bootstrap noise blip (suppress_bootstrap_seed)
             self.last_lang = lang
         return {"text": text, "lang": lang, "tier": tier, "lid_ms": lid_ms,
-                "decode_ms": decode_ms, "probe_ms": probe_ms}
+                "decode_ms": decode_ms, "probe_ms": probe_ms,
+                "text_source": text_source or tier,
+                "sv_timestamps": sv_timestamps}

@@ -654,7 +654,21 @@ BOUNDARY_TAIL_CHARS = 4    # fresh characters required after the end mark
 # close the old VAD way -- later than ideal, never wrong.
 BOUNDARY_TAIL_MAX_CJK = 8
 BOUNDARY_TAIL_MAX_LATIN = 20
+# A period followed by one of these is almost certainly a CT false boundary
+# that _repair_false_periods could not prove (different left context): the
+# tail is visibly the continuation of the clause, not a new sentence. This
+# only defers the flush; it never inserts punctuation and never requires
+# silence, so strong ？/！ boundaries and pauseless strong 。 ends still flush.
+_WEAK_CONTINUATION_PREFIXES = (
+    "的", "地", "得", "着", "过", "和", "与", "及", "或", "至", "到",
+    "于", "在", "从", "向", "对", "为", "把", "被", "将", "并", "以及",
+    "并且", "宣布", "表示", "发布", "推出", "完成", "开始", "结束",
+    "进行", "开放", "上线", "更新", "回复", "包括", "支持", "接入",
+    "针对", "涉及", "实现", "提供", "使用", "取消", "重置", "限制",
+    "模型", "内容", "主要", "新版", "旧版",
+)
 TAIL_SCAN_S = 2.5          # trim scan window at the flushed segment's tail
+TRIM_SEARCH_S = 0.6        # prefer a dip this close to the text-predicted cut
 DIP_REL_GATE = 3.0         # a dip frame is <= this x the window's quiet floor
 DIP_ABS_GATE = 2e-3        # ...and quieter than this absolute RMS
 DIP_MIN_RUN_FRAMES = 4     # a boundary pause is >= this many quiet frames
@@ -767,6 +781,10 @@ class SemanticSplitter:
     def __init__(self):
         self._cooldown_until = 0.0
         self._flushed_end = None  # end sample index of the segment to trim
+        # Approximate position of the accepted text boundary inside the
+        # segment (0..1). Set only by a positive should_flush(); used to
+        # choose the dip NEAREST that position instead of the last one.
+        self._boundary_ratio = None
 
     def should_flush(self, text: str, speech_s: float, audio_pos: float) -> bool:
         if speech_s < FLUSH_MIN_SPEECH_S or audio_pos < self._cooldown_until:
@@ -822,6 +840,11 @@ class SemanticSplitter:
             # "百分之" + "1.4" rendered "百分之。1.4"). Wait -- the next
             # 0.5s partial re-checks once the number has finished.
             return False
+        if text[cut] == "。" and tail.startswith(_WEAK_CONTINUATION_PREFIXES):
+            # A residual CT false period that the text repair could not
+            # prove is still not allowed to split the utterance. The next
+            # partial may finish the clause and produce a real boundary.
+            return False
         # a stale boundary (too much fresh speech behind it, see the
         # BOUNDARY_TAIL_MAX_* constants) must not flush either: the split
         # point it promises is no longer where the trim can cut
@@ -830,8 +853,12 @@ class SemanticSplitter:
                         else BOUNDARY_TAIL_MAX_LATIN):
             return False
         if _re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", tail):
-            return len(tail) >= BOUNDARY_TAIL_CHARS
-        return len(tail) >= 2
+            ok = len(tail) >= BOUNDARY_TAIL_CHARS
+        else:
+            ok = len(tail) >= 2
+        if ok:
+            self._boundary_ratio = (cut + 1) / max(len(text), 1)
+        return ok
 
     def arm(self, audio_pos: float, flushed_end: int) -> None:
         self._cooldown_until = audio_pos + FLUSH_COOLDOWN_S
@@ -840,10 +867,14 @@ class SemanticSplitter:
     def trim_if_flushed(self, seg_end: int, samples: np.ndarray,
                         sample_rate: int) -> np.ndarray:
         """Cut the flushed segment at its boundary dip; other segments pass
-        through untouched (matched by end sample index, one shot)."""
+        through untouched (matched by end sample index, one shot). When a
+        text-boundary ratio is armed, prefer the quiet run nearest that
+        position -- not merely the latest one, which is often a micro-pause
+        inside the next word."""
         if self._flushed_end is None or seg_end != self._flushed_end:
             return samples
         self._flushed_end = None
+        ratio, self._boundary_ratio = self._boundary_ratio, None
         n = len(samples)
         frame = max(int(0.03 * sample_rate), 8)
         # scan the last TAIL_SCAN_S seconds -- or the WHOLE segment when it
@@ -869,17 +900,31 @@ class SemanticSplitter:
         if len(quiet) < DIP_MIN_RUN_FRAMES:
             return samples
         runs = np.split(quiet, np.where(np.diff(quiet) != 1)[0] + 1)
-        # walk runs from the latest one backwards; a run needs >=2 speech
-        # frames before it (the sentence's last words) and >=2 after (the
-        # next sentence's first syllables -- what the cut hands back to the
-        # next segment via preroll)
-        for run in reversed(runs):
+        # a run needs >=2 speech frames before it (the sentence's last
+        # words) and >=2 after (the next sentence's first syllables -- what
+        # the cut hands back to the next segment via preroll)
+        candidates = []
+        for run in runs:
             f_end = int(run[-1])
             f_start = int(run[0])
             if f_start < 2 or f_end > m - 3:
                 continue
-            return samples[:n - win + (f_end + 1) * frame]
-        return samples
+            cut_at = n - win + (f_end + 1) * frame
+            candidates.append(cut_at)
+        if not candidates:
+            return samples
+        if ratio is not None:
+            expected = int(n * ratio)
+            search = int(TRIM_SEARCH_S * sample_rate)
+            near = [c for c in candidates if abs(c - expected) <= search]
+            if not near:
+                # The text says the boundary is elsewhere; emitting the
+                # whole segment is safer than snapping to a remote dip.
+                return samples
+            cut_at = min(near, key=lambda c: (abs(c - expected), -c))
+            return samples[:cut_at]
+        # No text ratio (direct/legacy call): keep the old latest-dip rule.
+        return samples[:candidates[-1]]
 
 
 class PartialPrinter:
@@ -915,6 +960,8 @@ class SessionStats:
         self.segments = 0
         self.latencies_ms: list[float] = []
         self.refine_lang_corrections = 0  # times the refine pass overruled the fast-path language
+        self.boundary_overlaps = 0  # exact suffix(prev)/prefix(next) repeats
+        self.last_final_tail = ""
 
     def summary(self) -> str:
         if not self.latencies_ms:
@@ -922,10 +969,66 @@ class SessionStats:
         mean = sum(self.latencies_ms) / len(self.latencies_ms)
         return (f"total_audio={self.total_audio_s:.1f}s segments={self.segments} "
                 f"mean_latency={mean:.0f}ms max_latency={max(self.latencies_ms):.0f}ms "
-                f"refine_lang_corrections={self.refine_lang_corrections}")
+                f"refine_lang_corrections={self.refine_lang_corrections} "
+                f"boundary_overlaps={self.boundary_overlaps}")
 
 
 PREROLL_S = 1.0  # audio to prepend before the VAD's detected speech onset
+
+_CJK_JOIN_PUNCT = "。！？，、；：…"
+_COVERAGE_STRIP_RE = None
+
+
+def _cjk_like(ch: str) -> bool:
+    return ("\u3040" <= ch <= "\u30ff" or "\u3400" <= ch <= "\u9fff")
+
+
+def _join_final_texts(texts) -> str:
+    """Join per-segment finals without the artificial space Chinese/Japanese
+    subtitles used to get between every line. A Latin boundary still gets a
+    space, so English finals do not run together."""
+    vals = [t.strip() for t in texts if t and t.strip()]
+    if not vals:
+        return ""
+    out = vals[0]
+    for nxt in vals[1:]:
+        left, right = out[-1], nxt[0]
+        join = ((_cjk_like(left) or left in _CJK_JOIN_PUNCT)
+                and (_cjk_like(right) or right in _CJK_JOIN_PUNCT + "“（"))
+        out += nxt if join else " " + nxt
+    return out
+
+
+def _coverage_text(text: str) -> str:
+    global _COVERAGE_STRIP_RE
+    if _COVERAGE_STRIP_RE is None:
+        _COVERAGE_STRIP_RE = _re.compile(r"[\s，。！？、；：,.!?;:…\"'“”‘’()（）]+")
+    return _COVERAGE_STRIP_RE.sub("", text).lower()
+
+
+def _coverage_ok(fast: str, refined: str) -> bool:
+    """A merged re-decode must keep the fast finals' opening and ending, not
+    merely 70% of their length: losing a short prefix/suffix (新版模型,
+    此前) still leaves a long-enough string and was invisible to the old
+    length-only guard."""
+    f, r = _coverage_text(fast), _coverage_text(refined)
+    if not f:
+        return True
+    if len(r) < 0.7 * len(f):
+        return False
+    n = min(8, len(f))
+    # Anchored, not a substring search: a re-decode that prepends a stray
+    # "还表示" before the real opening has lost the fast line's start even
+    # though the old prefix still appears later in the string.
+    return r.startswith(f[:n]) and r.endswith(f[-n:])
+
+
+def _boundary_overlap(prev: str, cur: str, limit: int = 8) -> int:
+    """Longest exact suffix(prev)/prefix(cur) overlap; audit-only."""
+    for n in range(min(limit, len(prev), len(cur)), 1, -1):
+        if prev[-n:] == cur[:n]:
+            return n
+    return 0
 
 
 class AudioHistory:
@@ -992,6 +1095,14 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
 
         if not result["text"].strip():
             continue  # non-speech (jingle/SFX): no line, no speaker, no span
+
+        overlap = _boundary_overlap(stats.last_final_tail, result["text"])
+        if overlap:
+            stats.boundary_overlaps += 1
+            print(f"[boundary] overlap {overlap} chars: "
+                  f"{stats.last_final_tail[-overlap:]!r} | "
+                  f"{result['text'][:overlap]!r}", flush=True)
+        stats.last_final_tail = result["text"][-8:]
 
         speaker = ""
         if speaker_labeler is not None:
@@ -1650,7 +1761,7 @@ class Refiner:
         mixed = len(set(langs)) > 1 and min(langs.count(l) for l in set(langs)) / len(langs) >= 0.25
         speakers = [sp for _, _, _, _, sp in self.spans if sp]
         speaker = max(set(speakers), key=speakers.count) if speakers else ""
-        fast_joined = " ".join(t for _, _, _, t, _ in self.spans if t.strip())
+        fast_joined = _join_final_texts(t for _, _, _, t, _ in self.spans)
         self.spans = []
         if len(buf) < self.sr // 2:
             return
@@ -1744,8 +1855,15 @@ class Refiner:
             if pinned is not None:
                 if not text.strip():
                     return
+                if not _coverage_ok(fast_joined, text):
+                    if len(set(langs)) == 1:
+                        text = fast_joined
+                        refine_lang = lang
+                    else:
+                        print("[refine] coverage warning: pinned group lost "
+                              "text, keeping re-decode", flush=True)
             else:
-                if len(text.strip()) < 0.7 * len(fast_joined):
+                if not _coverage_ok(fast_joined, text):
                     text = fast_joined
                     refine_lang = lang
                 if not text.strip():

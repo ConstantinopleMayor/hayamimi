@@ -68,14 +68,20 @@ BIG_UNITS = ("万", "萬")
 _ALL_NUMERAL_CHARS = "".join(sorted(set(DIGIT) | set(SMALL_UNIT) | set(BIG_UNITS) | {"億"}))
 
 # bounded repetition throughout: {1,12} / {1,10} caps the scan, so this can
-# never backtrack catastrophically regardless of input length
+# never backtrack catastrophically regardless of input length. The decimal
+# side includes 十: pz writes "三点十五分"/"十五点三十分"; stopping before
+# 十 split the number into "3.15" + "十" and let zh_digit turn that stray
+# 十 into 10 ("15.310分", 2026-10-23 report). 十 is parsed as a positional
+# value below, not read digit-by-digit.
+_FRAC_CHARS = "".join(sorted(set(DIGIT) | {"十"}))
 _TOKEN_RE = re.compile(
-    rf"[{_ALL_NUMERAL_CHARS}]{{1,12}}(?:点[{''.join(sorted(DIGIT))}]{{1,10}})?"
+    rf"[{_ALL_NUMERAL_CHARS}]{{1,12}}(?:点[{_FRAC_CHARS}]{{1,10}})?"
 )
 
 DEFAULT_EXCLUSIONS = frozenset({
-    "一番", "一緒", "一部", "四国", "九州", "十分", "一石二鳥", "二人三脚",
+    "一番", "一緒", "一部", "四国", "九州", "一石二鳥", "二人三脚",
     "一体", "一旦", "一気", "七夕", "三味線", "二重", "十字架", "一杯",
+    "三五",
 })
 
 
@@ -104,6 +110,19 @@ def _digit_string(s: str) -> str | None:
             return None
         out.append(str(DIGIT[ch]))
     return "".join(out)
+
+
+def _frac_string(s: str) -> str | None:
+    """Read a decimal tail. Plain digit runs keep leading zeros ("零五" ->
+    "05"); a run containing 十 is positional ("十五" -> "15", "三十" ->
+    "30"), matching how Chinese decimal/time tails are spoken."""
+    ds = _digit_string(s)
+    if ds is not None:
+        return ds
+    if _has_small_unit(s):
+        val = _parse_small(s)
+        return str(val) if val is not None else None
+    return None
 
 
 def _parse_small(s: str) -> int | None:
@@ -170,7 +189,7 @@ def _convert_token(tok: str) -> str:
             int_str = str(int_val) if int_val is not None else None
         else:
             int_str = _digit_string(integer_part)
-        dec_str = _digit_string(decimal_part)
+        dec_str = _frac_string(decimal_part)
         if int_str is None or dec_str is None:
             return tok
         return f"{int_str}.{dec_str}"

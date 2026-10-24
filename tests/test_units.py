@@ -15,7 +15,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from realtime_transcribe import (AudioHistory, PartialPrinter, PREROLL_S, Refiner,
                                  SemanticSplitter, apply_translation_spec,
-                                 digits_consistent, translate_by_sentence)
+                                 digits_consistent, translate_by_sentence,
+                                 _boundary_overlap, _coverage_ok,
+                                 _join_final_texts)
 import asr_engine
 import realtime_transcribe
 import translate_m2m
@@ -391,6 +393,23 @@ class _BoomPunct:
         raise AssertionError("punctuator must not run for non-zh drafts")
 
 
+def test_draft_punct_cleans_ct_token_spacing():
+    # CT-Transformer separates a decimal point from its digits ("4 . 1")
+    # in its output. The final path cleans that in _replace; drafts used to
+    # return the CT spacing verbatim, making the in-progress line flicker
+    # between 4.1 and 4 . 1.
+    class _SpacedCT:
+        def restore(self, text):
+            return "升级到了4 . 1 flash。"
+
+    class _Stub:
+        punct_zh = _SpacedCT()
+        _draft_punct = asr_engine.RoutedASR._draft_punct
+
+    out = asr_engine.RoutedASR._draft_punct(_Stub(), "升级到了4.1 flash", "zh", "pz")
+    assert out == "升级到了4.1 flash。"
+
+
 def test_draft_punct_omni_mistagged_cjk_draft_gets_zh_conversion_and_punct():
     # 2026-10-18 report: a Mandarin segment whose English-name opening made
     # whisper-tiny's 2s LID emit an unsupported tag routed its drafts to the
@@ -658,6 +677,37 @@ def test_transcribe_bootstrap_too_short_decodes_but_does_not_seed_last_lang():
     assert stub.last_lang is None
 
 
+def test_sv_probe_retains_timestamps_without_extra_decode():
+    class _Stub:
+        def _get(self, name):
+            assert name == "sv"
+            return "sv-recognizer"
+
+        def _decode_full_meta(self, rec, samples, sample_rate):
+            return ("你好，世界。", "<|zh|>0.9", [0.1, 0.2, 0.4])
+
+        _sv_probe = asr_engine.RoutedASR._sv_probe
+
+    probe, _ms = asr_engine.RoutedASR._sv_probe(
+        _Stub(), None, np.zeros(1600, dtype=np.float32), 16000)
+    assert probe == ("你好，世界。", "<|zh|>0.9", [0.1, 0.2, 0.4])
+
+
+def test_sv_probe_two_value_test_stub_gets_empty_timestamps():
+    class _Stub:
+        def _get(self, name):
+            return "sv-recognizer"
+
+        def _decode_full(self, rec, samples, sample_rate):
+            return ("hello", "<|en|>0.9")
+
+        _sv_probe = asr_engine.RoutedASR._sv_probe
+
+    probe, _ms = asr_engine.RoutedASR._sv_probe(
+        _Stub(), None, np.zeros(1600, dtype=np.float32), 16000)
+    assert probe == ("hello", "<|en|>0.9", [])
+
+
 def test_transcribe_bootstrap_zh_yue_reuses_single_sv_probe_decode():
     # A brand-new session (last_lang=None) where whisper-tiny says "zh" but
     # SenseVoice's own probe says "yue" touches THREE potential SenseVoice
@@ -686,10 +736,10 @@ def test_transcribe_bootstrap_zh_yue_reuses_single_sv_probe_decode():
         ko_spacer = None
         punct = None
 
-        def _decode_full(self, rec, samples, sample_rate):
+        def _decode_full_meta(self, rec, samples, sample_rate):
             nonlocal call_count
             call_count += 1
-            return ("some text", "<|yue|>0.9")
+            return ("some text", "<|yue|>0.9", [0.1, 0.2])
 
         def _get(self, name):
             assert name == "sv"
@@ -707,6 +757,8 @@ def test_transcribe_bootstrap_zh_yue_reuses_single_sv_probe_decode():
     assert result["text"] == "some text"
     assert result["lang"] == "yue"
     assert result["tier"] == "sv"
+    assert result["text_source"] == "sv"
+    assert result["sv_timestamps"] == [0.1, 0.2]
     assert call_count == 1, f"expected exactly one SenseVoice probe decode, got {call_count}"
 
 
@@ -1169,6 +1221,21 @@ def test_flush_still_fires_on_real_chinese_sentence_end():
     assert _flush("开源了。第一张表里对比")
     # a real CJK sentence end followed by a number is still a boundary
     assert _flush("测试完成。3项全部上涨")
+    assert _flush("AI早报。屏幕是今天")
+
+
+def test_flush_defers_residual_ct_false_periods_without_silence_gate():
+    """Text repair covers the known patterns; if a residual false period
+    still reaches the splitter, its continuation tail identifies it. This is
+    a text deferral, not a silence gate: ？/！ and strong periods are
+    untouched."""
+    assert not _flush("屏幕上是今天的。主要内容")
+    assert not _flush("新版。模型专门针对")
+    assert not _flush("第13天。宣布完整重置")
+    assert not _flush("五小时限制。开放dos功能")
+    assert not _flush("并免费开放。至10月31日")
+    # a real sentence followed by a new subject still flushes
+    assert _flush("AI早报。屏幕是今天")
 
 
 def test_flush_still_fires_on_english_period():
@@ -1221,6 +1288,59 @@ def test_flush_defers_while_a_number_is_still_in_progress():
     assert not _flush("暴露此事。与一次大规模蒸馏攻击有关波及百分之一点四的council")
 
 
+def test_join_final_texts_keeps_cjk_glued_and_latin_spaced():
+    assert _join_final_texts(["主要内容。", "接下来请看"]) == "主要内容。接下来请看"
+    assert _join_final_texts(["hello.", "Next"]) == "hello. Next"
+    assert _join_final_texts(["OpenAI Codex", "负责人"]) == "OpenAI Codex 负责人"
+    assert _join_final_texts(["中文", "English"]) == "中文 English"
+
+
+def test_coverage_guard_catches_lost_prefix_and_suffix():
+    fast = "新版模型专门针对平台进行了优化"
+    assert _coverage_ok(fast, fast)
+    assert not _coverage_ok(fast, "针对平台进行了优化")
+    assert not _coverage_ok(fast, "新版模型专门针对平台进行了优")
+    assert not _coverage_ok(fast, "还表示，新版模型专门针对平台进行了优化")
+    # a normal punctuation/space difference is not a content loss
+    assert _coverage_ok("OpenAI Codex 负责人", "OpenAI Codex负责人。")
+
+
+def test_boundary_overlap_audit():
+    assert _boundary_overlap("新版模型", "模型专门针对") == 2
+    assert _boundary_overlap("今天结束", "明天开始") == 0
+
+
+def test_trim_prefers_dip_near_text_boundary():
+    sr = 16000
+    splitter = SemanticSplitter()
+    text = "今天。休息一下明早出发"
+    assert splitter.should_flush(text, 3.0, 10.0)
+    n = sr  # 1.0 s
+    samples = np.full(n, 0.1, dtype=np.float32)
+    frame = int(0.03 * sr)
+    for first in (5, 25):  # ~0.15-0.27 s and ~0.75-0.87 s
+        samples[first * frame:(first + 4) * frame] = 0.0005
+    splitter.arm(10.0, n)
+    cut = splitter.trim_if_flushed(n, samples, sr)
+    # The text boundary is near 0.27 s; the old latest-dip rule would cut
+    # at ~0.87 s instead.
+    assert len(cut) == 9 * frame
+    assert len(cut) < 20 * frame
+
+
+def test_trim_does_not_snap_to_a_remote_dip():
+    sr = 16000
+    splitter = SemanticSplitter()
+    assert splitter.should_flush("今天。休息一下明早出发", 3.0, 10.0)
+    n = sr
+    samples = np.full(n, 0.1, dtype=np.float32)
+    frame = int(0.03 * sr)
+    # Only a late dip exists, far from the text boundary (~0.27 s).
+    samples[27 * frame:31 * frame] = 0.0005
+    splitter.arm(10.0, n)
+    assert len(splitter.trim_if_flushed(n, samples, sr)) == n
+
+
 def test_flush_refuses_stale_boundary_with_long_tail():
     """CT can surface a boundary mark seconds after its pause: by flush
     time the tail behind it has grown past what the trim's 2.5s scan window
@@ -1238,8 +1358,8 @@ def test_flush_refuses_stale_boundary_with_long_tail():
 def test_flush_allows_fresh_boundary_within_trim_window():
     """Tails inside the window keep flushing: CJK 8 chars (~1.8s) and
     latin 20 chars (~1.5s) at the limits, fewer in between."""
-    assert _flush("暴露此事。与一次大规模蒸馏")  # 8 CJK chars
-    assert _flush("暴露此事。与一次大规模")  # 5 CJK chars
+    assert _flush("测试完成。明天的会议很重要")  # 8 CJK chars
+    assert _flush("测试完成。明天要开会")  # 5 CJK chars
     assert _flush("and then. The quick brown fox")  # 19 latin chars
     # a mixed tail counts against the CJK limit (any CJK char in it)
     assert not _flush("暴露此事。与1.4%的council用户均有关联")

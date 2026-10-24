@@ -15,8 +15,10 @@ from zh_space import normalize_zh_spaces
 def test_user_report_example():
     # The regression from the bug report: letters read out one by one and
     # a decimal point emitted as separate tokens ("GLM 5.3" -> "g r m 5 . 3").
+    # The multi-letter word/version boundary keeps its space now; only the
+    # tokenized letter run and the decimal point are repaired.
     src = "升级到了4 . 1 flash小一和g r m 5 . 3的状态似乎。"
-    assert normalize_zh_spaces(src) == "升级到了4.1flash小一和grm5.3的状态似乎。"
+    assert normalize_zh_spaces(src) == "升级到了4.1 flash小一和grm 5.3的状态似乎。"
 
 
 def test_letter_run_glued_to_cjk_merges():
@@ -51,10 +53,16 @@ def test_digit_runs_not_merged():
     assert normalize_zh_spaces("数到 1 2 3 就停") == "数到 1 2 3 就停"
 
 
-def test_digit_letter_boundary_tradeoff():
-    # documented side effect accepted during planning: an English word
-    # followed by a number glues ("in 2024" -> "in2024")
-    assert normalize_zh_spaces("released in 2024年") == "released in2024年"
+def test_digit_letter_boundary_preserves_words_and_names():
+    assert normalize_zh_spaces("released in 2024年") == "released in 2024年"
+    assert normalize_zh_spaces("Claude 3.5 Sonnet") == "Claude 3.5 Sonnet"
+    assert normalize_zh_spaces("Gemini 2.5 Pro") == "Gemini 2.5 Pro"
+    assert normalize_zh_spaces("GPT 4.1 flash") == "GPT 4.1 flash"
+    assert normalize_zh_spaces("at 5 pm") == "at 5 pm"
+    assert normalize_zh_spaces("grm 5.3") == "grm 5.3"
+    # only single-letter token residue still glues
+    assert normalize_zh_spaces("A 5") == "A5"
+    assert normalize_zh_spaces("5 G") == "5G"
 
 
 def test_idempotent_and_fast_path():

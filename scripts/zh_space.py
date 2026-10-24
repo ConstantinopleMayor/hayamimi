@@ -12,9 +12,12 @@ restores the conventional form:
   R2  half-width punctuation wedged between digits loses its spaces
       (4 . 1 -> 4.1, 1 - 2 -> 1-2), and a percent sign glues itself to
       the number in front of it (50 % -> 50%).
-  R3  spaces at digit<->letter boundaries go away (4.1 flash -> 4.1flash,
-      grm 5 -> grm5). The accepted trade-off: an English phrase like
-      "in 2024" merges to "in2024" -- rare inside Chinese speech.
+  R3  a space at a digit <-> SINGLE-letter boundary goes away (5 G ->
+      5G, A 5 -> A5). Multi-letter English stays spaced, so model names
+      and versions survive ("Claude 3.5 Sonnet", "GPT 4.1 flash",
+      "released in 2024", "at 5 pm"). "grm 5.3" also keeps its space;
+      product-name formatting belongs to the term layer, not this
+      token-space repair.
 
 Spaces between CJK and ASCII are deliberately untouched ("的 API 状态"
 stays as it is): those are a typographic choice, not tokenizer residue.
@@ -42,9 +45,11 @@ _PUNCT_BETWEEN_DIGITS_RE = re.compile(r"(?<=\d)\s*([.,:;!?%+\-*/=])\s*(?=\d)")
 # what follows is CJK ("50 % 的" -> "50% 的").
 _PCT_RE = re.compile(r"(?<=\d)\s+([%‰])")
 
-# R3: single spaces at digit<->letter boundaries.
-_DIGIT_LETTER_RE = re.compile(r"(?<=\d) (?=[A-Za-z])")
-_LETTER_DIGIT_RE = re.compile(r"(?<=[A-Za-z]) (?=\d)")
+# R3: single spaces at digit<->SINGLE-letter boundaries. The lookarounds
+# keep a multi-letter English word/name intact: "4.1 flash" and "in 2024"
+# are real word boundaries, while "g 5"/"5 G" are pz token residue.
+_DIGIT_LETTER_RE = re.compile(r"(?<=\d) (?=[A-Za-z](?![A-Za-z]))")
+_LETTER_DIGIT_RE = re.compile(r"(?<![A-Za-z])([A-Za-z]) (?=\d)")
 
 
 def normalize_zh_spaces(text: str) -> str:
@@ -57,7 +62,7 @@ def normalize_zh_spaces(text: str) -> str:
     s = _PUNCT_BETWEEN_DIGITS_RE.sub(r"\1", s)
     s = _PCT_RE.sub(r"\1", s)
     s = _DIGIT_LETTER_RE.sub("", s)
-    s = _LETTER_DIGIT_RE.sub("", s)
+    s = _LETTER_DIGIT_RE.sub(r"\1", s)
     return s
 
 

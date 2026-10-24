@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import asr_engine
 import itn_cjk
 from zh_digit import restore_zh_digits
+from zh_space import normalize_zh_spaces
 
 
 class _Recorder:
@@ -162,6 +163,49 @@ def test_zh_repair_drops_spaced_digit_sentence_mark():
     assert repair(_NoJieba(), "开源了。第一张表里对比") == "开源了。第一张表里对比"
 
 
+def test_false_period_repair_high_confidence_patterns():
+    from punct_zh import PunctuatorZh
+
+    repair = PunctuatorZh._repair_false_periods
+    assert repair("屏幕上是今天的。主要内容") == "屏幕上是今天的主要内容"
+    assert repair("新版。模型专门针对") == "新版模型专门针对"
+    assert repair("第13天。宣布完整重置") == "第13天，宣布完整重置"
+    assert repair("五小时限制。开放dos功能") == "五小时限制，开放dos功能"
+    assert repair("并免费开放。至10月31日") == "并免费开放至10月31日"
+
+
+def test_terminal_fragment_period_is_dropped():
+    from punct_zh import PunctuatorZh
+
+    repair = PunctuatorZh._repair_false_periods
+    assert repair("第13天。") == "第13天"
+    assert repair("新版。") == "新版"
+    assert repair("屏幕上是今天的。") == "屏幕上是今天的"
+    assert repair("今天的。") == "今天的"
+    assert repair("五小时限制。") == "五小时限制"
+    assert repair("损失大规模。") == "损失大规模"
+    assert repair("今天的资讯。") == "今天的资讯"
+    # a complete noun phrase can legitimately end a line
+    assert repair("主要内容。") == "主要内容。"
+    # SV-native punctuation: a lone 主要内容 is a split fragment
+    assert repair("主要内容。", aggressive=True) == "主要内容"
+    # complete short endings keep their period
+    assert repair("AI早报。") == "AI早报。"
+    assert repair("明天见。") == "明天见。"
+    assert repair("是的。") == "是的。"
+    assert repair("这是对的。") == "这是对的。"
+
+
+def test_false_period_repair_keeps_real_sentence_ends():
+    from punct_zh import PunctuatorZh
+
+    repair = PunctuatorZh._repair_false_periods
+    assert repair("是的。") == "是的。"
+    assert repair("这是对的。下一句") == "这是对的。下一句"
+    assert repair("第13天。我们继续") == "第13天。我们继续"
+    assert repair("新版。我们继续") == "新版。我们继续"
+
+
 def test_zh_punct_model_golden_skip_if_missing():
     try:
         from punct_zh import PunctuatorZh
@@ -173,6 +217,43 @@ def test_zh_punct_model_golden_skip_if_missing():
     assert "，" in out and out.endswith("。")
 
 
+def test_ct_period_positions_stable_across_number_and_term_spellings():
+    try:
+        from punct_zh import PunctuatorZh
+
+        p = PunctuatorZh()
+    except Exception:
+        pytest.skip("zh punct model not downloaded (download_models.py)")
+
+    def marks(text):
+        return [ch for ch in text if ch in "，。？！"]
+
+    pairs = [
+        ("下午15.310分开会十八点结束", "下午15.30分开会十八点结束"),
+        ("OpenAI Codex负责人Tibo在28天活动的第13天宣布完整重置",
+         "OpenAI Codex负责人table在28天活动的第13天宣布完整重置"),
+        ("新版模型专门针对WorkBuddy等平台进行了优化今天的资讯播送完了明天见",
+         "新版模型专门针对workbody等平台进行了优化今天的资讯播送完了明天见"),
+        ("这一版是4.1 flash小一它比上一代快了很多",
+         "这一版是4.1flash小一它比上一代快了很多"),
+    ]
+    for a, b in pairs:
+        assert marks(p.restore(a)) == marks(p.restore(b)), (a, b)
+
+
+def test_ct_decimal_spacing_is_cleaned_by_zh_space():
+    try:
+        from punct_zh import PunctuatorZh
+
+        p = PunctuatorZh()
+    except Exception:
+        pytest.skip("zh punct model not downloaded (download_models.py)")
+
+    out = normalize_zh_spaces(p.restore("这一版是4.1 flash小一它比上一代快了很多"))
+    assert "4.1 flash" in out
+    assert "4.1flash" not in out
+
+
 def test_zh_replace_runs_digit_and_space_normalization():
     # _replace's zh branch is the shared zh tail for finals AND drafts
     # (partial() calls _replace directly): after the user dictionary and
@@ -182,7 +263,7 @@ def test_zh_replace_runs_digit_and_space_normalization():
 
     out = asr_engine.RoutedASR._replace(
         _Stub(), "升级到了4 . 1 flash小一和g r m 5 . 3的状态似乎", zh=True)
-    assert out == "升级到了4.1flash小一和grm5.3的状态似乎"
+    assert out == "升级到了4.1 flash小一和grm 5.3的状态似乎"
     # and zh=False (the ja/ko/en/yue path) must NOT touch the spacing
     out_en = asr_engine.RoutedASR._replace(_Stub(), "released in 2024", zh=False)
     assert out_en == "released in 2024"

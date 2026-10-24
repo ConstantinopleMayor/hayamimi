@@ -34,11 +34,12 @@ _FRAC_CHARS = _DIGIT_CHARS + "十"
 
 # Unit words a digit phrase may be glued to (三十五秒 -> 35秒).
 _UNIT_WORDS = (
-    "分", "秒", "时", "天", "月", "年", "号", "日", "周", "元", "块",
-    "倍", "成", "折", "个", "位", "人", "台", "辆", "次", "岁", "层",
-    "届", "名", "家", "份", "款", "项", "公里", "千米", "米", "厘米",
-    "毫米", "克", "千克", "公斤", "吨", "升", "毫升", "度", "期", "版",
-    "集", "间", "场", "里", "斤", "亩", "课", "首", "章", "件", "套",
+    "小时", "分钟", "秒钟", "分", "秒", "时", "天", "月", "年", "号",
+    "日", "周", "元", "块", "倍", "成", "折", "个", "位", "人", "台",
+    "辆", "次", "岁", "层", "届", "名", "家", "份", "款", "项", "公里",
+    "千米", "米", "厘米", "毫米", "克", "千克", "公斤", "吨", "升",
+    "毫升", "度", "期", "版", "集", "间", "场", "里", "斤", "亩", "课",
+    "首", "章", "件", "套",
 )
 
 _UNIT_ALT = "|".join(sorted(_UNIT_WORDS, key=len, reverse=True))
@@ -57,6 +58,16 @@ _Q_UNITS = frozenset((
 # Ordinal prefix 第 is captured so 第三十五届 -> 第35届.
 _RE = re.compile(
     r"(第?)([" + _NUM_CHARS + r"]+)(?:点([" + _FRAC_CHARS + r"]+))?(" + _UNIT_ALT + r")?"
+)
+# Ranges with single-char Chinese endpoints: 三到五个 -> 3到5个. The second
+# endpoint may already be Arabic (itn_cjk converts 五十 but leaves 三/五
+# alone), so both forms are handled.
+_RANGE_RE = re.compile(
+    r"(?<![第几数])([一二两三四五六七八九])(到|至)([一二两三四五六七八九])"
+    r"(?![零〇一二两三四五六七八九十百千万亿])"
+)
+_RANGE_AR_RE = re.compile(
+    r"(?<![第几数])([一二两三四五六七八九])(到|至)(\d+)"
 )
 _PCT_RE = re.compile(
     r"百分之\s*([" + _NUM_CHARS + r"]+)(?:点\s*([" + _FRAC_CHARS + r"]+))?"
@@ -174,10 +185,16 @@ def _repl(m: re.Match) -> str:
     if main in ("百", "千", "万", "亿") and not frac:
         return m.group(0)
 
-    # 一 + a pure classifier stays Chinese: 一个/一块/一次/一台 are less
-    # readable as 1个/1块. Numeric-sense units (万/年/月/日/分/秒/元/倍/
-    # 公里...) still restore: 一万 -> 1万, 一分 -> 1分.
-    if main == "一" and unit in _Q_UNITS and not frac:
+    # 一/两 + a pure classifier stays Chinese: 一个/一块/两项 are less
+    # readable as 1个/1块/2项. Numeric-sense units (万/年/月/日/分/秒/
+    # 元/倍/公里...) still restore: 一万 -> 1万, 一分 -> 1分.
+    if main in ("一", "两") and unit in _Q_UNITS and not frac:
+        return m.group(0)
+
+    # 三五个 is an approximate count ("three or five"), not 35. Only the
+    # exact ambiguous pair needs this guard; ordinary 十五个/三十五个 are
+    # still converted by the magnitude path.
+    if main == "三五" and not frac:
         return m.group(0)
 
     # 亿万 (a huge, unspecified multitude) is never a number: 亿万人,
@@ -222,12 +239,21 @@ def _pct_ar_repl(m: re.Match) -> str:
     return f"{main}%"
 
 
+def _range_repl(m: re.Match) -> str:
+    left, sep, right = m.group(1), m.group(2), m.group(3)
+    if not right.isdigit():
+        right = str(_DIGIT_VALUES[right])
+    return f"{_DIGIT_VALUES[left]}{sep}{right}"
+
+
 def restore_zh_digits(text: str) -> str:
     """Restore Chinese digit phrases to Arabic digits (conservative)."""
     if not text or not re.search("[" + _NUM_CHARS + "]", text):
         return text
     s = _PCT_RE.sub(_pct_repl, text)
     s = _PCT_AR_RE.sub(_pct_ar_repl, s)  # itn_cjk may have pre-converted to Arabic
+    s = _RANGE_RE.sub(_range_repl, s)
+    s = _RANGE_AR_RE.sub(_range_repl, s)
     return _RE.sub(_repl, s)
 
 

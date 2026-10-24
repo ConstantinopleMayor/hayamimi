@@ -60,6 +60,21 @@ def test_decimal_with_magnitude_integer_part():
     assert itn_cjk.convert("三十点五", "ja") == "30.5"
 
 
+def test_decimal_tail_with_chinese_ten_is_not_split():
+    """A 十 in the decimal tail must stay inside the number. It used to be
+    left behind ("15.3十"), then zh_digit converted the orphan 十 to 10,
+    producing 15.310. The numeric value must survive; this deliberately
+    does NOT turn time-like text into a clock time (5.3分 can be a score)."""
+    assert itn_cjk.convert("十五点三十分", "zh") == "15.30分"
+    assert itn_cjk.convert("三点五十分", "zh") == "3.50分"
+    assert itn_cjk.convert("三点十五分", "zh") == "3.15分"
+    assert itn_cjk.convert("三点零五分", "zh") == "3.05分"
+    # decimal, not a clock time
+    assert itn_cjk.convert("五点三分", "zh") == "5.3分"
+    assert itn_cjk.convert("5.3分", "zh") == "5.3分"
+    assert "15.310" not in itn_cjk.convert("十五点三十分", "zh")
+
+
 # ---- digit-string years/codes -----------------------------------------------
 
 def test_bare_digit_run_reads_digit_by_digit():
@@ -88,6 +103,11 @@ IDIOM_SENTENCES = [
     "一石二鳥の作戦です",
     "二人三脚で頑張ります",
 ]
+
+
+def test_approximate_three_five_stays_untouched():
+    assert itn_cjk.convert("三五个", "zh") == "三五个"
+    assert itn_cjk.convert("三五天", "zh") == "三五天"
 
 
 @pytest.mark.parametrize("sentence", IDIOM_SENTENCES)
