@@ -181,7 +181,7 @@ soft shadow, bilibili-style outline). Startup defaults: translation OFF
 (cycle the language button to EN/ZH/KO), bilingual display, 24pt.
 
 **Quickest start (no Node.js needed)**: download
-`hayamimi-subtitle-0.3.5-win-x64.7z` from [GitHub
+`hayamimi-subtitle-0.3.6-win-x64.7z` from [GitHub
 Releases](https://github.com/ConstantinopleMayor/hayamimi/releases),
 extract its contents **directly into** `hayamimi\desktop-subtitle\` (e.g.
 with 7-Zip: "Extract here" while that folder is the target -- never run the
@@ -207,7 +207,7 @@ npm install
 npm run dist
 ```
 
-which produces `dist/hayamimi-subtitle-0.3.5-win-x64.7z` (the user-facing
+which produces `dist/hayamimi-subtitle-0.3.6-win-x64.7z` (the user-facing
 format), an internal zip, and publishes the flat exe layout into
 `desktop-subtitle/`.
 
@@ -219,12 +219,11 @@ format), an internal zip, and publishes the flat exe layout into
 | pin (MDL2) | title-bar auto-hide: armed = the bar fades away when the pointer leaves the window (the window loses that row); pinned = the bar always stays |
 | gear (MDL2) | open/close the persistent settings panel (see below) |
 | EN / ZH / KO / OFF | cycle the displayed translation language |
-| 双语 / 译文 | bilingual vs translation-only display |
-| mic / speaker / mic+speaker (MDL2) | cycle the audio source (button right of 双语/译文): mic → speaker loopback → mic+speaker mix. Switching restarts the engine (~15–30 s of paused subtitles); speaker/mix are Windows-only |
+| mic / speaker / mic+speaker (MDL2) | cycle the audio source (button right of API): mic → speaker loopback → mic+speaker mix. Switching restarts the engine (~15–30 s of paused subtitles); speaker/mix are Windows-only |
 | API / 本地 | switch the translation channel |
 | top sliders | backdrop opacity (0–60%) and window width |
 | bar / cross (MDL2) | minimize / quit |
-| `Ctrl+Alt+D` / `Ctrl+Alt+L` / `Ctrl+Alt+M` | click-through / language / display mode |
+| `Ctrl+Alt+D` / `Ctrl+Alt+L` / `Ctrl+Alt+S` / `Ctrl+Alt+B` | click-through / language / settings panel / title-bar pin |
 | `Esc` | quit (also stops the server) |
 
 All icons are Segoe MDL2 Assets glyphs, so the whole row is tinted by one

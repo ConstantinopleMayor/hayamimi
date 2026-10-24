@@ -119,7 +119,7 @@ Windows 用户也可直接双击项目根的 **`启动早耳.bat`**：自动拉�
 GitHub Release 提供**独立便携包**（只含桌面窗，不含服务器/模型）：
 
 1. 从 [GitHub Releases](https://github.com/ConstantinopleMayor/hayamimi/releases) 下载
-   `hayamimi-subtitle-0.3.5-win-x64.7z`
+   `hayamimi-subtitle-0.3.6-win-x64.7z`
 2. **完整解压进** 源码目录的 `desktop-subtitle\`（合并，勿嵌套、勿只拷 exe；
    用 7-Zip / NanaZip 时选中该文件夹后"解压到当前文件夹"）
 3. 双击 `desktop-subtitle\早耳字幕.exe`
@@ -140,7 +140,7 @@ npm install
 npm run dist
 ```
 
-产出 `dist\hayamimi-subtitle-0.3.5-win-x64.7z`（用户分发格式）、内部 zip（整合包脚本依赖），
+产出 `dist\hayamimi-subtitle-0.3.6-win-x64.7z`（用户分发格式）、内部 zip（整合包脚本依赖），
 并自动把 exe 及相关文件平铺发布到 `desktop-subtitle\`。开发调试可用 `npm start`。
 
 **窗内操作**
@@ -153,11 +153,10 @@ npm run dist
 | 图钉图标 | 标题栏自动隐藏：未钉住＝鼠标离开后整行淡出；钉住＝常驻 |
 | 齿轮图标 | 打开/关闭**设置面板**（见下） |
 | EN / ZH / KO / OFF | 循环切换翻译语言 |
-| 双语 / 译文 | 双语与仅译文切换 |
 | 麦克风 / 喇叭 / 两者 | 循环切换音频源（切换会重启识别引擎，约 15–30 秒；系统音频仅 Windows） |
 | API / 本地 | 切换翻译通道 |
 | 顶部滑块 | 背景卡片透明度（0–60%）与窗口宽度 |
-| `Ctrl+Alt+D` / `Ctrl+Alt+L` / `Ctrl+Alt+M` | 点击穿透 / 语言 / 显示模式 |
+| `Ctrl+Alt+D` / `Ctrl+Alt+L` / `Ctrl+Alt+S` / `Ctrl+Alt+B` | 点击穿透 / 语言 / 设置面板 / 标题栏常驻 |
 
 **设置面板**（齿轮打开；**常驻置顶**，点击其他窗口不会消失；Esc / ✕ / 再点齿轮关闭）
 

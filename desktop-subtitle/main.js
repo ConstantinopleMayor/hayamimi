@@ -134,7 +134,6 @@ const RBTN_W = BTN_S * 2 + BTN_GAP; // total width of the two right buttons
 // "tr" = translation only (the source flow, incl. its in-progress draft, is
 // hidden; the translation flow keeps showing).
 const MODES = ["both", "tr"];
-const MODE_LABEL = { both: "双语", tr: "译文" };
 
 // Recognition model (settings panel). Mirrors asr_engine.MANUAL_MODELS: the
 // four everyday models stay as pills, v3/omni live in the "more" dropdown.
@@ -203,11 +202,12 @@ const MIN_WIN_H = 66;
 // card is OUTSIDE the window -- no clipping needed; setShape only killed
 // the native resize border, so it was removed entirely.)
 
-// Button row (left to right): lock | pin | settings | lang | API | mode |
-// audio. The pin button (right of the lock) toggles the title-bar auto-hide:
-// armed = the bar fades away when the cursor leaves the window, pinned = the
-// bar stays. The pass-through keep-clickable band counts 7 buttons now.
-const NBUTTONS = 7;
+// Button row (left to right): lock | pin | settings | lang | API | audio.
+// Display mode (双语/仅译文) lives only in the settings panel. The pin button
+// (right of the lock) toggles the title-bar auto-hide: armed = the bar fades
+// away when the cursor leaves the window, pinned = the bar stays. The
+// pass-through keep-clickable band counts 6 buttons now.
+const NBUTTONS = 6;
 
 // Audio capture source, fixed at server STARTUP (realtime_transcribe.py picks
 // the backend from --input), so switching it RESTARTS the server:
@@ -245,6 +245,14 @@ function pinTitle() {
   return barAutohide
     ? "标题栏自动隐藏（点击常驻，不再自动隐藏）"
     : "标题栏已常驻（点击恢复自动隐藏）";
+}
+
+// Shared by the pin button and the global Ctrl+Alt+P shortcut.
+function toggleBarPin() {
+  barAutohide = !barAutohide;
+  diag("toggle-pin -> barAutohide=" + barAutohide);
+  refreshMouseMode();
+  setPageButtons();
 }
 
 // True when a usable openai_translate.json exists next to this app (i.e. the
@@ -827,9 +835,8 @@ function makeCss() {
   const lx1 = BTN_X0 + BTN_S + BTN_GAP;
   const lx2 = BTN_X0 + (BTN_S + BTN_GAP) * 2;
   const lx3 = BTN_X0 + (BTN_S + BTN_GAP) * 3;
-  const lx4 = BTN_X0 + (BTN_S + BTN_GAP) * 4;
-  const lx5 = BTN_X0 + (BTN_S + BTN_GAP) * 5;
-  const lx6 = BTN_X0 + (BTN_S + BTN_GAP) * 6;
+    const lx4 = BTN_X0 + (BTN_S + BTN_GAP) * 4;
+    const lx5 = BTN_X0 + (BTN_S + BTN_GAP) * 5;
   // subtitle-card backdrop: the bg slider only changes the card FILL. The
   // frame (1px border + soft shadow) and the window insets that make that
   // shadow VISIBLE live in the base #box rule below and in applyBg(): an
@@ -964,9 +971,7 @@ color:#d68c27; /* same opencode theme family, LIGHT-mode orange: a step
                   font-size:12px;}
     #hmy-api-btn{left:${lx4}px;font-family:'Segoe UI',sans-serif;font-weight:700;
                  font-size:12px;}
-    #hmy-mode-btn{left:${lx5}px;font-family:'Segoe UI',sans-serif;font-weight:700;
-                  font-size:12px;}
-    #hmy-audio-btn{left:${lx6}px;}
+    #hmy-audio-btn{left:${lx5}px;}
     /* top-right window controls: minimize (E921) and close (E8BB) */
     #hmy-min-btn{right:${RBX + BTN_S + BTN_GAP}px;}
     #hmy-close-btn{right:${RBX}px;}
@@ -1060,11 +1065,6 @@ function makeInitJs() {
       console.log('hmy: btn-api-click');
       window.desktopSubtitle.cycleApi();
     });
-    var modeBtn = mkBtn('hmy-mode-btn', '双语', '切换显示: 双语(原文+译文) / 仅译文');
-    modeBtn.addEventListener('click', function(){
-      console.log('hmy: btn-mode-click');
-      window.desktopSubtitle.toggleMode();
-    });
     var audioBtn = mkBtn('hmy-audio-btn', ${JSON.stringify(ICON[audioInput] || ICON.mic)}, ${JSON.stringify(inputTitle())});
     audioBtn.className = ${JSON.stringify(audioInput === "mix" ? "hmy-btn two" : "hmy-btn")};
     audioBtn.addEventListener('click', function(){
@@ -1127,7 +1127,6 @@ function makeInitJs() {
     document.body.appendChild(menuBtn);
     document.body.appendChild(langBtn);
     document.body.appendChild(apiBtn);
-    document.body.appendChild(modeBtn);
     document.body.appendChild(audioBtn);
     document.body.appendChild(minBtn);
     document.body.appendChild(closeBtn);
@@ -1365,8 +1364,6 @@ function setPageButtons() {
           ap.textContent = apiLabel;
           ap.className = 'hmy-btn' + (${JSON.stringify(apiAvailable ? '' : ' off')});
         }
-        var md=document.getElementById('hmy-mode-btn');
-        if(md){ md.textContent = ${JSON.stringify(MODE_LABEL[mode])}; }
         var ab=document.getElementById('hmy-audio-btn');
         if(ab){
           ab.textContent = ${JSON.stringify(serverBusy ? ICON.busy : (ICON[audioInput] || ICON.mic))};
@@ -2231,6 +2228,24 @@ function showMenu() {
   openPanel();
 }
 
+function toggleSettingsPanel() {
+  if (panelWin && !panelWin.isDestroyed() && panelWin.isVisible()) {
+    diag("shortcut: panel toggle -> close");
+    closePanel();
+  } else {
+    diag("shortcut: panel toggle -> open");
+    openPanel();
+  }
+}
+
+function registerShortcut(accelerator, handler) {
+  if (globalShortcut.register(accelerator, handler)) {
+    diag("shortcut registered: " + accelerator);
+  } else {
+    diag("shortcut FAILED: " + accelerator);
+  }
+}
+
 // Push the fresh state snapshot to an open panel after any apply*. Re-fit
 // the window height too: state changes can alter row content (e.g. the API
 // test status line) and a slightly-grown body must lengthen the window
@@ -2516,16 +2531,10 @@ app.whenReady().then(() => {
   });
   registerPanelIpc();
   ipcMain.on("hmy:toggle-passthrough", () => { diag("IPC: toggle-passthrough"); applyPassthrough(!passthrough); });
-  ipcMain.on("hmy:toggle-pin", () => {
-    // pin button: armed (auto-hide) <-> pinned (bar never hides)
-    barAutohide = !barAutohide;
-    diag("IPC: toggle-pin -> barAutohide=" + barAutohide);
-    refreshMouseMode();
-    setPageButtons();
-  });
+  // pin button: armed (auto-hide) <-> pinned (bar never hides)
+  ipcMain.on("hmy:toggle-pin", toggleBarPin);
   ipcMain.on("hmy:cycle-lang", () => { diag("IPC: cycle-lang"); cycleLang(); });
   ipcMain.on("hmy:cycle-api", () => { diag("IPC: cycle-api"); cycleApi(); });
-  ipcMain.on("hmy:toggle-mode", () => { diag("IPC: toggle-mode"); applyMode(mode === "both" ? "tr" : "both"); });
   ipcMain.on("hmy:cycle-input", () => { diag("IPC: cycle-input"); cycleAudioInput(); });
   ipcMain.on("hmy:minimize", () => { diag("IPC: minimize"); if (win && !win.isDestroyed()) win.minimize(); });
   ipcMain.on("hmy:close", () => { diag("IPC: close"); app.quit(); });
@@ -2670,9 +2679,10 @@ app.whenReady().then(() => {
   // no global Esc shortcut: a global Esc quit the window while the user was
   // typing Esc in ANY app (browser forms, games). Closing is the title bar's
   // ✕ only; the other Ctrl+Alt+X combos are unlikely to collide and stay.
-  globalShortcut.register("Control+Alt+D", () => applyPassthrough(!passthrough));
-  globalShortcut.register("Control+Alt+L", () => cycleLang());
-  globalShortcut.register("Control+Alt+M", () => applyMode(mode === "both" ? "tr" : "both"));
+  registerShortcut("Control+Alt+D", () => applyPassthrough(!passthrough));
+  registerShortcut("Control+Alt+L", () => cycleLang());
+  registerShortcut("Control+Alt+S", toggleSettingsPanel);
+  registerShortcut("Control+Alt+B", toggleBarPin);
 });
 
 app.on("before-quit", () => {
