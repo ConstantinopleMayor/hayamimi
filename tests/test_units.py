@@ -14,10 +14,12 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 from realtime_transcribe import (AudioHistory, PartialPrinter, PREROLL_S, Refiner,
-                                 SemanticSplitter, apply_translation_spec,
+                                 SentenceState, SessionStats, SemanticSplitter,
+                                 apply_translation_spec,
                                  digits_consistent, translate_by_sentence,
                                  _boundary_overlap, _coverage_ok,
-                                 _join_final_texts)
+                                 _flush_sentence_tail, _join_final_texts,
+                                 _merge_sentence_tail, _split_sentence_tail)
 import asr_engine
 import realtime_transcribe
 import translate_m2m
@@ -1260,6 +1262,127 @@ def test_flush_still_fires_on_real_chinese_sentence_end():
     # a real CJK sentence end followed by a number is still a boundary
     assert _flush("测试完成。3项全部上涨")
     assert _flush("AI早报。屏幕是今天")
+
+
+def test_flush_waits_for_right_context_when_configured():
+    """The streaming splitter holds a candidate boundary for the lookahead
+    window, so CT sees the next clause before the audio is cut."""
+    splitter = SemanticSplitter(lookahead_s=1.0)
+    text = "测试完成。明天要开会"
+    assert not splitter.should_flush(text, 3.0, 10.0)
+    assert not splitter.should_flush(text, 3.0, 10.9)
+    assert splitter.should_flush(text, 3.0, 11.0)
+    splitter.arm(11.0, 100)
+    assert splitter.is_flushed(100)
+    assert not splitter.is_flushed(101)
+
+
+def test_split_sentence_tail_holds_only_the_open_last_sentence():
+    text = "其公司目前最强的内部模型。他认为，在此之前需要改变。"
+    complete, tail = _split_sentence_tail(text)
+    assert complete == "其公司目前最强的内部模型。"
+    assert tail == "他认为，在此之前需要改变"
+
+    # If the flushed audio contains only one sentence, it is the last one and
+    # must wait for the next segment's continuation.
+    complete, tail = _split_sentence_tail("其公司目前最强的内部模型。")
+    assert complete == ""
+    assert tail == "其公司目前最强的内部模型"
+
+    assert _merge_sentence_tail(
+        "他认为，在此之前需要改变",
+        "互联网整体的网络防御方式，并建立生物威胁防护层。",
+    ) == "他认为，在此之前需要改变互联网整体的网络防御方式，并建立生物威胁防护层。"
+    assert _merge_sentence_tail(
+        "该模型还针对消费级gpu做了推理优化",
+        "block发布全双工语音模型，desa称其仅靠语音对话。",
+    ) == "该模型还针对消费级gpu做了推理优化 block发布全双工语音模型，desa称其仅靠语音对话。"
+
+
+def _drain_one(text, was_flushed):
+    class _Sink:
+        def __init__(self):
+            self.finals = []
+            self.partials = []
+
+        def final(self, text, *args, **kwargs):
+            self.finals.append(text)
+
+        def partial(self, text):
+            self.partials.append(text)
+
+    class _Printer:
+        def __init__(self):
+            self.server = _Sink()
+
+        def clear(self):
+            pass
+
+    class _Asr:
+        def transcribe(self, samples, sample_rate, **kwargs):
+            return {"text": text, "raw_text": text, "lang": "zh", "tier": "pz",
+                    "lid_ms": 0, "decode_ms": 0, "probe_ms": 0}
+
+    class _Vad:
+        def __init__(self):
+            self.front = type("_Seg", (), {
+                "start": 0, "samples": np.ones(16000, dtype=np.float32)})()
+
+        def empty(self):
+            return self.front is None
+
+        def pop(self):
+            self.front = None
+
+    class _Splitter:
+        def is_flushed(self, seg_end):
+            return was_flushed
+
+        def trim_if_flushed(self, seg_end, samples, sample_rate):
+            return samples
+
+    printer = _Printer()
+    state = SentenceState()
+    realtime_transcribe.drain_segments(
+        _Vad(), 16000, _Asr(), SessionStats(), printer,
+        splitter=_Splitter(), sentence_state=state)
+    return printer.server, state
+
+
+def test_natural_vad_segment_publishes_all_sentences_without_tail():
+    sink, state = _drain_one("第一句。第二句。", was_flushed=False)
+    assert sink.finals == ["第一句。", "第二句。"]
+    assert sink.partials == []
+    assert state.tail == ""
+
+
+def test_semantic_flush_holds_last_sentence_and_shows_partial():
+    sink, state = _drain_one("第一句。第二句。", was_flushed=True)
+    assert sink.finals == ["第一句。"]
+    assert state.tail == "第二句"
+    assert sink.partials == ["第二句。"]
+
+
+def test_flush_sentence_tail_publishes_and_clears_once():
+    class _Sink:
+        def __init__(self):
+            self.texts = []
+
+        def final(self, text, *args, **kwargs):
+            self.texts.append(text)
+
+    sink = _Sink()
+    printer = PartialPrinter(enabled=False, server=sink)
+    stats = SessionStats()
+    state = SentenceState()
+    state.tail = "该模型还针对消费级gpu做了推理优化"
+    state.tail_mark = "。"
+    state.tail_lang = "zh"
+    state.tail_tier = "pz"
+    _flush_sentence_tail(state, printer, None, stats)
+    assert sink.texts == ["该模型还针对消费级gpu做了推理优化。"]
+    assert state.tail == ""
+    assert state.tail_mark == ""
 
 
 def test_flush_defers_residual_ct_false_periods_without_silence_gate():

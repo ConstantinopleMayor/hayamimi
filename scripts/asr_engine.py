@@ -1703,6 +1703,10 @@ class RoutedASR:
                 text = self.ko_spacer.space(text, reset_whitespace=True)
             except Exception:
                 pass
+        # Keep the pre-punctuation text for the sentence buffer: when the
+        # held tail and the next segment are re-punctuated together, CT must
+        # see raw text, not a string with a terminal period already appended.
+        raw_text = text
         if lang == "ja" and text.strip() and self.punct is not None:
             try:
                 text = self.punct.restore(text)
@@ -1738,7 +1742,8 @@ class RoutedASR:
             # empty results must not poison the sticky language; neither
             # must a too-short bootstrap noise blip (suppress_bootstrap_seed)
             self.last_lang = lang
-        return {"text": text, "lang": lang, "tier": tier, "lid_ms": lid_ms,
+        return {"text": text, "raw_text": raw_text,
+                "lang": lang, "tier": tier, "lid_ms": lid_ms,
                 "decode_ms": decode_ms, "probe_ms": probe_ms,
                 "text_source": text_source or tier,
                 "sv_timestamps": sv_timestamps}

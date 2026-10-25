@@ -762,11 +762,12 @@ class SemanticSplitter:
     split), so a speaker who never pauses grows one giant segment: every 0.5s
     draft re-decodes the whole thing and the final only lands when a real
     pause finally arrives. When a draft shows a sentence-end mark followed by
-    fresh text, the sentence is acoustically complete -- vad.flush()
-    finalizes the segment right there and the very next drain_segments emits
-    its final (sentence-sized segments, less draft-decode CPU, snappier
-    subtitles; the old max_speech encouragement stays as the fallback for
-    punctuation-free stretches).
+    fresh text, the sentence is acoustically complete. With lookahead_s > 0
+    the boundary is held for that much more audio first, so CT does not see
+    a fragment such as "他认为在"; vad.flush() then finalizes the segment
+    and the next drain_segments emits its complete sentences (sentence-sized
+    segments, less draft-decode CPU, snappier subtitles; the old max_speech
+    encouragement stays as the fallback for punctuation-free stretches).
 
     The flushed segment's tail may already hold the next sentence's first
     syllables (the draft lags the audio it describes):
@@ -778,16 +779,30 @@ class SemanticSplitter:
     syllable or two of the next sentence; liveable).
     """
 
-    def __init__(self):
+    def __init__(self, lookahead_s: float = 0.0):
         self._cooldown_until = 0.0
         self._flushed_end = None  # end sample index of the segment to trim
         # Approximate position of the accepted text boundary inside the
         # segment (0..1). Set only by a positive should_flush(); used to
         # choose the dip NEAREST that position instead of the last one.
         self._boundary_ratio = None
+        # A sentence boundary is a candidate first; it must survive long
+        # enough for the next words to arrive before we cut the audio. This
+        # is what keeps CT from receiving a fragment such as "他认为在":
+        # the boundary after 模型 is stable, but the following text at 8.8s
+        # is still incomplete. Fresh splitter instances used by unit tests
+        # default to 0 so their text-only behavior is unchanged.
+        self.lookahead_s = max(0.0, lookahead_s)
+        self._pending_since = None
+        self._pending_prefix = None
+
+    def _clear_pending(self) -> None:
+        self._pending_since = None
+        self._pending_prefix = None
 
     def should_flush(self, text: str, speech_s: float, audio_pos: float) -> bool:
         if speech_s < FLUSH_MIN_SPEECH_S or audio_pos < self._cooldown_until:
+            self._clear_pending()
             return False
         # strip the draft's trailing end-mark first: models/punctuators append
         # one to unfinished text, and an un-stripped trailing mark both
@@ -825,44 +840,81 @@ class SemanticSplitter:
                 cut = i
                 break
         if cut < 0:
+            self._clear_pending()
             return False
+        # Once a boundary has been accepted as a candidate, the tail is
+        # expected to grow while we collect right context. Do not reject it
+        # merely because it has crossed the stale-tail limit in the meantime;
+        # the candidate is re-checked by prefix below and will disappear if
+        # CT moves the boundary.
+        prefix = text[:cut + 1]
+        same_candidate = (self._pending_since is not None
+                          and prefix == self._pending_prefix)
         # the mark must be FOLLOWED by fresh text: the boundary sentence is
         # complete AND the next one has started speaking. Threshold is
         # script-aware: CJK needs 4 chars (morpheme-level evidence); Latin
         # text needs just 2+ chars of a new WORD -- English words average 5
         # ASCII chars, so 4 would keep delaying en's flush by a syllable.
         tail = text[cut + 1:].strip()
-        if tail and (tail[-1] in _NUM_TAIL_CHARS
-                     or tail.endswith(_DANGLING_NUM_TAILS)):
+        if not same_candidate and tail and (
+                tail[-1] in _NUM_TAIL_CHARS
+                or tail.endswith(_DANGLING_NUM_TAILS)):
             # the fresh text visibly ends inside a number ("…波及百分之",
             # "…涨到29"): the speaker is not done with it yet, and flushing
             # now lets the trim snap the audio mid-number (2026-10-18:
             # "百分之" + "1.4" rendered "百分之。1.4"). Wait -- the next
             # 0.5s partial re-checks once the number has finished.
+            self._clear_pending()
             return False
-        if text[cut] == "。" and tail.startswith(_WEAK_CONTINUATION_PREFIXES):
+        if (not same_candidate and self.lookahead_s <= 0
+                and text[cut] == "。" and tail.startswith(_WEAK_CONTINUATION_PREFIXES)):
             # A residual CT false period that the text repair could not
             # prove is still not allowed to split the utterance. The next
             # partial may finish the clause and produce a real boundary.
+            self._clear_pending()
             return False
         # a stale boundary (too much fresh speech behind it, see the
         # BOUNDARY_TAIL_MAX_* constants) must not flush either: the split
         # point it promises is no longer where the trim can cut
-        if len(tail) > (BOUNDARY_TAIL_MAX_CJK
-                        if _re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", tail)
-                        else BOUNDARY_TAIL_MAX_LATIN):
+        if not same_candidate and len(tail) > (
+                BOUNDARY_TAIL_MAX_CJK
+                if _re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", tail)
+                else BOUNDARY_TAIL_MAX_LATIN):
+            self._clear_pending()
             return False
         if _re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", tail):
             ok = len(tail) >= BOUNDARY_TAIL_CHARS
         else:
             ok = len(tail) >= 2
-        if ok:
-            self._boundary_ratio = (cut + 1) / max(len(text), 1)
-        return ok
+        if not ok:
+            self._clear_pending()
+            return False
+        self._boundary_ratio = (cut + 1) / max(len(text), 1)
+        if self.lookahead_s <= 0:
+            self._clear_pending()
+            return True
+        if (self._pending_since is None
+                or not prefix.startswith(self._pending_prefix or "")):
+            # First sighting, or the boundary moved: start a new candidate.
+            self._pending_since = audio_pos
+            self._pending_prefix = prefix
+            return False
+        if audio_pos - self._pending_since < self.lookahead_s:
+            return False
+        # The same text boundary survived the right-context window. The
+        # segment now includes the words CT needs to see the complete clause,
+        # so flushing here will not hand CT a fragment like "他认为在".
+        self._clear_pending()
+        return True
 
     def arm(self, audio_pos: float, flushed_end: int) -> None:
+        self._clear_pending()
         self._cooldown_until = audio_pos + FLUSH_COOLDOWN_S
         self._flushed_end = flushed_end
+
+    def is_flushed(self, seg_end: int) -> bool:
+        """True when this segment is the one armed for a semantic flush."""
+        return self._flushed_end is not None and seg_end == self._flushed_end
 
     def trim_if_flushed(self, seg_end: int, samples: np.ndarray,
                         sample_rate: int) -> np.ndarray:
@@ -1057,12 +1109,160 @@ class AudioHistory:
         return np.concatenate([pre, seg_samples])
 
 
+TAIL_EXPIRE_S = 1.5  # stale open sentence is dropped before the 2s UI clear
+
+
+class SentenceState:
+    """Text carried between VAD segments by the subtitle sentence boundary.
+
+    A segment can end inside the next sentence. The open sentence remains
+    here (and is shown as a partial) until the next segment gives CT enough
+    right context; CT then decides whether it is a separate sentence or the
+    same sentence continued. The tail is stored without the terminal mark so
+    the next segment can continue it.
+
+    The desktop overlay clears its card after 2s of no events. A tail that
+    survives that long belongs to a finished utterance: keeping it would make
+    the old last sentence reappear with the next utterance, so it expires
+    silently at TAIL_EXPIRE_S (no final event, which would reset the UI timer).
+    """
+
+    def __init__(self):
+        self.tail = ""
+        self.tail_lang = ""
+        self.tail_tier = ""
+        self.tail_speaker = ""
+        self.tail_mark = ""
+        self.tail_at = 0.0  # wall-clock, not audio time
+
+
+_SENTENCE_END_RE = None  # lazily built (this file imports `re as _re` later)
+
+
+def _split_sentence_tail(text: str) -> tuple[str, str]:
+    """Split a final into complete sentences and its still-open last sentence.
+
+    The final's terminal mark is deliberately not trusted as completion: CT
+    puts one on every decode, even when the audio stops mid-clause. Keeping
+    the last sentence back lets the next segment add the missing right
+    context before it is shown.
+    """
+    global _SENTENCE_END_RE
+    text = text.strip()
+    if not text:
+        return "", ""
+    if _SENTENCE_END_RE is None:
+        _SENTENCE_END_RE = _re.compile(r"[。！？!?…]+")
+    marks = list(_SENTENCE_END_RE.finditer(text))
+    if not marks:
+        return "", text
+    last = marks[-1]
+    if last.end() >= len(text.rstrip()):
+        # The last mark closes the current input. Hold the sentence after
+        # the previous mark (or the whole text if this is the only one).
+        cut = marks[-2].end() if len(marks) >= 2 else 0
+        complete = text[:cut].strip()
+        tail = text[cut:].strip()
+    else:
+        complete = text[:last.end()].strip()
+        tail = text[last.end():].strip()
+    tail = tail.lstrip("，,、 ").rstrip("。！？!?…，,、 ")
+    return complete, tail
+
+
+_PLAIN_CT_RE = None  # lazily built (this file imports `re as _re` later)
+
+
+def _plain_for_ct(text: str) -> str:
+    """Strip punctuation before re-running CT on a held tail + next segment.
+
+    Decimal points between digits (k3.1, 35.8) survive; sentence and clause
+    marks do not. CT must see raw text or it appends a second terminal mark.
+    """
+    global _PLAIN_CT_RE
+    if _PLAIN_CT_RE is None:
+        _PLAIN_CT_RE = _re.compile(
+            r"(?<!\d)[.,](?!\d)|[，。！？、；：…,!?;:]")
+    return _PLAIN_CT_RE.sub("", text)
+
+
+def _punctuate_combined(asr: RoutedASR, text: str, lang: str, tier: str) -> str:
+    """Re-run the language's punctuation model on held tail + next raw text."""
+    try:
+        if lang == "zh" and asr.punct_zh is not None:
+            return asr._replace(asr.punct_zh.restore(text), zh=True)
+        if lang == "ja" and asr.punct is not None:
+            return asr.punct.restore(text)
+    except Exception:
+        pass
+    return text
+
+
+def _trailing_mark(text: str) -> str:
+    match = _re.search(r"[。！？!?…]+$", text.strip())
+    return match.group(0) if match else ""
+
+
+def _complete_sentences(text: str) -> list[str]:
+    if not text.strip():
+        return []
+    return [s.strip() for s in _re.split(r"(?<=[。！？!?…])", text)
+            if s.strip()]
+
+
+def _merge_sentence_tail(tail: str, text: str) -> str:
+    if not tail:
+        return text
+    if not text:
+        return tail
+    overlap = _boundary_overlap(tail, text, limit=16)
+    if overlap:
+        return tail + text[overlap:]
+    return _join_final_texts([tail, text])
+
+
+def _publish_sentences(text: str, lang: str, tier: str, speaker: str,
+                       latency_ms: float, printer: PartialPrinter,
+                       translator_worker: "TranslationWorker | None",
+                       stats: SessionStats) -> None:
+    for sentence in _complete_sentences(text):
+        overlap = _boundary_overlap(stats.last_final_tail, sentence)
+        if overlap:
+            stats.boundary_overlaps += 1
+            print(f"[boundary] overlap {overlap} chars: "
+                  f"{stats.last_final_tail[-overlap:]!r} | "
+                  f"{sentence[:overlap]!r}", flush=True)
+        stats.last_final_tail = sentence[-8:]
+        seq = next(_UTT_SEQ)
+        print(f"[final] seq={seq} text={sentence}", flush=True)
+        if printer.server is not None:
+            printer.server.final(sentence, lang, speaker, latency_ms, tier, seq=seq)
+        if translator_worker is not None:
+            translator_worker.submit(sentence, lang, seq)
+
+
+def _flush_sentence_tail(state: SentenceState | None, printer: PartialPrinter,
+                         translator_worker: "TranslationWorker | None",
+                         stats: SessionStats, latency_ms: float = 0.0) -> None:
+    """Publish a held tail exactly once; no path may clear it silently."""
+    if state is None or not state.tail:
+        return
+    print(f"[tail] flush {state.tail!r}", flush=True)
+    _publish_sentences(state.tail + state.tail_mark, state.tail_lang,
+                       state.tail_tier, state.tail_speaker, latency_ms,
+                       printer, translator_worker, stats)
+    state.tail = ""
+    state.tail_mark = ""
+    state.tail_at = 0.0
+
+
 def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
                    printer: PartialPrinter, history: AudioHistory | None = None,
                    known_lang: str | None = None, refiner: "Refiner | None" = None,
                    translator_worker: "TranslationWorker | None" = None,
                    speaker_labeler=None,
-                   splitter: "SemanticSplitter | None" = None) -> int:
+                   splitter: "SemanticSplitter | None" = None,
+                   sentence_state: SentenceState | None = None) -> int:
     drained = 0
     while not vad.empty():
         segment = vad.front
@@ -1070,11 +1270,15 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         samples = np.asarray(segment.samples, dtype=np.float32)
         seg_start = segment.start
         seg_end = seg_start + len(samples)
+        was_flushed = False
         if splitter is not None:
             # a boundary-flushed segment gets its trailing next-sentence
             # syllables cut off (see SemanticSplitter.trim_if_flushed): spans
             # and preroll bounds must use the TRIMMED extent, or the refine
-            # pass would decode the same audio into two utterance groups
+            # pass would decode the same audio into two utterance groups.
+            # Remember the flush before trim clears the one-shot marker: the
+            # last sentence of such a segment is held for right context.
+            was_flushed = splitter.is_flushed(seg_end)
             trimmed = splitter.trim_if_flushed(seg_end, samples, sample_rate)
             if len(trimmed) != len(samples):
                 samples = trimmed
@@ -1096,37 +1300,72 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         if not result["text"].strip():
             continue  # non-speech (jingle/SFX): no line, no speaker, no span
 
-        overlap = _boundary_overlap(stats.last_final_tail, result["text"])
-        if overlap:
-            stats.boundary_overlaps += 1
-            print(f"[boundary] overlap {overlap} chars: "
-                  f"{stats.last_final_tail[-overlap:]!r} | "
-                  f"{result['text'][:overlap]!r}", flush=True)
-        stats.last_final_tail = result["text"][-8:]
+        segment_text = result["text"]
+        segment_raw = result.get("raw_text") or _plain_for_ct(segment_text)
+        display_text = segment_text
+        state = sentence_state
+        if state is not None and state.tail:
+            if state.tail_lang and state.tail_lang != result["lang"]:
+                # Do not glue two languages together; show the held sentence
+                # under its original language before starting the new one.
+                _flush_sentence_tail(state, printer, translator_worker, stats,
+                                     latency_ms)
+            else:
+                print(f"[tail] merge {state.tail!r}", flush=True)
+                combined_raw = _plain_for_ct(state.tail) + segment_raw
+                display_text = _punctuate_combined(
+                    asr, combined_raw, result["lang"], result.get("tier", ""))
+        if state is not None:
+            state.tail = ""
+
+        if was_flushed and state is not None:
+            before_last, held = _split_sentence_tail(display_text)
+            if before_last:
+                # Publish the completed earlier sentence now; the current
+                # last sentence still needs the next segment's right context.
+                complete_text = before_last
+                state.tail = held
+                state.tail_lang = result["lang"]
+                state.tail_tier = result.get("tier", "")
+                state.tail_mark = _trailing_mark(display_text)
+                state.tail_at = time.monotonic()
+                print(f"[tail] hold {state.tail!r}", flush=True)
+            elif was_flushed:
+                # A semantic flush can end with only the unfinished next
+                # sentence; hold it rather than publishing a fragment.
+                complete_text, held = "", display_text.strip().rstrip("。！？!?…，,、 ")
+                state.tail = held
+                state.tail_lang = result["lang"]
+                state.tail_tier = result.get("tier", "")
+                state.tail_mark = _trailing_mark(display_text)
+                state.tail_at = time.monotonic()
+            else:
+                complete_text, held = display_text, ""
+        else:
+            complete_text, held = display_text, ""
 
         speaker = ""
         if speaker_labeler is not None:
             speaker = speaker_labeler.label(samples, sample_rate) + "|"
+        if state is not None and state.tail:
+            state.tail_speaker = speaker.rstrip("|")
 
         stats.segments += 1
         stats.latencies_ms.append(latency_ms)
         printer.clear()
-        seq = next(_UTT_SEQ)  # utterance id for translation attachment
-        if printer.server is not None:
-            printer.server.final(result["text"], result["lang"], speaker.rstrip("|"),
-                                 latency_ms, result.get("tier", ""), seq=seq)
         probe_part = f", probe={result['probe_ms']:.0f}ms" if result.get("probe_ms") else ""
         print(f"[{speaker}{result['lang']}/{result.get('tier', '?')}] {result['text']}  "
               f"(seg={seg_s:.1f}s, lid={result['lid_ms']:.0f}ms{probe_part}, "
               f"decode={result['decode_ms']:.0f}ms, latency={latency_ms:.0f}ms)", flush=True)
-        if translator_worker is not None and result["text"].strip():
-            # Every finalized line goes to the worker regardless of its detected
-            # language. The worker hands it to API translators for ANY source
-            # language, and to the local ja-fixed MT translators only when the
-            # source is ja (see TranslationWorker._run).
-            translator_worker.submit(result["text"], result["lang"], seq)
+        _publish_sentences(complete_text, result["lang"], result.get("tier", ""),
+                           speaker.rstrip("|"), latency_ms, printer,
+                           translator_worker, stats)
+        if state is not None and state.tail and printer.server is not None:
+            # Keep the open sentence visible while waiting for the next
+            # segment's right context. It is a partial, not a final.
+            printer.server.partial(state.tail + state.tail_mark)
         if refiner is not None:
-            refiner.add_span(seg_start, seg_end, result["lang"], result["text"],
+            refiner.add_span(seg_start, seg_end, result["lang"], segment_text,
                              speaker.rstrip("|"))
     return drained
 
@@ -1935,13 +2174,20 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
                printer: PartialPrinter, refiner: "Refiner | None" = None,
                history: AudioHistory | None = None,
                translator_worker: "TranslationWorker | None" = None,
-               speaker_labeler=None):
+               speaker_labeler=None,
+               sentence_state: SentenceState | None = None):
     audio_pos = 0.0
     last_partial = 0.0
     early_lang = None  # LID result computed mid-utterance so finals skip it
-    splitter = SemanticSplitter()
+    # A 1s right-context window is needed for the 2026-10-24 clips: it lets
+    # CT see the whole date/time or prepositional phrase before the flush.
+    # Unit tests construct SemanticSplitter() with the default 0s for
+    # text-only checks.
+    splitter = SemanticSplitter(lookahead_s=1.0)
     if history is None:
         history = AudioHistory(sample_rate)
+    if sentence_state is None:
+        sentence_state = SentenceState()
     for chunk in chunks:
         if not isinstance(chunk, np.ndarray):
             # non-ndarray = a "flush now" signal (ws_ingest.FLUSH on client
@@ -1952,10 +2198,12 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
                               refiner=refiner,
                               translator_worker=translator_worker,
                               speaker_labeler=speaker_labeler,
-                              splitter=splitter):
+                              splitter=splitter,
+                              sentence_state=sentence_state):
                 early_lang = None
             if refiner is not None:
                 refiner.maybe_refine(int(audio_pos * sample_rate), force=True)
+            _flush_sentence_tail(sentence_state, printer, translator_worker, stats)
             continue
 
         vad.accept_waveform(chunk)
@@ -1977,15 +2225,22 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
             if printer.enabled and len(cur) >= sample_rate // 2:
                 partial_text = strip_draft_tail_marks(
                     asr.partial(cur, sample_rate, lang_hint=early_lang))
-                printer.show(partial_text)
+                display_partial = partial_text
+                if sentence_state.tail:
+                    display_partial = _merge_sentence_tail(
+                        sentence_state.tail, partial_text)
+                    # This partial is an SSE event: the UI's idle timer is
+                    # reset, so the held sentence is still live context.
+                    sentence_state.tail_at = time.monotonic()
+                printer.show(display_partial)
                 # Kick off a draft translation WHILE the speaker is still
                 # talking, so the confirmed line's translation isn't the
                 # first thing the viewer sees (API round-trips take 1-5s).
                 # The worker throttles submissions itself (growth-based +
                 # 1s cadence, see TranslationWorker.submit_partial).
-                if translator_worker is not None and partial_text.strip():
+                if translator_worker is not None and display_partial.strip():
                     translator_worker.submit_partial(
-                        partial_text, early_lang or getattr(asr, "last_lang", None) or "ja")
+                        display_partial, early_lang or getattr(asr, "last_lang", None) or "ja")
                 # Sentence-boundary flush (SemanticSplitter): the draft now
                 # carries punctuation, so a です/呢/?  followed by fresh words
                 # means the sentence is complete even though the speaker
@@ -2003,10 +2258,21 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
                           refiner=refiner,
                           translator_worker=translator_worker,
                           speaker_labeler=speaker_labeler,
-                          splitter=splitter):
+                          splitter=splitter,
+                          sentence_state=sentence_state):
             early_lang = None
         if refiner is not None and not vad.is_speech_detected():
             refiner.maybe_refine(int(audio_pos * sample_rate))
+        if (sentence_state.tail
+                and time.monotonic() - sentence_state.tail_at >= TAIL_EXPIRE_S):
+            # The overlay clears after 2s without events. If an open tail has
+            # survived that long, it belongs to the finished utterance; drop
+            # it silently (a final here would reset the UI's clear timer) so
+            # the next utterance cannot resurrect the old last sentence.
+            print(f"[tail] expire {sentence_state.tail!r}", flush=True)
+            sentence_state.tail = ""
+            sentence_state.tail_mark = ""
+            sentence_state.tail_at = 0.0
 
 
 def _build_stamp() -> str:
@@ -2281,12 +2547,16 @@ def main():
                                                   transcript_path=args.transcript,
                                                   translators=translators, stats=stats)
 
+    sentence_state = SentenceState()
+
     def finish(sr):
         vad.flush()
         drain_segments(vad, sr, asr, stats, printer, history,
                        refiner=refiner,
                        translator_worker=translator_worker,
-                       speaker_labeler=speaker_labeler)
+                       speaker_labeler=speaker_labeler,
+                       sentence_state=sentence_state)
+        _flush_sentence_tail(sentence_state, printer, translator_worker, stats)
         if refiner is not None:
             refiner.maybe_refine(0, force=True)
 
@@ -2301,7 +2571,7 @@ def main():
             samples, sr = read_wave(args.wav)  # resampled to SAMPLE_RATE if needed
             run_stream(wav_chunks(samples, sr, realtime=not args.no_realtime),
                        vad, sr, asr, stats, printer, refiner, history, translator_worker,
-                       speaker_labeler)
+                       speaker_labeler, sentence_state=sentence_state)
             finish(sr)
         elif input_mode == "ws":
             from ws_ingest import INGEST_PATH, IngestServer
@@ -2311,20 +2581,24 @@ def main():
             print(f"ws ingest: ws://{args.ws_host}:{args.ws_port}{INGEST_PATH}  "
                   f"(JSON handshake, then binary pcm_s16le frames)", file=sys.stderr)
             run_stream(ws_chunks(ingest), vad, SAMPLE_RATE, asr, stats, printer, refiner,
-                       history, translator_worker, speaker_labeler)
+                       history, translator_worker, speaker_labeler,
+                       sentence_state=sentence_state)
         elif input_mode == "speaker":
             run_stream(speaker_chunks(device_name=args.speaker_device),
                        vad, SAMPLE_RATE, asr, stats, printer, refiner, history,
-                       translator_worker, speaker_labeler)
+                       translator_worker, speaker_labeler,
+                       sentence_state=sentence_state)
         elif input_mode == "mix":
             run_stream(mix_chunks(mic_device_name=args.mic_device,
                                   speaker_device_name=args.speaker_device),
                        vad, SAMPLE_RATE, asr, stats, printer, refiner, history,
-                       translator_worker, speaker_labeler)
+                       translator_worker, speaker_labeler,
+                       sentence_state=sentence_state)
         else:
             run_stream(mic_chunks(device_name=args.mic_device), vad, SAMPLE_RATE, asr,
                        stats, printer, refiner, history,
-                       translator_worker, speaker_labeler)
+                       translator_worker, speaker_labeler,
+                       sentence_state=sentence_state)
     except KeyboardInterrupt:
         finish(SAMPLE_RATE)
     finally:
