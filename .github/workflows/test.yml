@@ -14,5 +14,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install sherpa-onnx numpy soundfile pytest
+      - name: Install dependencies
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            echo "pip install attempt ${attempt}"
+            if python -m pip install --prefer-binary --retries 5 --timeout 120 sherpa-onnx numpy soundfile pytest; then
+              exit 0
+            fi
+            sleep 10
+          done
+          exit 1
       - run: python -m pytest tests -q
