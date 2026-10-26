@@ -191,7 +191,7 @@ exe from inside the archive), then double-click
 - On startup it probes `http://127.0.0.1:8833/`; if the server is not
   running it locates the project root and starts the server hidden (logs
   to `%TEMP%\hayamimi-serve.log`). An already-running server is reused.
-- **Closing the window (✕ / Esc / panel quit) stops the transcribe server
+- **Closing the window (✕ / panel quit) stops the transcribe server
   again** — only `realtime_transcribe` python processes are touched, other
   python programs are left alone.
 - Without an OpenAI-compatible translation endpoint, launch with
@@ -225,7 +225,6 @@ format), an internal zip, and publishes the flat exe layout into
 | top slider | centered backdrop opacity (0–60%); resize the window by dragging either side edge |
 | bar / cross (MDL2) | minimize / quit |
 | `Ctrl+Alt+D` / `Ctrl+Alt+L` / `Ctrl+Alt+S` / `Ctrl+Alt+B` | click-through / language / settings panel / title-bar pin |
-| `Esc` | quit (also stops the server) |
 
 All icons are Segoe MDL2 Assets glyphs, so the whole row is tinted by one
 accent colour (see `main.js`); nothing carries an outline. The title bar
