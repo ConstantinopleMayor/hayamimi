@@ -163,37 +163,28 @@ def test_zh_repair_drops_spaced_digit_sentence_mark():
     assert repair(_NoJieba(), "开源了。第一张表里对比") == "开源了。第一张表里对比"
 
 
-def test_false_period_repair_high_confidence_patterns():
+def test_false_period_repair_only_drops_internal_phrase_cuts():
     from punct_zh import PunctuatorZh
 
     repair = PunctuatorZh._repair_false_periods
     assert repair("屏幕上是今天的。主要内容") == "屏幕上是今天的主要内容"
     assert repair("新版。模型专门针对") == "新版模型专门针对"
-    assert repair("第13天。宣布完整重置") == "第13天，宣布完整重置"
-    assert repair("五小时限制。开放dos功能") == "五小时限制，开放dos功能"
     assert repair("并免费开放。至10月31日") == "并免费开放至10月31日"
+    # A verb/time before a new clause is a real sentence end: do not demote
+    # it to a comma. The sentence tail state handles unfinished decodes.
+    assert repair("第13天。宣布完整重置") == "第13天。宣布完整重置"
+    assert repair("五小时限制。开放dos功能") == "五小时限制。开放dos功能"
 
 
-def test_terminal_fragment_period_is_dropped():
+def test_terminal_period_is_left_for_sentence_state():
     from punct_zh import PunctuatorZh
 
     repair = PunctuatorZh._repair_false_periods
-    assert repair("第13天。") == "第13天"
-    assert repair("新版。") == "新版"
-    assert repair("屏幕上是今天的。") == "屏幕上是今天的"
-    assert repair("今天的。") == "今天的"
-    assert repair("五小时限制。") == "五小时限制"
-    assert repair("损失大规模。") == "损失大规模"
-    assert repair("今天的资讯。") == "今天的资讯"
-    # a complete noun phrase can legitimately end a line
-    assert repair("主要内容。") == "主要内容。"
-    # SV-native punctuation: a lone 主要内容 is a split fragment
-    assert repair("主要内容。", aggressive=True) == "主要内容"
-    # complete short endings keep their period
-    assert repair("AI早报。") == "AI早报。"
-    assert repair("明天见。") == "明天见。"
-    assert repair("是的。") == "是的。"
-    assert repair("这是对的。") == "这是对的。"
+    for text in ("第13天。", "新版。", "屏幕上是今天的。", "今天的。",
+                 "五小时限制。", "损失大规模。", "今天的资讯。",
+                 "主要内容。", "AI早报。", "明天见。", "是的。",
+                 "这是对的。"):
+        assert repair(text) == text
 
 
 def test_false_period_repair_keeps_real_sentence_ends():

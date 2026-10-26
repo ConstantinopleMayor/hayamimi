@@ -1727,12 +1727,12 @@ class RoutedASR:
         elif lang == "zh" and text.strip() and text_source == "sv":
             # Manual SenseVoice (or the pz-empty fallback) carries native
             # punctuation. CT is deliberately not loaded here, but the
-            # pure false-period rules are model-free and still apply:
-            # 第13天。/新版。/今天的。 must not read as sentence ends.
+            # model-free phrase-cut rules still apply (今天的。主要内容 /
+            # 新版。模型); real terminal sentence ends are left alone.
             try:
                 from punct_zh import PunctuatorZh
 
-                text = PunctuatorZh._repair_false_periods(text, aggressive=True)
+                text = PunctuatorZh._repair_false_periods(text)
             except Exception:
                 pass
         text = self._replace(text, lang == "zh")

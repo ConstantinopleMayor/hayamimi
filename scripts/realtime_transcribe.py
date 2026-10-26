@@ -654,19 +654,6 @@ BOUNDARY_TAIL_CHARS = 4    # fresh characters required after the end mark
 # close the old VAD way -- later than ideal, never wrong.
 BOUNDARY_TAIL_MAX_CJK = 8
 BOUNDARY_TAIL_MAX_LATIN = 20
-# A period followed by one of these is almost certainly a CT false boundary
-# that _repair_false_periods could not prove (different left context): the
-# tail is visibly the continuation of the clause, not a new sentence. This
-# only defers the flush; it never inserts punctuation and never requires
-# silence, so strong ？/！ boundaries and pauseless strong 。 ends still flush.
-_WEAK_CONTINUATION_PREFIXES = (
-    "的", "地", "得", "着", "过", "和", "与", "及", "或", "至", "到",
-    "于", "在", "从", "向", "对", "为", "把", "被", "将", "并", "以及",
-    "并且", "宣布", "表示", "发布", "推出", "完成", "开始", "结束",
-    "进行", "开放", "上线", "更新", "回复", "包括", "支持", "接入",
-    "针对", "涉及", "实现", "提供", "使用", "取消", "重置", "限制",
-    "模型", "内容", "主要", "新版", "旧版",
-)
 TAIL_SCAN_S = 2.5          # trim scan window at the flushed segment's tail
 TRIM_SEARCH_S = 0.6        # prefer a dip this close to the text-predicted cut
 DIP_REL_GATE = 3.0         # a dip frame is <= this x the window's quiet floor
@@ -864,13 +851,6 @@ class SemanticSplitter:
             # now lets the trim snap the audio mid-number (2026-10-18:
             # "百分之" + "1.4" rendered "百分之。1.4"). Wait -- the next
             # 0.5s partial re-checks once the number has finished.
-            self._clear_pending()
-            return False
-        if (not same_candidate and self.lookahead_s <= 0
-                and text[cut] == "。" and tail.startswith(_WEAK_CONTINUATION_PREFIXES)):
-            # A residual CT false period that the text repair could not
-            # prove is still not allowed to split the utterance. The next
-            # partial may finish the clause and produce a real boundary.
             self._clear_pending()
             return False
         # a stale boundary (too much fresh speech behind it, see the

@@ -44,13 +44,9 @@ _PARTICLE_LEFT_RE = re.compile(
     r"我们|你们|他们|她们|它们|我|你|他|她|它|屏幕|视频|文章|"
     r"公司|产品|系统|平台|版本)的$")
 _ATTRIB_LEFT_RE = re.compile(r"(?:新版|旧版|主要|全新|现有|原来|当前|本次|这次|下次)$")
-_TIME_LEFT_RE = re.compile(r"第[0-9零〇一二两三四五六七八九十百]+[天周月年届]$")
 _VERB_LEFT_RE = re.compile(
     r"(?:限制|开放|宣布|回复|表示|包括|进行|支持|接入|针对|涉及|"
     r"实现|提供|使用|取消|重置)$")
-_CONT_VERB_RE = re.compile(
-    r"^(?:宣布|表示|发布|推出|完成|开始|结束|进行|开放|上线|更新|"
-    r"回复|指出|称|说|将|已|正|在|于|从|为|至|到)")
 
 
 def _latin_letter(c: str) -> bool:
@@ -210,18 +206,20 @@ class PunctuatorZh:
         return text
 
     @staticmethod
-    def _repair_false_periods(text: str, aggressive: bool = False) -> str:
-        """Remove/demote CT periods that clearly cut a phrase.
+    def _repair_false_periods(text: str) -> str:
+        """Remove CT periods that clearly cut a phrase.
 
-        Only internal `。` with a following CJK clause is considered. A
+        Only an INTERNAL `。` with a following CJK clause is considered. A
         pronoun/`这`/`那` after the mark is treated as a new sentence and
         left alone; otherwise the preceding suffix decides:
           - time/noun + 的  -> drop the period (今天的。主要内容)
           - attributive     -> drop the period (新版。模型)
-          - 第N天 + verb    -> comma (第13天。宣布)
-          - transitive verb -> comma (限制。开放)
           - verb + 至       -> drop the period (开放。至10月31日)
-        Terminal periods and explicit yes/no endings (是的。目的。) survive.
+
+        Real sentence ends are preserved. Terminal periods are deliberately
+        untouched: CT appends one to every decode, and the sentence state
+        (not a punctuation rewrite) decides whether an open last sentence
+        needs the next segment's right context.
         """
         def repl(m: re.Match) -> str:
             left = m.string[:m.start()].rstrip(" 　")
@@ -232,30 +230,11 @@ class PunctuatorZh:
                 return "。"
             if _PARTICLE_LEFT_RE.search(left) or _ATTRIB_LEFT_RE.search(left):
                 return ""
-            if _TIME_LEFT_RE.search(left) and _CONT_VERB_RE.match(right):
-                return "，"
-            if _VERB_LEFT_RE.search(left):
-                if right.startswith("至"):
-                    return ""
-                if _CONT_VERB_RE.match(right):
-                    return "，"
+            if _VERB_LEFT_RE.search(left) and right.startswith("至"):
+                return ""
             return "。"
 
-        text = _PERIOD_RE.sub(repl, text)
-        # A final can also END on a fragment because VAD closed the segment
-        # at a short pause (第13天。/新版。/昨天的。). There is no following
-        # text to repair, but the terminal period still reads as a false
-        # sentence end. Drop it for the same high-confidence suffixes;
-        # complete short replies (明天见。是的。对的。) are untouched.
-        stripped = text.rstrip()
-        if stripped.endswith("。"):
-            left = stripped[:-1].rstrip()
-            if (_PARTICLE_LEFT_RE.search(left) or _ATTRIB_LEFT_RE.search(left)
-                    or _TIME_LEFT_RE.search(left) or _VERB_LEFT_RE.search(left)
-                    or left.endswith(("大规模", "资讯"))
-                    or (aggressive and left.endswith(("主要内容",)))):
-                return stripped[:-1]
-        return text
+        return _PERIOD_RE.sub(repl, text)
 
     def restore(self, text: str) -> str:
         """Return `text` with ，。？！ inserted; never strips anything

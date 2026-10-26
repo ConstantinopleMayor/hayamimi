@@ -1385,20 +1385,6 @@ def test_flush_sentence_tail_publishes_and_clears_once():
     assert state.tail_mark == ""
 
 
-def test_flush_defers_residual_ct_false_periods_without_silence_gate():
-    """Text repair covers the known patterns; if a residual false period
-    still reaches the splitter, its continuation tail identifies it. This is
-    a text deferral, not a silence gate: ？/！ and strong periods are
-    untouched."""
-    assert not _flush("屏幕上是今天的。主要内容")
-    assert not _flush("新版。模型专门针对")
-    assert not _flush("第13天。宣布完整重置")
-    assert not _flush("五小时限制。开放dos功能")
-    assert not _flush("并免费开放。至10月31日")
-    # a real sentence followed by a new subject still flushes
-    assert _flush("AI早报。屏幕是今天")
-
-
 def test_flush_still_fires_on_english_period():
     # EN drafts use spaced ". Next" boundaries; the spaced guard is
     # digit-only and must not swallow them
