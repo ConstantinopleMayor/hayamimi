@@ -181,7 +181,7 @@ soft shadow, bilibili-style outline). Startup defaults: translation OFF
 (cycle the language button to EN/ZH/KO), bilingual display, 24pt.
 
 **Quickest start (no Node.js needed)**: download
-`hayamimi-subtitle-0.3.6-win-x64.7z` from [GitHub
+`hayamimi-subtitle-0.4.0-win-x64.7z` from [GitHub
 Releases](https://github.com/ConstantinopleMayor/hayamimi/releases),
 extract its contents **directly into** `hayamimi\desktop-subtitle\` (e.g.
 with 7-Zip: "Extract here" while that folder is the target -- never run the
@@ -207,7 +207,7 @@ npm install
 npm run dist
 ```
 
-which produces `dist/hayamimi-subtitle-0.3.6-win-x64.7z` (the user-facing
+which produces `dist/hayamimi-subtitle-0.4.0-win-x64.7z` (the user-facing
 format), an internal zip, and publishes the flat exe layout into
 `desktop-subtitle/`.
 
@@ -221,7 +221,8 @@ format), an internal zip, and publishes the flat exe layout into
 | EN / ZH / KO / OFF | cycle the displayed translation language |
 | mic / speaker / mic+speaker (MDL2) | cycle the audio source (button right of API): mic → speaker loopback → mic+speaker mix. Switching restarts the engine (~15–30 s of paused subtitles); speaker/mix are Windows-only |
 | API / 本地 | switch the translation channel |
-| top sliders | backdrop opacity (0–60%) and window width |
+| 双语 / 译文 | switch display mode (source + translation / translation only) |
+| top slider | centered backdrop opacity (0–60%); resize the window by dragging either side edge |
 | bar / cross (MDL2) | minimize / quit |
 | `Ctrl+Alt+D` / `Ctrl+Alt+L` / `Ctrl+Alt+S` / `Ctrl+Alt+B` | click-through / language / settings panel / title-bar pin |
 | `Esc` | quit (also stops the server) |
@@ -231,9 +232,12 @@ accent colour (see `main.js`); nothing carries an outline. The title bar
 auto-hides by default (`--no-bar-autohide` keeps it pinned), and while it is
 hidden the window is fully click-through.
 
-- Confirmed lines accumulate on screen (each lives ~8s) with the
-  in-progress draft updating inline while you speak; the window auto-fits
-  its height to the text.
+- The source and translation each get a fixed viewport (2 rows by default);
+  long continuous speech scrolls upward inside those viewports while the
+  newest rows stay centered. Drag either edge to resize: height is floored
+  to whole rows (and stays priority over the settings value), width reflows
+  and keeps the newest content visible. The title-bar 双语/译文 button
+  switches bilingual vs translation-only without opening the panel.
 - Text style — shadow, thin outline, bilibili-style thick outline (重墨),
   text opacity, bold — is adjustable in the settings menu, and every
   option has a matching CLI flag (`--text-shadow`, `--text-stroke`,
@@ -249,9 +253,10 @@ another window does NOT dismiss it; close with Esc / ✕ / the gear again):
 
 ![settings panel](docs/images/settings-panel.png)
 
-- **Text style**: font size (9 tiers), font family (12 choices, default
-  follows the page), bold, drop shadow, thin outline, heavy bilibili-style
-  ink outline, text opacity
+- **Text style**: font size (9 tiers), visible rows (1–6, shared by source
+  and translation), font family (12 choices, default follows the page),
+  bold, drop shadow, thin outline, heavy bilibili-style ink outline, text
+  opacity
 - **Translation**: target language, channel (local models / OpenAI API),
   display mode
 - **Translation API** (OpenAI-compatible): base URL / model / key with

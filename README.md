@@ -119,7 +119,7 @@ Windows 用户也可直接双击项目根的 **`启动早耳.bat`**：自动拉�
 GitHub Release 提供**独立便携包**（只含桌面窗，不含服务器/模型）：
 
 1. 从 [GitHub Releases](https://github.com/ConstantinopleMayor/hayamimi/releases) 下载
-   `hayamimi-subtitle-0.3.6-win-x64.7z`
+   `hayamimi-subtitle-0.4.0-win-x64.7z`
 2. **完整解压进** 源码目录的 `desktop-subtitle\`（合并，勿嵌套、勿只拷 exe；
    用 7-Zip / NanaZip 时选中该文件夹后"解压到当前文件夹"）
 3. 双击 `desktop-subtitle\早耳字幕.exe`
@@ -140,7 +140,7 @@ npm install
 npm run dist
 ```
 
-产出 `dist\hayamimi-subtitle-0.3.6-win-x64.7z`（用户分发格式）、内部 zip（整合包脚本依赖），
+产出 `dist\hayamimi-subtitle-0.4.0-win-x64.7z`（用户分发格式）、内部 zip（整合包脚本依赖），
 并自动把 exe 及相关文件平铺发布到 `desktop-subtitle\`。开发调试可用 `npm start`。
 
 **窗内操作**
@@ -155,14 +155,17 @@ npm run dist
 | EN / ZH / KO / OFF | 循环切换翻译语言 |
 | 麦克风 / 喇叭 / 两者 | 循环切换音频源（切换会重启识别引擎，约 15–30 秒；系统音频仅 Windows） |
 | API / 本地 | 切换翻译通道 |
-| 顶部滑块 | 背景卡片透明度（0–60%）与窗口宽度 |
+| 双语 / 译文 | 切换显示模式（原文+译文 / 仅译文） |
+| 顶部滑块 | 背景卡片透明度（0–60%，居中）；窗口宽度直接拖拽左右边缘 |
 | `Ctrl+Alt+D` / `Ctrl+Alt+L` / `Ctrl+Alt+S` / `Ctrl+Alt+B` | 点击穿透 / 语言 / 设置面板 / 标题栏常驻 |
+
+字幕窗默认原文、译文各显示 2 行，超出后在各自视口内向上滚动。可直接拖拽左右/上下改变尺寸：高度按整数行向下取整，拖拽优先并同步设置面板的“显示行数”；宽度变化后重新换行并保持最新内容可见。双语/仅译文也可在顶栏按钮切换。
 
 **设置面板**（齿轮打开；**常驻置顶**，点击其他窗口不会消失；Esc / ✕ / 再点齿轮关闭）
 
 ![设置面板](docs/images/settings-panel.png)
 
-- **字幕样式**：字号 9 档、字体 12 档（默认跟随页面）、粗体、阴影、描边、重墨（B 站弹幕式）、文字透明度
+- **字幕样式**：字号 9 档、显示行数 1–6 行（原文/译文共用）、字体 12 档（默认跟随页面）、粗体、阴影、描边、重墨（B 站弹幕式）、文字透明度
 - **翻译**：目标语言、通道（本地模型 / OpenAI API）、显示模式
 - **翻译 API**（OpenAI 兼容）：地址 / 模型 / 密钥 + **保存并测试**
   —— 先实测 `chat/completions`（2xx 才落盘），失败显示具体原因且不改动现有配置；

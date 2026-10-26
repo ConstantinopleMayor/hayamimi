@@ -44,6 +44,8 @@ function diag(msg) {
 }
 
 const DEFAULT_SIZE = 24;  // 24pt initial subtitle size
+const DEFAULT_ROWS = 2;   // visible text rows per flow (source and translation alike)
+const ROWS_CHOICES = [1, 2, 3, 4, 5, 6];
 const LANGS = ["zh", "en", "ko", "off"]; // button cycle: OFF -> ZH -> EN -> KO
 const LANG_LABEL = { en: "EN", zh: "ZH", ko: "KO", off: "OFF" };
 const SIZE_CHOICES = [12, 16, 20, 24, 32, 40, 48, 56, 64];
@@ -134,6 +136,7 @@ const RBTN_W = BTN_S * 2 + BTN_GAP; // total width of the two right buttons
 // "tr" = translation only (the source flow, incl. its in-progress draft, is
 // hidden; the translation flow keeps showing).
 const MODES = ["both", "tr"];
+const MODE_LABEL = { both: "双语", tr: "译文" };
 
 // Recognition model (settings panel). Mirrors asr_engine.MANUAL_MODELS: the
 // four everyday models stay as pills, v3/omni live in the "more" dropdown.
@@ -176,38 +179,35 @@ function lidModelLabel(model) {
 // menu keeps BG_MENU_CHOICES -- a few common tiers instead of 61 radios.
 const BG_CHOICES = Array.from({ length: 13 }, (_, i) => i * 5); // 5..60 step 5
 const BG_MENU_CHOICES = [0, 1, ...BG_CHOICES.filter((v) => v !== 0)]; // menu tiers
-// Backdrop slider + width slider, side by side, anchored to the LEFT edge of
-// the top strip (NOT centered): centering made the sliders drift when the
-// window width changed mid-drag (the thumb slid under the cursor -> jitter).
-// Fixed left anchor keeps their screen position stable while dragging.
-const SLIDER_X0 = 240;              // first slider's left (after the 7-button band)
-const SLIDER_W = 120;               // single slider width
-const SLIDER_GAP = 20;              // gap between the two sliders
-// Window-width slider range (px). Native edge-drag resize is unavailable on
-// this transparent/frameless window (no resize handles), so the width slider
-// drives setBounds() instead. 560 keeps a readable minimum AND keeps the
-// 7-button band + two sliders clear of the top-right window controls; 1200
-// covers wide monitors (the creation default stays 900).
+// Backdrop opacity is the only top-strip slider now. It sits at the exact
+// window midpoint; width adjustment uses the native left/right edge drag.
+const SLIDER_W = 90;
 const WIN_W_MIN = 560;
-const WIN_W_MAX = 1200;
-// Defensive window-height floor (auto-fit may report any value, but the
-// window must never collapse below the top strip). The card chrome alone
-// (6px top inset + 36px padding-top + 8px bottom padding + 12px shadow
-// margin) is 62px, so a smaller window could not even show the frame; in
-// normal rendering a one-line card measures ~90px, so this floor never
-// actually clips content -- it only guards extreme failures.
-const MIN_WIN_H = 66;
+// Fixed-row subtitle geometry. The window no longer grows with content:
+// rows are quantized from the user-dragged height, and each flow gets its
+// own fixed viewport. LINE_HEIGHT_RATIO mirrors the CSS line-height.
+const LINE_HEIGHT_RATIO = 1.35;
+const VIEW_GAP = 4;                 // px between the source and translation viewports
+const CARD_TOP = 6;                 // #box top inset (shadow room)
+const CARD_PAD_TOP = 36;            // title-bar row inside the card
+const CARD_PAD_BOTTOM = 8;
+const CARD_BORDER = 2;              // 1px top + 1px bottom
+const CARD_SHADOW = 6;              // outside-shadow room below the card (same as sides)
+const CARD_CHROME = CARD_TOP + CARD_PAD_TOP + CARD_PAD_BOTTOM
+  + CARD_BORDER + CARD_SHADOW;
+const SCROLL_MS = 120;              // renderer smooth one-step scroll
+const REFLOW_MS = 80;               // renderer width-reflow debounce
+const MAX_SEGMENTS = 400;           // DOM history cap only (never a visible char cap)
 // (setShape was tried to clip mouse events below the card, but with
 // resizable:true the window truly fits the content, so the area below the
 // card is OUTSIDE the window -- no clipping needed; setShape only killed
 // the native resize border, so it was removed entirely.)
 
-// Button row (left to right): lock | pin | settings | lang | API | audio.
-// Display mode (双语/仅译文) lives only in the settings panel. The pin button
-// (right of the lock) toggles the title-bar auto-hide: armed = the bar fades
-// away when the cursor leaves the window, pinned = the bar stays. The
-// pass-through keep-clickable band counts 6 buttons now.
-const NBUTTONS = 6;
+// Button row (left to right): lock | pin | settings | lang | API | mode |
+// audio. The pin button (right of the lock) toggles the title-bar auto-hide:
+// armed = the bar fades away when the cursor leaves the window, pinned = the
+// bar stays. The pass-through keep-clickable band counts 7 buttons.
+const NBUTTONS = 7;
 
 // Audio capture source, fixed at server STARTUP (realtime_transcribe.py picks
 // the backend from --input), so switching it RESTARTS the server:
@@ -315,7 +315,8 @@ function parseArgs() {
   const opts = {
     url: "http://localhost:8833/",
     width: 900,
-    height: 130,
+    height: 0, // 0 = derive from DEFAULT_ROWS; --height overrides the initial window
+    rows: DEFAULT_ROWS,
     show: "both",
     mode: "both", // "both" = bilingual rows, "tr" = translation only
     passthrough: false,
@@ -336,6 +337,10 @@ function parseArgs() {
     const a = args[i];
     if (a === "--width") opts.width = parseInt(args[++i], 10) || opts.width;
     else if (a === "--height") opts.height = parseInt(args[++i], 10) || opts.height;
+    else if (a === "--rows") {
+      const v = parseInt(args[++i], 10);
+      opts.rows = ROWS_CHOICES.includes(v) ? v : DEFAULT_ROWS;
+    }
     else if (a === "--size") opts.size = parseInt(args[++i], 10) || DEFAULT_SIZE;
     else if (a === "--font") opts.font = args[++i] || "";
     else if (a === "--lang") opts.lang = args[++i] || "zh";
@@ -735,6 +740,7 @@ let lidErr = "";        // last apply failure, shown in the panel status line
 let audioInput = "mic"; // capture source (mic/speaker/mix); switching restarts the server
 let serverBusy = false; // audio-source restart in flight: the audio button shows the hourglass icon, re-entry blocked
 let mode = "both";  // "both" = bilingual rows, "tr" = translation only
+let rows = DEFAULT_ROWS; // one shared visible row count for source AND translation
 let bg = 1;         // subtitle-card backdrop opacity in percent (1% startup)
 let bold = true;    // bold subtitle text (source + translation flows; default ON)
 let textShadow = "std";   // text-shadow tier: off / std / heavy (default std)
@@ -764,11 +770,11 @@ function pointInRightBand(b, x, y) {
   return pointInRect(x, y, x0, b.y, x1, y2);
 }
 function pointInTopCenterBand(b, x, y) {
-  // two side-by-side sliders (bg + width) anchored at the LEFT of the top
-  // strip: fixed x span (does not depend on the window width, so the
-  // keep-clickable zone matches the sliders exactly, even mid-drag)
-  const x0 = b.x + SLIDER_X0 - BAND_PAD;
-  const x1 = b.x + SLIDER_X0 + SLIDER_W * 2 + SLIDER_GAP + BAND_PAD;
+  // One centered opacity slider: the keep-clickable zone follows the window
+  // midpoint and matches the slider exactly, even mid-drag.
+  const cx = b.x + b.width / 2;
+  const x0 = cx - SLIDER_W / 2 - BAND_PAD;
+  const x1 = cx + SLIDER_W / 2 + BAND_PAD;
   const y2 = b.y + BTN_Y0 + BTN_S + BAND_PAD;
   return pointInRect(x, y, x0, b.y, x1, y2);
 }
@@ -791,6 +797,7 @@ const BAR_HIDE_DELAY_MS = 350;  // grace period, no flicker when grazing an edge
 let barAutohide = true;         // false via --no-bar-autohide or the pin button
 let barVisible = true;          // last value pushed to the renderer
 let outsideSince = 0;           // timestamp the cursor left (0 = currently inside)
+let barTransitionUntil = 0;     // ignore native resize row quantization mid-transition
 
 function isCursorInWindow() {
   if (!win || win.isDestroyed()) return false;
@@ -807,17 +814,26 @@ function refreshBarVisibility() {
   let visible = true;
   if (barAutohide && !inside) visible = (Date.now() - outsideSince) < BAR_HIDE_DELAY_MS;
   if (visible === barVisible) return;
+  const b = win.getContentBounds();
+  // Do not let the programmatic height change be mistaken for a user row
+  // drag. The bottom-anchored viewport group keeps the text fixed even while
+  // the renderer's bar class and the window bounds catch up with each other.
+  barTransitionUntil = Date.now() + 350;
+  // Shrinking first lowers the floor; growing first raises the window, then
+  // raises the floor. This lets the hidden one-row state actually shrink.
+  if (!visible) win.setMinimumSize(WIN_W_MIN, minWindowHeight(false));
   barVisible = visible;
-  const b = win.getBounds();
-  const dy = BAR_H;
-  win.setBounds({
+  const bottom = b.y + b.height;
+  const targetH = exactWindowHeight(rows, visible);
+  setContentBoundsProgrammatic({
     x: b.x,
-    y: visible ? b.y - dy : b.y + dy,
+    y: bottom - targetH,
     width: b.width,
-    height: visible ? b.height + dy : b.height - dy,
+    height: targetH,
   });
+  if (visible) win.setMinimumSize(WIN_W_MIN, minWindowHeight(true));
   win.webContents.send("hmy:bar", visible);
-  diag("bar " + (visible ? "shown" : "hidden"));
+  diag("bar " + (visible ? "shown" : "hidden") + " h=" + targetH + " rows=" + rows);
 }
 
 function refreshMouseMode() {
@@ -835,8 +851,9 @@ function makeCss() {
   const lx1 = BTN_X0 + BTN_S + BTN_GAP;
   const lx2 = BTN_X0 + (BTN_S + BTN_GAP) * 2;
   const lx3 = BTN_X0 + (BTN_S + BTN_GAP) * 3;
-    const lx4 = BTN_X0 + (BTN_S + BTN_GAP) * 4;
-    const lx5 = BTN_X0 + (BTN_S + BTN_GAP) * 5;
+  const lx4 = BTN_X0 + (BTN_S + BTN_GAP) * 4;
+  const lx5 = BTN_X0 + (BTN_S + BTN_GAP) * 5;
+  const lx6 = BTN_X0 + (BTN_S + BTN_GAP) * 6;
   // subtitle-card backdrop: the bg slider only changes the card FILL. The
   // frame (1px border + soft shadow) and the window insets that make that
   // shadow VISIBLE live in the base #box rule below and in applyBg(): an
@@ -877,26 +894,40 @@ function makeCss() {
        is clipped the moment the card touches the window edge (that is what
        killed the earlier attempt, which was an OS window shadow: impossible
        on a transparent frameless window; a CSS box-shadow works, it just
-       needs this room, plus the bottom margin in fitHeight()).
+       needs this room; the card now fills the window down to the 6px
+       shadow margin, matching the other three sides.)
        The padding pair keeps the TEXT pixel-identical to the old layout
        where the card sat below the band (6+36 == 2+40, 6+8 == 0+14). */
-    #box{top:6px!important;bottom:auto!important;left:6px!important;
+    #box{top:6px!important;bottom:6px!important;left:6px!important;
          right:6px!important;text-align:left!important;
          max-width:100%;white-space:normal;box-sizing:border-box;
+         display:flex!important;flex-direction:column!important;
          padding:36px 8px 8px!important;border-radius:14px!important;
          border:1px solid rgba(255,255,255,0.22)!important;
-         box-shadow:0 0 7px rgba(0,0,0,0.55)!important;}
+         box-shadow:0 0 6px rgba(0,0,0,0.55)!important;}
     #final-line,#partial-line{display:none!important;}
-    /* translation-only mode: hide the whole source flow (confirmed segments
-       and its in-progress draft); only the translation flow stays visible */
-    html.hmy-tr-only #hmy-txt-flow{display:none!important;}
+    /* translation-only mode: hide the whole source viewport (confirmed
+       segments + draft). The translation viewport keeps the shared rows. */
+    html.hmy-tr-only #hmy-txt-vp{display:none!important;}
+    /* Two fixed-height viewports anchored to the card bottom. The title bar
+       grows/shrinks the card upward from that fixed bottom edge, so showing
+       or hiding it can never move the visible subtitle text. The heights are
+       set by __hmySetRows(); content scrolls INSIDE the viewports. */
+    #hmy-vp-stack{display:flex;flex-direction:column;gap:${VIEW_GAP}px;
+         width:100%;margin-top:auto;margin-bottom:0;}
+    #hmy-txt-vp,#hmy-tr-vp{display:flex;flex-direction:column;width:100%;
+         flex:none;overflow:hidden;box-sizing:border-box;
+         justify-content:flex-start;}
+    #hmy-txt-vp.hmy-overflow,#hmy-tr-vp.hmy-overflow{display:block;}
     /* source-text flow: confirmed segments + trailing in-progress draft */
     #hmy-txt-flow{display:block;width:100%;box-sizing:border-box;
          font-size:${opts.size}px!important;color:#fff;
          ${textShadow ? "text-shadow:" + textShadow + ";" : ""}
          ${opacityCss}
-         white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;
-         line-height:1.35;}
+         white-space:pre-wrap;overflow-wrap:anywhere;
+         text-align:justify;text-align-last:left;
+         text-justify:inter-character;direction:ltr;
+         line-height:${LINE_HEIGHT_RATIO};}
     .hmy-txt-seg{display:inline;}
     .hmy-txt-part{display:inline;font-style:italic;opacity:0.9;}
     /* translation flow: confirmed per-segment translations + trailing draft */
@@ -904,8 +935,10 @@ function makeCss() {
          font-size:${opts.size}px!important;color:#ffd75e;
          ${textShadow ? "text-shadow:" + textShadow + ";" : ""}
          ${opacityCss}
-         white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;
-         line-height:1.25;}
+         white-space:pre-wrap;overflow-wrap:anywhere;
+         text-align:justify;text-align-last:left;
+         text-justify:inter-character;direction:ltr;
+         line-height:${LINE_HEIGHT_RATIO};}
     .hmy-tr-seg{display:inline;}
     .hmy-tr-draft{display:inline;font-style:italic;}
     /* (fade-out removed: segments disappear immediately at lifetime end) */
@@ -971,7 +1004,9 @@ color:#d68c27; /* same opencode theme family, LIGHT-mode orange: a step
                   font-size:12px;}
     #hmy-api-btn{left:${lx4}px;font-family:'Segoe UI',sans-serif;font-weight:700;
                  font-size:12px;}
-    #hmy-audio-btn{left:${lx5}px;}
+    #hmy-mode-btn{left:${lx5}px;font-family:'Segoe UI',sans-serif;font-weight:700;
+                  font-size:12px;}
+    #hmy-audio-btn{left:${lx6}px;}
     /* top-right window controls: minimize (E921) and close (E8BB) */
     #hmy-min-btn{right:${RBX + BTN_S + BTN_GAP}px;}
     #hmy-close-btn{right:${RBX}px;}
@@ -981,30 +1016,23 @@ color:#d68c27; /* same opencode theme family, LIGHT-mode orange: a step
                    box-shadow:0 2px 8px rgba(0,0,0,0.45);}
     .hmy-btn:active{transform:translateY(1px);}
     .hmy-btn *{pointer-events:none;}
-    /* top-center sliders (backdrop opacity + window width): thin track,
-       round thumb, centered side by side on the window's top strip */
+    /* centered backdrop-opacity slider: thin track, round thumb */
     #hmy-bg-slider{position:fixed;top:${BTN_Y0 + (BTN_S - 10) / 2}px;
-         left:${SLIDER_X0}px;width:${SLIDER_W}px;
+         left:50%;transform:translateX(-50%);width:${SLIDER_W}px;
          height:10px;-webkit-appearance:none;appearance:none;background:transparent;
          cursor:pointer!important;user-select:none;-webkit-app-region:no-drag;
          transition:opacity .18s ease;
          z-index:2147483647;outline:none;}
-    #hmy-w-slider{position:fixed;top:${BTN_Y0 + (BTN_S - 10) / 2}px;
-         left:${SLIDER_X0 + SLIDER_W + SLIDER_GAP}px;width:${SLIDER_W}px;
-         height:10px;-webkit-appearance:none;appearance:none;background:transparent;
-         cursor:pointer!important;user-select:none;-webkit-app-region:no-drag;
-         transition:opacity .18s ease;
-         z-index:2147483647;outline:none;}
-    #hmy-bg-slider::-webkit-slider-runnable-track,#hmy-w-slider::-webkit-slider-runnable-track{height:4px;border-radius:2px;
+    #hmy-bg-slider::-webkit-slider-runnable-track{height:4px;border-radius:2px;
          background:rgba(255,255,255,0.15);transition:background .15s ease;}
-    #hmy-bg-slider::-webkit-slider-thumb,#hmy-w-slider::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    #hmy-bg-slider::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
          border-radius:50%;background:rgba(255,255,255,0.85);margin-top:-3px;
          border:1px solid rgba(255,255,255,0.30);
          box-shadow:0 1px 3px rgba(0,0,0,0.8),0 0 2px rgba(0,0,0,0.9);
          transition:transform .08s ease,box-shadow .15s ease;}
-    #hmy-bg-slider:hover::-webkit-slider-runnable-track,#hmy-w-slider:hover::-webkit-slider-runnable-track{background:rgba(255,255,255,0.28);}
-    #hmy-bg-slider:hover::-webkit-slider-thumb,#hmy-w-slider:hover::-webkit-slider-thumb{background:rgba(255,255,255,0.85);}
-    #hmy-bg-slider:active::-webkit-slider-thumb,#hmy-w-slider:active::-webkit-slider-thumb{transform:scale(1.15);}
+    #hmy-bg-slider:hover::-webkit-slider-runnable-track{background:rgba(255,255,255,0.28);}
+    #hmy-bg-slider:hover::-webkit-slider-thumb{background:rgba(255,255,255,0.85);}
+    #hmy-bg-slider:active::-webkit-slider-thumb{transform:scale(1.15);}
     /* API channel unavailable (no openai_translate.json): dimmed, inert */
     .hmy-btn.off{opacity:0.45;background:transparent;
                  border-color:transparent;cursor:default!important;}
@@ -1016,8 +1044,7 @@ color:#d68c27; /* same opencode theme family, LIGHT-mode orange: a step
        time, which keeps the subtitle text and the card's bottom edge exactly
        where they were (no jump when the pointer crosses the window). */
     html.hmy-bar-off .hmy-btn,
-    html.hmy-bar-off #hmy-bg-slider,
-    html.hmy-bar-off #hmy-w-slider{opacity:0;pointer-events:none;}
+    html.hmy-bar-off #hmy-bg-slider{opacity:0;pointer-events:none;}
     html.hmy-bar-off #box{padding-top:6px!important;}
   `;
 }
@@ -1065,6 +1092,11 @@ function makeInitJs() {
       console.log('hmy: btn-api-click');
       window.desktopSubtitle.cycleApi();
     });
+    var modeBtn = mkBtn('hmy-mode-btn', '${MODE_LABEL[opts.mode] || "双语"}', '切换显示: 双语(原文+译文) / 仅译文');
+    modeBtn.addEventListener('click', function(){
+      console.log('hmy: btn-mode-click');
+      window.desktopSubtitle.toggleMode();
+    });
     var audioBtn = mkBtn('hmy-audio-btn', ${JSON.stringify(ICON[audioInput] || ICON.mic)}, ${JSON.stringify(inputTitle())});
     audioBtn.className = ${JSON.stringify(audioInput === "mix" ? "hmy-btn two" : "hmy-btn")};
     audioBtn.addEventListener('click', function(){
@@ -1109,29 +1141,16 @@ function makeInitJs() {
       console.log('hmy: bg-slider-input ' + bgSlider.value);
       window.desktopSubtitle.setBgAlpha(parseInt(bgSlider.value, 10));
     });
-    var wSlider = document.createElement('input');
-    wSlider.type = 'range';
-    wSlider.id = 'hmy-w-slider';
-    wSlider.min = '560';
-    wSlider.max = '1200';
-    wSlider.step = '10';
-    wSlider.value = '900'; // equals the window's creation width
-    wSlider.title = '窗口宽度调节 (560-1200px)';
-    lockTrack(wSlider);
-    wSlider.addEventListener('input', function(){
-      console.log('hmy: w-slider-input ' + wSlider.value);
-      window.desktopSubtitle.setWidth(parseInt(wSlider.value, 10));
-    });
     document.body.appendChild(lock);
     document.body.appendChild(pinBtn);
     document.body.appendChild(menuBtn);
     document.body.appendChild(langBtn);
     document.body.appendChild(apiBtn);
+    document.body.appendChild(modeBtn);
     document.body.appendChild(audioBtn);
     document.body.appendChild(minBtn);
     document.body.appendChild(closeBtn);
     document.body.appendChild(bgSlider);
-    document.body.appendChild(wSlider);
     console.log('hmy: buttons injected');
 
     // --- title-bar auto-hide: the main process polls the cursor (40ms) and
@@ -1141,6 +1160,12 @@ function makeInitJs() {
     if (window.desktopSubtitle.onBarVisible) {
       window.desktopSubtitle.onBarVisible(function(on){
         document.documentElement.classList.toggle('hmy-bar-off', !on);
+        // Recompute the fixed viewports after the card padding changes. The
+        // group is bottom-anchored, so this only refreshes scroll geometry;
+        // it never shifts the visible text.
+        requestAnimationFrame(function(){
+          if (window.__hmyRelayout) window.__hmyRelayout(false);
+        });
       });
     }
 
@@ -1156,31 +1181,44 @@ function makeInitJs() {
     // slow) can still attach to its segment.
     //
     // Lifetime policy (replaces the old per-segment 8s TTL, which re-flowed
-    // the text at random moments while reading): content is.STABLE while
-    // anyone is speaking or translating -- the ONLY changes are at a new
+    // the text at random moments while reading): content is STABLE while
+    // anyone is speaking or translating -- the only changes are at a new
     // final's arrival. When no event has been seen for IDLE_CLEAR_MS
-    // (silence, paused video, just finished reading), the whole card is
-    // cleared once; during very long continuous speech a roll-up cap keeps
-    // the card bounded, dropping the OLDEST segments at the same moment a
-    // new one appends (scroll-with-reading, never mid-read).
-    var IDLE_CLEAR_MS = 2000;  // no SSE event at all for this long -> clear the card
-    var MAX_CHARS = 200;       // roll-up cap: this many source chars on screen -> drop oldest on append
+    // (silence, paused video, just finished reading), the card clears once.
+    // Long continuous speech scrolls INSIDE the fixed viewports; it never
+    // grows the window or changes the displayed row count.
+    var IDLE_CLEAR_MS = 5000;  // no SSE event at all for this long -> clear the card
+    var MAX_SEGMENTS = ${MAX_SEGMENTS}; // DOM history cap only, not a display cap
+    var rows = ${JSON.stringify(opts.rows || DEFAULT_ROWS)};
+    window.__hmyRows = rows;
     var box = document.getElementById('box');
+    var txtVp = null, trVp = null;
     var txtFlow = null, trFlow = null, txtPart = null, trDraft = null;
     var segs = {};        // seq -> {srcEl, trEl}
     var lastSeq = 0;
     var idleTimer = null;
-    var seqOrder = [];    // confirmed seqs in append order (roll-up eviction)
+    var seqOrder = [];    // confirmed seqs in append order (history pruning)
     if (box) {
+      var stack = document.createElement('div');
+      stack.id = 'hmy-vp-stack';
+      box.appendChild(stack);
+
+      txtVp = document.createElement('div');
+      txtVp.id = 'hmy-txt-vp';
+      stack.appendChild(txtVp);
       txtFlow = document.createElement('div');
       txtFlow.id = 'hmy-txt-flow';
-      box.appendChild(txtFlow);
+      txtVp.appendChild(txtFlow);
       txtPart = document.createElement('span');
       txtPart.className = 'hmy-txt-part';
       txtFlow.appendChild(txtPart);
+
+      trVp = document.createElement('div');
+      trVp.id = 'hmy-tr-vp';
+      stack.appendChild(trVp);
       trFlow = document.createElement('div');
       trFlow.id = 'hmy-tr-flow';
-      box.appendChild(trFlow);
+      trVp.appendChild(trFlow);
       trDraft = document.createElement('span');
       trDraft.className = 'hmy-tr-draft';
       trFlow.appendChild(trDraft);
@@ -1204,25 +1242,123 @@ function makeInitJs() {
         trDraft = document.createElement('span');
         trDraft.className = 'hmy-tr-draft';
         trFlow.appendChild(trDraft);
+        relayoutAll(false);
       }, IDLE_CLEAR_MS);
     }
-    function dropOldest() {
-      // roll-up eviction, called only at append time: while the source flow
-      // holds >= MAX_CHARS, remove the oldest confirmed segment (source +
-      // translation rows together) -- the card stays bounded during
-      // continuous speech, and the reflow coincides with the new sentence
-      // appearing (scroll-with-reading, never mid-read)
-      while (txtFlow.textContent.trim().length >= MAX_CHARS) {
+    function pruneHistory() {
+      // Remove only invisible-old DOM history; no character cap is shown or
+      // enforced. Keeping the latest 400 final segments is enough for late
+      // translations while avoiding unbounded growth in hour-long sessions.
+      while (seqOrder.length > MAX_SEGMENTS) {
         var old = seqOrder.shift();
-        if (old === undefined) break;
         var sg = segs[old];
         if (!sg) { delete segs[old]; continue; }
         if (sg.srcEl && sg.srcEl.parentNode) sg.srcEl.parentNode.removeChild(sg.srcEl);
         if (sg.trEl && sg.trEl.parentNode) sg.trEl.parentNode.removeChild(sg.trEl);
         delete segs[old];
-        if (txtFlow.textContent.trim().length < MAX_CHARS) break;
       }
     }
+
+    // --- fixed-row viewports + internal scrolling -------------------------
+    // The viewport heights do not follow content. __hmySetRows() updates the
+    // shared integer row count; layoutViewport() only changes scrollTop, so
+    // the visible rows stay in the same centered place while older lines
+    // move out above.
+    var scrollAnims = new WeakMap();
+    function rowHeightPx() {
+      if (txtFlow) {
+        var lh = parseFloat(getComputedStyle(txtFlow).lineHeight);
+        if (isFinite(lh) && lh > 0) return lh;
+      }
+      return ${opts.size} * ${LINE_HEIGHT_RATIO};
+    }
+    function applyViewportHeights() {
+      if (!txtVp || !trVp) return;
+      var h = rows * rowHeightPx();
+      txtVp.style.height = h + 'px';
+      trVp.style.height = h + 'px';
+    }
+    function cancelScrollAnim(vp) {
+      var a = scrollAnims.get(vp);
+      if (a) { cancelAnimationFrame(a.raf); scrollAnims.delete(vp); }
+    }
+    function setScrollNow(vp, target) {
+      cancelScrollAnim(vp);
+      vp.scrollTop = target;
+    }
+    function animateScroll(vp, target, duration) {
+      cancelScrollAnim(vp);
+      var start = vp.scrollTop;
+      if (duration <= 0 || Math.abs(target - start) < 0.5) {
+        vp.scrollTop = target;
+        return;
+      }
+      var t0 = performance.now();
+      var anim = { raf: 0 };
+      function step(now) {
+        var p = Math.min(1, (now - t0) / duration);
+        var e = 1 - Math.pow(1 - p, 3);
+        vp.scrollTop = start + (target - start) * e;
+        if (p < 1) anim.raf = requestAnimationFrame(step);
+        else scrollAnims.delete(vp);
+      }
+      anim.raf = requestAnimationFrame(step);
+      scrollAnims.set(vp, anim);
+    }
+    function layoutViewport(vp, flow, smooth) {
+      if (!vp || !flow) return;
+      var overflowing = flow.scrollHeight - vp.clientHeight > 1;
+      vp.classList.toggle('hmy-overflow', overflowing);
+      if (!overflowing) {
+        setScrollNow(vp, 0);
+        return;
+      }
+      var maxTop = Math.max(0, flow.scrollHeight - vp.clientHeight);
+      // The viewport stays where it is; only its content moves. This keeps
+      // the newest N rows inside the same vertically-centered block.
+      if (smooth) animateScroll(vp, maxTop, ${SCROLL_MS});
+      else setScrollNow(vp, maxTop);
+    }
+    function relayoutAll(smooth) {
+      applyViewportHeights();
+      layoutViewport(txtVp, txtFlow, smooth);
+      layoutViewport(trVp, trFlow, smooth);
+    }
+    window.__hmySetRows = function(next) {
+      rows = next;
+      window.__hmyRows = rows;
+      relayoutAll(false);
+    };
+    window.__hmyRelayout = function(smooth) {
+      relayoutAll(!!smooth);
+    };
+    // Width drag changes wrapping, not row count or window height. Debounced
+    // reflow always returns the newest line to the visible bottom of its
+    // fixed viewport; when everything fits, the flow re-centers.
+    var reflowTimer = null;
+    var lastBoxW = box ? box.clientWidth : 0;
+    function scheduleReflow() {
+      if (reflowTimer) clearTimeout(reflowTimer);
+      reflowTimer = setTimeout(function() {
+        reflowTimer = null;
+        relayoutAll(false);
+      }, ${REFLOW_MS});
+    }
+    if (box && window.ResizeObserver) {
+      var ro = new ResizeObserver(function() {
+        var w = box.clientWidth;
+        if (w !== lastBoxW) {
+          lastBoxW = w;
+          scheduleReflow();
+        }
+      });
+      ro.observe(box);
+    }
+    window.addEventListener('resize', function() {
+      var w = box ? box.clientWidth : 0;
+      if (w !== lastBoxW) { lastBoxW = w; scheduleReflow(); }
+    });
+
     window.__hmyShowTr = function(){
       // language switch: refresh only the LATEST confirmed translation from
       // the per-language cache (older segments keep their history); drafts
@@ -1231,25 +1367,8 @@ function makeInitJs() {
       var sg = segs[lastSeq];
       if (sg && sg.trEl) sg.trEl.textContent = txt;
       if (trDraft) trDraft.textContent = '';
+      relayoutAll(true);
     };
-
-    // --- height auto-fit: every 500ms measure how tall #box (subtitle +
-    // translation rows) actually is and ask the window to grow/shrink to fit.
-    // Width stays fixed -- Chinese/any text wraps instead of overflowing.
-    // Polling only sets the height; it never reacts to the window height, so
-    // there is no feedback loop (unlike the removed MutationObserver code).
-    function fitHeight() {
-      var box = document.getElementById('box');
-      if (!box) return;
-      // bottom margin 12px: the card's outside shadow extends ~7px below the
-      // card (no y-offset, blur 7) and the window edge would clip it -- and
-      // that shadow is what keeps the box findable. Well under the old 16px
-      // value, which made the transparent strip below the card swallow
-      // scroll-wheel events.
-      var h = box.offsetTop + box.offsetHeight + 12; // rows + shadow room
-      window.desktopSubtitle.resize(0, h);
-    }
-    setInterval(fitHeight, 500);
 
     // ACCUMULATING flows: a 'final' APPENDS a new confirmed segment to the
     // source flow (after all older finals -- several can share the screen,
@@ -1270,6 +1389,7 @@ function makeInitJs() {
         // been detached for a moment -- re-attach before writing.
         if (txtPart && txtPart.parentNode !== txtFlow) txtFlow.appendChild(txtPart);
         if (txtPart) txtPart.textContent = ev.text;
+        layoutViewport(txtVp, txtFlow, false);
         return;
       }
       if (ev.type === 'partial_translation') {
@@ -1280,6 +1400,7 @@ function makeInitJs() {
         if (window.__hmyLang === ev.lang && trDraft) {
           trDraft.textContent = ev.text;
         }
+        layoutViewport(trVp, trFlow, false);
         return;
       }
       if (ev.type === 'translation') {
@@ -1296,17 +1417,17 @@ function makeInitJs() {
           // 出来了 partial 还在" state).
           if (trDraft) trDraft.textContent = '';
         }
+        layoutViewport(trVp, trFlow, true);
         return;
       }
       if (ev.type === 'final') {
-        // promote the current draft to a confirmed segment: roll-up the
-        // oldest segments if the caps are hit, then append to the source
-        // flow after older finals and give it an empty translation row the
-        // late 'translation' will fill. NO per-segment lifetime anymore --
-        // without this timer the text never reflows while reading.
+        // Promote the current draft to a confirmed segment, append it after
+        // older finals, and give it an empty translation row the late
+        // 'translation' will fill. Fixed viewports scroll internally; there
+        // is no visible character cap.
         var seq = (ev.seq !== undefined && ev.seq !== null) ? ev.seq : (++lastSeq);
         if (seq > lastSeq) lastSeq = seq;
-        dropOldest();
+        pruneHistory();
         var srcEl = document.createElement('span');
         srcEl.className = 'hmy-txt-seg';
         srcEl.textContent = ev.text;
@@ -1332,9 +1453,12 @@ function makeInitJs() {
 
         segs[seq] = { srcEl: srcEl, trEl: trEl };
         seqOrder.push(seq);
+        layoutViewport(txtVp, txtFlow, true);
+        layoutViewport(trVp, trFlow, true);
         return;
       }
     };
+    relayoutAll(false);
     console.log('hmy: init ok');
   } catch (err) {
     console.log('hmy: init FAILED ' + ((err && err.message) || err));
@@ -1364,6 +1488,8 @@ function setPageButtons() {
           ap.textContent = apiLabel;
           ap.className = 'hmy-btn' + (${JSON.stringify(apiAvailable ? '' : ' off')});
         }
+        var md=document.getElementById('hmy-mode-btn');
+        if(md){ md.textContent = ${JSON.stringify(MODE_LABEL[mode] || "双语")}; }
         var ab=document.getElementById('hmy-audio-btn');
         if(ab){
           ab.textContent = ${JSON.stringify(serverBusy ? ICON.busy : (ICON[audioInput] || ICON.mic))};
@@ -1546,6 +1672,9 @@ function applyApiMode(on) {
 function applyMode(m) {
   if (!MODES.includes(m)) return;
   mode = m;
+  if (win && !win.isDestroyed()) {
+    win.setMinimumSize(WIN_W_MIN, minWindowHeight());
+  }
   setPageButtons();
   win.webContents
     .executeJavaScript(
@@ -1555,6 +1684,7 @@ function applyMode(m) {
         else{de.classList.remove('hmy-tr-only');}
       })();`
     )
+    .then(() => applyRows(rows, true))
     .catch(() => {});
 }
 
@@ -1567,19 +1697,15 @@ function applyBg(alphaPct) {
   const a = (bg / 100).toFixed(2);
   // The card encloses the whole title bar (frame from 6px) and keeps that
   // frame (border + shadow) in BOTH modes -- only the FILL follows the
-  // slider. The padding pair keeps the text where it always was (see the
-  // base #box rule). The flows get a one-line min-height (em units follow
-  // the font size) so an EMPTY card keeps exactly the size of a one-line
-  // card -- the bottom edge no longer shrinks above the text line.
+  // slider. The fixed-row viewports own the height; the flows themselves
+  // must not impose a one-line minimum that would fight vertical centering.
   const css = bg > 0
-    ? `#box{top:6px!important;padding:36px 8px 8px!important;
-         background:rgba(0,0,0,${a})!important;}
-       #hmy-txt-flow{min-height:1.35em!important;}
-       #hmy-tr-flow{min-height:1.25em!important;}`
-    : `#box{top:6px!important;padding:36px 8px 8px!important;
-         background:transparent!important;}
-       #hmy-txt-flow{min-height:0!important;}
-       #hmy-tr-flow{min-height:0!important;}`;
+    ? `#box{top:6px!important;bottom:6px!important;
+         padding:36px 8px 8px!important;
+         background:rgba(0,0,0,${a})!important;}`
+    : `#box{top:6px!important;bottom:6px!important;
+         padding:36px 8px 8px!important;
+         background:transparent!important;}`;
   win.webContents.insertCSS(css).catch(() => {});
   // keep the top-center slider in sync (any path that changes bg -- menu,
   // slider, startup -- converges on the same value)
@@ -1592,23 +1718,96 @@ function applyBg(alphaPct) {
     .catch(() => {});
 }
 
-// Window width follows the width slider (native edge-drag resize is
-// unavailable on this transparent/frameless window -- no resize handles).
-// setBounds works reliably (probed). The window KEEPS its x at all times
-// (left edge fixed, right edge stretches) so the left-anchored sliders
-// never move under the cursor -- no jitter. The window stays where the
-// user puts it; only the height keeps auto-fitting the card content.
-function applyWidth(px) {
-  const v = Math.max(WIN_W_MIN, Math.min(WIN_W_MAX, Math.round(px)));
+// Window width is changed only by the native horizontal edge drag. The window
+// keeps its x/y and height; only the width changes, so text wraps into the
+// same fixed-row viewports. The renderer's ResizeObserver does the reflow
+// (newest content stays visible).
+
+// --- fixed rows + native vertical resize --------------------------------
+// One shared row count drives BOTH source and translation viewports. The
+// window height is intentionally allowed to sit between integer rows: the
+// renderer floors the count; the bottom-anchored group leaves any manual
+// slack above the text.
+let rowsResizeGuardUntil = 0;
+function mainRowHeight() {
+  return Math.max(1, opts.size * LINE_HEIGHT_RATIO);
+}
+function currentChromeHeight() {
+  // #box hides the 30px title-bar padding when the bar auto-hides; CARD_TOP,
+  // bottom padding and shadow stay.
+  return CARD_CHROME - (barVisible ? 0 : BAR_H);
+}
+function chromeHeightForBar(barShown) {
+  return CARD_CHROME - (barShown ? 0 : BAR_H);
+}
+function exactWindowHeight(r, barShown) {
+  const rowH = mainRowHeight();
+  const shown = barShown === undefined ? barVisible : !!barShown;
+  const text = mode === "tr"
+    ? r * rowH
+    : 2 * r * rowH + VIEW_GAP;
+  // Absolute target height, not a ±30 delta: repeated title-bar toggles must
+  // always return to the same hidden/visible height.
+  return Math.ceil(chromeHeightForBar(shown) + text);
+}
+function minWindowHeight(barShown) {
+  const rowH = mainRowHeight();
+  const shown = barShown === undefined ? barVisible : !!barShown;
+  // One visible row in the CURRENT mode: both flows need two viewports plus
+  // the gap; translation-only needs just one. Re-applied on mode switches and
+  // title-bar transitions, so a hidden bar can actually shrink.
+  const textH = mode === "tr" ? rowH : 2 * rowH + VIEW_GAP;
+  return Math.ceil(CARD_CHROME - (shown ? 0 : BAR_H) + textH);
+}
+function setBoundsProgrammatic(bounds) {
+  // Used for row/mode/title-bar height changes; the following native resize
+  // event must not re-quantize rows (that would fight the caller).
+  rowsResizeGuardUntil = Date.now() + 180;
+  if (win && !win.isDestroyed()) win.setBounds(bounds);
+}
+function setContentBoundsProgrammatic(bounds) {
+  // The window content (not the OS frame) is what the row geometry measures.
+  // Setting content bounds directly prevents 1-2px frame/DPI round-trips from
+  // moving the fixed bottom anchor on every title-bar toggle.
+  rowsResizeGuardUntil = Date.now() + 180;
+  if (win && !win.isDestroyed()) win.setContentBounds(bounds);
+}
+function rowsFromWindowHeight(h) {
+  const rowH = mainRowHeight();
+  const textH = h - currentChromeHeight();
+  if (mode === "tr") {
+    return Math.max(1, Math.min(ROWS_CHOICES[ROWS_CHOICES.length - 1],
+      Math.floor(textH / rowH)));
+  }
+  return Math.max(1, Math.min(ROWS_CHOICES[ROWS_CHOICES.length - 1],
+    Math.floor((textH - VIEW_GAP) / (2 * rowH))));
+}
+function setRowsState(next) {
+  const max = ROWS_CHOICES[ROWS_CHOICES.length - 1];
+  rows = Math.max(1, Math.min(max, Math.round(next)));
   if (!win || win.isDestroyed()) return;
-  const b = win.getBounds();
-  win.setBounds({ x: b.x, y: b.y, width: v, height: b.height });
-  diag("IPC: width " + v);
+  win.webContents
+    .executeJavaScript(
+      `(function(){if(window.__hmySetRows){window.__hmySetRows(${rows});}})();`
+    )
+    .catch(() => {});
+}
+// Settings/panel path: snap the window to the exact height for this row count.
+// Native drag uses setRowsState only and deliberately keeps the dragged height.
+function applyRows(next, snap) {
+  setRowsState(next);
+  if (snap && win && !win.isDestroyed()) {
+    const b = win.getContentBounds();
+    setContentBoundsProgrammatic({ x: b.x, y: b.y, width: b.width,
+                                   height: exactWindowHeight(rows) });
+  }
+  syncPanel();
+  diag("rows=" + rows + (snap ? " (snapped)" : ""));
 }
 
 // Bold subtitle text (both flows): a layer-injected rule with !important
 // wins over defaults; switching off re-inserts the normal weight. Font
-// weight does not change line height, so fitHeight is unaffected.
+// weight does not change line height, so the fixed row geometry is unaffected.
 function applyBold(on) {
   bold = !!on;
   const css = bold
@@ -1665,6 +1864,8 @@ function applyFontSize(px) {
   // both simpler and always applies the newest size (no async race).
   const css = `#box{font-size:${px}px!important;} #hmy-txt-flow,#hmy-tr-flow{font-size:${px}px!important;}`;
   win.webContents.insertCSS(css).catch(() => {});
+  // Keep the row count; line boxes are taller now, so re-snap the height.
+  applyRows(rows, true);
 }
 
 function applyFont(family) {
@@ -1677,6 +1878,9 @@ function applyFont(family) {
   const stack = family || '"Yu Gothic UI", "Meiryo", sans-serif';
   const css = `#box{font-family:${stack}!important;} #hmy-txt-flow,#hmy-tr-flow{font-family:${stack}!important;}`;
   win.webContents.insertCSS(css).catch(() => {});
+  // A font family can change the computed line box; keep the shared row
+  // count and re-derive the viewport/window height from it.
+  applyRows(rows, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1864,6 +2068,8 @@ function panelHtml() {
     <div class="sec">字幕样式</div>
     <div class="row"><span class="lab">字号</span>
       <span class="pills">${pills("size", SIZE_CHOICES, state.size)}</span></div>
+    <div class="row"><span class="lab">显示行数</span>
+      <span class="pills">${pills("rows", ROWS_CHOICES, state.rows, (v) => v + "行")}</span></div>
     <div class="row"><span class="lab">字体</span>
       <span class="pills">${fontPills}</span></div>
     <div class="row"><span class="grp"><span class="lab">阴影</span>
@@ -2091,6 +2297,7 @@ let panelFit = null;   // openPanel's fit closure, re-run when content changes
 function panelState() {
   return {
     size: opts.size,
+    rows,
     font: opts.font || "",
     bold,
     textShadow, textStroke, textInk, textOpacity,
@@ -2369,6 +2576,7 @@ function registerPanelIpc() {
     try {
       switch (action) {
         case "size": applyFontSize(parseInt(value, 10)); break;
+        case "rows": applyRows(parseInt(value, 10), true); break;
         case "font": applyFont(value); break;
         case "bold": applyBold(!!value); break;
         case "textShadow": applyTextShadow(value); break;
@@ -2510,9 +2718,12 @@ app.whenReady().then(() => {
   if (textInk === "on") textStroke = "off"; // 重墨/描边 share one property
   barAutohide = opts.barAutohide !== false; // --no-bar-autohide keeps the bar pinned
 
+  rows = ROWS_CHOICES.includes(opts.rows) ? opts.rows : DEFAULT_ROWS;
   const { workArea } = screen.getPrimaryDisplay();
   const winW = Math.min(opts.width, workArea.width);
-  const winH = Math.min(opts.height, workArea.height);
+  const winH = Math.min(
+    opts.height > 0 ? opts.height : exactWindowHeight(rows),
+    workArea.height);
   const winX = workArea.x + Math.floor((workArea.width - winW) / 2);
   const winY = workArea.y + workArea.height - winH;
 
@@ -2535,34 +2746,11 @@ app.whenReady().then(() => {
   ipcMain.on("hmy:toggle-pin", toggleBarPin);
   ipcMain.on("hmy:cycle-lang", () => { diag("IPC: cycle-lang"); cycleLang(); });
   ipcMain.on("hmy:cycle-api", () => { diag("IPC: cycle-api"); cycleApi(); });
+  ipcMain.on("hmy:toggle-mode", () => { diag("IPC: toggle-mode"); applyMode(mode === "both" ? "tr" : "both"); });
   ipcMain.on("hmy:cycle-input", () => { diag("IPC: cycle-input"); cycleAudioInput(); });
   ipcMain.on("hmy:minimize", () => { diag("IPC: minimize"); if (win && !win.isDestroyed()) win.minimize(); });
   ipcMain.on("hmy:close", () => { diag("IPC: close"); app.quit(); });
   ipcMain.on("hmy:set-bg", (_e, v) => { diag("IPC: set-bg " + v); applyBg(parseInt(v, 10)); });
-  ipcMain.on("hmy:set-width", (_e, v) => { applyWidth(parseInt(v, 10)); });
-  // Height-only auto-fit: the window WIDTH stays fixed (text wraps instead),
-  // the HEIGHT follows the subtitle+translation content. The renderer polls
-  // every 500ms, and we debounce with a threshold so this is strictly one-way
-  // (no resize<->observer feedback loop -- unlike the removed MutationObserver
-  // version this cannot deadlock).
-  let lastAutoH = 0;
-  ipcMain.on("hmy:resize", (_e, w, h) => {
-    if (!win || win.isDestroyed()) return;
-    // The floor is MIN_WIN_H (not opts.height=130): keeping the initial
-    // height as a floor left the window ~30-70px taller than the card (the
-    // empty/one-line states), i.e. a large draggable dead zone below the
-    // backdrop. With the true floor the window hugs the card content.
-    h = Math.max(MIN_WIN_H, Math.min(Math.round(h), workArea.height));
-    if (Math.abs(h - lastAutoH) < 4) return; // debounce: ignore tiny jitters
-    lastAutoH = h;
-    // setSize is unreliable on this transparent/frameless window (probe:
-    // setBounds works, setSize's result was ambiguous). Use setBounds with
-    // the CURRENT x/y/width so a user-dragged width is preserved; only the
-    // height follows the content.
-    const b = win.getBounds();
-    win.setBounds({ x: b.x, y: b.y, width: b.width, height: h });
-    diag("IPC: resize h=" + h);
-  });
 
   win = new BrowserWindow({
     width: winW,
@@ -2575,11 +2763,8 @@ app.whenReady().then(() => {
     transparent: true,
     alwaysOnTop: true,
     skipTaskbar: false,
-    resizable: true, // user can drag the edge/corner to change WIDTH (text
-    // re-wraps); the HEIGHT keeps auto-fitting the card content (fitHeight
-    // re-asserts it every 500ms). Also unblocks programmatic setSize, which
-    // resizable:false silently rejected on Windows (window stayed at its
-    // initial height no matter what fitHeight reported).
+    resizable: true, // native WIDTH and HEIGHT drag; width re-wraps inside
+    // fixed-row viewports, height quantizes the shared row count
     hasShadow: false,
     focusable: true,
     webPreferences: {
@@ -2589,7 +2774,27 @@ app.whenReady().then(() => {
   });
 
   win.setAlwaysOnTop(true, "screen-saver");
+  win.setMinimumSize(WIN_W_MIN, minWindowHeight());
   passthrough = opts.passthrough;
+
+  // Native height drag: keep the dragged height (do NOT snap), floor it into
+  // one shared row count, and push that count into both fixed viewports.
+  // Programmatic height changes (settings, mode switch, title-bar hide) set a
+  // short guard so they cannot feed back into a different row count.
+  win.on("resize", () => {
+    if (!win || win.isDestroyed()) return;
+    if (Date.now() < rowsResizeGuardUntil || Date.now() < barTransitionUntil) return;
+    const next = rowsFromWindowHeight(win.getContentBounds().height);
+    if (next === rows) return;
+    rows = next;
+    win.webContents
+      .executeJavaScript(
+        `(function(){if(window.__hmySetRows){window.__hmySetRows(${rows});}})();`
+      )
+      .catch(() => {});
+    syncPanel();
+    diag("native resize -> rows=" + rows);
+  });
 
   win.webContents.on("context-menu", (event) => {
     event.preventDefault();
