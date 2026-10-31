@@ -644,25 +644,12 @@ SENT_END_CHARS = "。？！?!.．…"
 FLUSH_MIN_SPEECH_S = 2.0   # a shorter segment is not worth a forced flush
 FLUSH_COOLDOWN_S = 1.5     # audio-time quiet period required between flushes
 BOUNDARY_TAIL_CHARS = 4    # fresh characters required after the end mark
-# UPPER bound on the same tail: the trim can only cut at a pause that is
-# still inside its 2.5s TAIL_SCAN_S window. Sentence pace is ~4.5 CJK chars/s
-# (~13 latin chars/s), so a tail longer than this means the boundary pause
-# has already scrolled out of the window and the trim would snap the audio
-# at the NEWEST dip instead -- often a mid-word micro-pause dozens of chars
-# past the real boundary (2026-10-18 report: the late "此事。" boundary came
-# with 12 fresh chars behind it; the trim cut at "有|关" and CT pasted the
-# orphan into the final as "有。管"). Refusing the flush lets the segment
-# close the old VAD way -- later than ideal, never wrong.
+# UPPER bound on the same tail: a boundary with too much fresh text behind
+# it is stale, so reject the candidate and let the segment close the old
+# VAD way -- later than ideal, never wrong.
 BOUNDARY_TAIL_MAX_CJK = 8
 BOUNDARY_TAIL_MAX_LATIN = 20
-TAIL_SCAN_S = 2.5          # trim scan window at the flushed segment's tail
-TRIM_SEARCH_S = 0.6        # prefer a dip this close to the text-predicted cut
-DIP_REL_GATE = 3.0         # a dip frame is <= this x the window's quiet floor
-DIP_ABS_GATE = 2e-3        # ...and quieter than this absolute RMS
-DIP_MIN_RUN_FRAMES = 4     # a boundary pause is >= this many quiet frames
-                           # (~120ms); the micro-gaps between the letters of
-                           # a spelled-out acronym ("A P I") are 30-80ms and
-                           # must never be cut at
+SPLIT_END_TOLERANCE = 1    # VAD flush may end one sample past current_segment length
 
 
 def _latin_letter(c: str) -> bool:
@@ -699,7 +686,7 @@ _CJK_NUMERALS = "〇零一二三四五六七八九十百千万两"
 
 # Flush deferral (see should_flush): a fresh tail visibly ending INSIDE a
 # number ("…波及百分之", "…涨到29", "…百分之1 .") must not be flushed yet --
-# the trim would snap the audio between "百分之" and "一点四" (2026-10-18
+# finalizing there would split between "百分之" and "一点四" (2026-10-18
 # report: two finals rendered "百分之。1.4" while the value is 1.4%). The
 # next 0.5s partial re-checks once the number has finished.
 _NUM_TAIL_CHARS = "0123456789" + _CJK_NUMERALS + "点.．"
@@ -757,23 +744,15 @@ class SemanticSplitter:
     segments, less draft-decode CPU, snappier subtitles; the old max_speech
     encouragement stays as the fallback for punctuation-free stretches).
 
-    The flushed segment's tail may already hold the next sentence's first
-    syllables (the draft lags the audio it describes):
-    trim_if_flushed cuts the flushed segment at the last energy dip in its
-    trailing TAIL_SCAN_S window. The cut audio is bridged back by the next
-    segment's 1s preroll (history.last_seg_end shrinks with the trim because
-    with_preroll is handed the trimmed samples), so nothing is lost to
-    either final. No dip found -> the whole segment emits (it may carry a
-    syllable or two of the next sentence; liveable).
+    A flushed segment may still contain the first syllables of the next
+    sentence because the draft lags the audio it describes. The text tail
+    layer keeps that last sentence open and merges it with the next segment;
+    the semantic flush itself only decides when the VAD segment closes.
     """
 
     def __init__(self, lookahead_s: float = 0.0):
         self._cooldown_until = 0.0
-        self._flushed_end = None  # end sample index of the segment to trim
-        # Approximate position of the accepted text boundary inside the
-        # segment (0..1). Set only by a positive should_flush(); used to
-        # choose the dip NEAREST that position instead of the last one.
-        self._boundary_ratio = None
+        self._flushed_end = None  # end sample index of the semantic-flush segment
         # A sentence boundary is a candidate first; it must survive long
         # enough for the next words to arrive before we cut the audio. This
         # is what keeps CT from receiving a fragment such as "他认为在":
@@ -906,7 +885,6 @@ class SemanticSplitter:
             self._count("short_tail")
             self._clear_pending()
             return False
-        self._boundary_ratio = (cut + 1) / max(len(text), 1)
         if self.lookahead_s <= 0:
             self._count("flush")
             self._clear_pending()
@@ -937,70 +915,13 @@ class SemanticSplitter:
         self._flushed_end = flushed_end
 
     def is_flushed(self, seg_end: int) -> bool:
-        """True when this segment is the one armed for a semantic flush."""
-        return self._flushed_end is not None and seg_end == self._flushed_end
+        """True when this segment is the one armed for a semantic flush.
 
-    def trim_if_flushed(self, seg_end: int, samples: np.ndarray,
-                        sample_rate: int) -> np.ndarray:
-        """Cut the flushed segment at its boundary dip; other segments pass
-        through untouched (matched by end sample index, one shot). When a
-        text-boundary ratio is armed, prefer the quiet run nearest that
-        position -- not merely the latest one, which is often a micro-pause
-        inside the next word."""
-        if self._flushed_end is None or seg_end != self._flushed_end:
-            return samples
-        self._flushed_end = None
-        ratio, self._boundary_ratio = self._boundary_ratio, None
-        n = len(samples)
-        frame = max(int(0.03 * sample_rate), 8)
-        # scan the last TAIL_SCAN_S seconds -- or the WHOLE segment when it
-        # is shorter (sentence-level flushes are 2-3s, exactly the ones that
-        # need the trim; the run checks below keep an early cut safe)
-        win = min(int(TAIL_SCAN_S * sample_rate), n)
-        tail = samples[-win:]
-        m = len(tail) // frame
-        if m < 8:
-            return samples  # nothing that could hold pause + speech on both sides
-        rms = np.sqrt((tail[:m * frame].reshape(m, frame) ** 2).mean(axis=1))
-        loud = float(rms.max())
-        if loud < DIP_ABS_GATE:
-            return samples  # the whole tail is near-silence: no syllables to hand back
-        # the dip gate must sit well BELOW the speech level (a pauseless tail
-        # has floor == speech RMS, where "floor x 3" alone would call every
-        # frame quiet and cut real words) and well above true noise
-        gate = min(max(float(rms.min()) * DIP_REL_GATE, DIP_ABS_GATE), loud * 0.3)
-        quiet = np.flatnonzero(rms <= gate)
-        # only a RUN of consecutive quiet frames is a boundary pause; the
-        # 30-80ms gaps inside a spelled-out acronym show up as 1-2 quiet
-        # frames and must never cut ("A P I" -> "…AP" + "I…")
-        if len(quiet) < DIP_MIN_RUN_FRAMES:
-            return samples
-        runs = np.split(quiet, np.where(np.diff(quiet) != 1)[0] + 1)
-        # a run needs >=2 speech frames before it (the sentence's last
-        # words) and >=2 after (the next sentence's first syllables -- what
-        # the cut hands back to the next segment via preroll)
-        candidates = []
-        for run in runs:
-            f_end = int(run[-1])
-            f_start = int(run[0])
-            if f_start < 2 or f_end > m - 3:
-                continue
-            cut_at = n - win + (f_end + 1) * frame
-            candidates.append(cut_at)
-        if not candidates:
-            return samples
-        if ratio is not None:
-            expected = int(n * ratio)
-            search = int(TRIM_SEARCH_S * sample_rate)
-            near = [c for c in candidates if abs(c - expected) <= search]
-            if not near:
-                # The text says the boundary is elsewhere; emitting the
-                # whole segment is safer than snapping to a remote dip.
-                return samples
-            cut_at = min(near, key=lambda c: (abs(c - expected), -c))
-            return samples[:cut_at]
-        # No text ratio (direct/legacy call): keep the old latest-dip rule.
-        return samples[:candidates[-1]]
+        VAD flush can end one sample past the captured current_segment length;
+        treat that boundary jitter as the same segment.
+        """
+        return (self._flushed_end is not None
+                and abs(seg_end - self._flushed_end) <= SPLIT_END_TOLERANCE)
 
 
 class PartialPrinter:
@@ -1394,17 +1315,10 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         seg_end = seg_start + len(samples)
         was_flushed = False
         if splitter is not None:
-            # a boundary-flushed segment gets its trailing next-sentence
-            # syllables cut off (see SemanticSplitter.trim_if_flushed): spans
-            # and preroll bounds must use the TRIMMED extent, or the refine
-            # pass would decode the same audio into two utterance groups.
-            # Remember the flush before trim clears the one-shot marker: the
-            # last sentence of such a segment is held for right context.
+            # Mark semantic-flush segments so their open last sentence is held
+            # for right context; the VAD flush already closed the full audio
+            # segment, so pass it to ASR untouched.
             was_flushed = splitter.is_flushed(seg_end)
-            trimmed = splitter.trim_if_flushed(seg_end, samples, sample_rate)
-            if len(trimmed) != len(samples):
-                samples = trimmed
-                seg_end = seg_start + len(samples)
         if history is not None:
             samples = history.with_preroll(seg_start, samples)
         vad.pop()
@@ -2377,8 +2291,8 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
                 # never paused -- finalize the segment NOW instead of
                 # letting it grow to the VAD's own (much later, much
                 # longer) cut. The very next drain in this same loop
-                # iteration emits the final, and the trimmed syllables of
-                # the next sentence ride back in via that segment's preroll.
+                # iteration emits the final; the open last sentence is kept
+                # as a text tail for the next segment's right context.
                 if partial_text.strip() and splitter.should_flush(
                         partial_text, len(cur) / sample_rate, audio_pos):
                     splitter.arm(audio_pos, vad.current_segment.start + len(cur))

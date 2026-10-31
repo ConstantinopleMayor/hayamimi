@@ -1275,7 +1275,50 @@ def test_flush_waits_for_right_context_when_configured():
     assert splitter.should_flush(text, 3.0, 11.0)
     splitter.arm(11.0, 100)
     assert splitter.is_flushed(100)
-    assert not splitter.is_flushed(101)
+    assert splitter.is_flushed(101)
+    assert not splitter.is_flushed(102)
+
+
+
+
+
+def test_semantic_splitter_boundary_counters():
+    splitter = SemanticSplitter(lookahead_s=1.0)
+    text = "测试完成。明天要开会"
+    assert not splitter.should_flush(text, 3.0, 10.0)   # first candidate
+    assert not splitter.should_flush(text, 3.0, 10.5)   # still waiting
+    assert splitter.should_flush(text, 3.0, 11.0)       # stable for 1s
+    assert splitter.counters["calls"] == 3
+    assert splitter.counters["lookahead_wait"] == 2
+    assert splitter.counters["flush"] == 1
+
+    splitter = SemanticSplitter()
+    assert not splitter.should_flush("没有句号", 3.0, 10.0)
+    assert splitter.counters["no_boundary"] == 1
+    assert not splitter.should_flush("有句号。", 3.0, 10.0)
+    assert splitter.counters["terminal_only"] == 1
+    assert not splitter.should_flush("第一句。后", 3.0, 10.0)
+    assert splitter.counters["short_tail"] == 1
+    assert not splitter.should_flush("第一句。这是超过八个字符的后续", 3.0, 10.0)
+    assert splitter.counters["stale_tail"] == 1
+    assert splitter.counters["stale_tail_cjk"] == 1
+    assert splitter.counters["max_tail_cjk"] > 8
+
+    splitter = SemanticSplitter()
+    assert not splitter.should_flush(
+        "Hello. " + "word " * 12, 3.0, 10.0)
+    assert splitter.counters["stale_tail"] == 1
+    assert splitter.counters["stale_tail_latin"] == 1
+    assert splitter.counters["max_tail_latin"] > 20
+
+    splitter = SemanticSplitter()
+    splitter.arm(10.0, 100)
+    assert not splitter.should_flush("测试完成。明天要开会", 3.0, 10.5)
+    assert splitter.counters["cooldown"] == 1
+
+    splitter = SemanticSplitter()
+    assert not splitter.should_flush("测试完成。明天要开会", 1.0, 10.0)
+    assert splitter.counters["too_short"] == 1
 
 
 def test_split_sentence_tail_holds_only_the_open_last_sentence():
@@ -1373,9 +1416,6 @@ def _drain_one(text, was_flushed, lang="zh", tier=None, text_source=None,
         def is_flushed(self, seg_end):
             return was_flushed
 
-        def trim_if_flushed(self, seg_end, samples, sample_rate):
-            return samples
-
     printer = _Printer()
     state = SentenceState()
     realtime_transcribe.drain_segments(
@@ -1448,6 +1488,12 @@ def test_semantic_flush_holds_last_sentence_and_shows_partial():
     assert sink.partials == ["第二句。"]
 
 
+def test_semantic_flush_passes_full_vad_audio_to_asr():
+    seen = []
+    _drain_one("第一句。第二句。", was_flushed=True, capture=seen)
+    assert seen == [16000]
+
+
 def test_flush_sentence_tail_publishes_and_clears_once():
     class _Sink:
         def __init__(self):
@@ -1507,16 +1553,14 @@ def test_flush_skips_english_abbreviation():
 
 def test_flush_defers_while_a_number_is_still_in_progress():
     """A fresh tail visibly ending INSIDE a number ("…波及百分之",
-    "…涨到29") must not flush yet: the trim would snap the audio between
+    "…涨到29") must not flush yet: finalizing there would split between
     "百分之" and "一点四" (2026-10-18: rendered "百分之。1.4"). The next
     partial re-checks once the number has finished."""
     assert not _flush("暴露此事。与一次大规模蒸馏攻击有关波及百分之")
     assert not _flush("上涨。涨到29")
     assert not _flush("上涨。达到百分之1 .")
     # number complete, but the boundary is STALE: ~27 fresh chars (~6s of
-    # speech) sit behind the mark, far outside the trim's 2.5s window --
-    # exactly the 2026-10-18 "有。管" report (promised cut at "此事。",
-    # actual cut at "有|关")
+    # speech) sit behind the mark, so let the natural VAD close instead
     assert not _flush("暴露此事。与一次大规模蒸馏攻击有关波及百分之一点四的council")
 
 
@@ -1542,44 +1586,9 @@ def test_boundary_overlap_audit():
     assert _boundary_overlap("今天结束", "明天开始") == 0
 
 
-def test_trim_prefers_dip_near_text_boundary():
-    sr = 16000
-    splitter = SemanticSplitter()
-    text = "今天。休息一下明早出发"
-    assert splitter.should_flush(text, 3.0, 10.0)
-    n = sr  # 1.0 s
-    samples = np.full(n, 0.1, dtype=np.float32)
-    frame = int(0.03 * sr)
-    for first in (5, 25):  # ~0.15-0.27 s and ~0.75-0.87 s
-        samples[first * frame:(first + 4) * frame] = 0.0005
-    splitter.arm(10.0, n)
-    cut = splitter.trim_if_flushed(n, samples, sr)
-    # The text boundary is near 0.27 s; the old latest-dip rule would cut
-    # at ~0.87 s instead.
-    assert len(cut) == 9 * frame
-    assert len(cut) < 20 * frame
-
-
-def test_trim_does_not_snap_to_a_remote_dip():
-    sr = 16000
-    splitter = SemanticSplitter()
-    assert splitter.should_flush("今天。休息一下明早出发", 3.0, 10.0)
-    n = sr
-    samples = np.full(n, 0.1, dtype=np.float32)
-    frame = int(0.03 * sr)
-    # Only a late dip exists, far from the text boundary (~0.27 s).
-    samples[27 * frame:31 * frame] = 0.0005
-    splitter.arm(10.0, n)
-    assert len(splitter.trim_if_flushed(n, samples, sr)) == n
-
-
 def test_flush_refuses_stale_boundary_with_long_tail():
-    """CT can surface a boundary mark seconds after its pause: by flush
-    time the tail behind it has grown past what the trim's 2.5s scan window
-    can still see, so the trim snaps the audio at the NEWEST dip instead --
-    often a mid-word micro-pause dozens of chars past the real boundary
-    (2026-10-18 report: "有。管"). Refusing the flush falls back to VAD
-    closing: later than ideal, never wrong."""
+    """A boundary with too much fresh text behind it is stale; refusing the
+    flush falls back to natural VAD closing: later than ideal, never wrong."""
     # CJK tail of 12 (~2.7s) > BOUNDARY_TAIL_MAX_CJK
     assert not _flush("暴露此事。与一次大规模蒸馏攻击，有")
     assert not _flush("暴露此事。与一次大规模蒸馏攻击有关")
@@ -1587,8 +1596,8 @@ def test_flush_refuses_stale_boundary_with_long_tail():
     assert not _flush("and then. The quick brown fox jumps over the lazy dog")
 
 
-def test_flush_allows_fresh_boundary_within_trim_window():
-    """Tails inside the window keep flushing: CJK 8 chars (~1.8s) and
+def test_flush_allows_fresh_boundary_within_tail_window():
+    """Tails inside the stale guard keep flushing: CJK 8 chars (~1.8s) and
     latin 20 chars (~1.5s) at the limits, fewer in between."""
     assert _flush("测试完成。明天的会议很重要")  # 8 CJK chars
     assert _flush("测试完成。明天要开会")  # 5 CJK chars
