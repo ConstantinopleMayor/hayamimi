@@ -376,7 +376,9 @@ All flags are on `scripts/realtime_transcribe.py`:
 | `--threads N` | 4 | inference threads per model |
 | `--no-partial` | off | disable in-progress draft subtitles |
 | `--min-silence SEC` | 0.35 | silence duration that ends an utterance; lower = snappier finals, more splits |
-| `--max-speech SEC` | 12.0 | force-finalize an utterance after this many seconds of continuous speech |
+| `--max-speech SEC` | 20.0 | encourage a split after this many seconds of continuous speech (not a hard cut) |
+| `--lookahead SEC` | 1.0 | how long a sentence-boundary candidate must stay stable before semantic flush |
+| `--boundary-stats` | off | print one-line semantic-boundary diagnostics at session end |
 | `--max-resident N` | 3 | max non-tier0 models kept resident (LRU eviction); `<=0` = unlimited |
 | `--serve [PORT]` | off, 8833 | serve the dashboard + OBS overlay at `http://localhost:PORT` |
 | `--no-refine` | off | disable the second-pass re-decode of utterance groups |

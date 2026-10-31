@@ -17,9 +17,10 @@ from realtime_transcribe import (AudioHistory, PartialPrinter, PREROLL_S, Refine
                                  SentenceState, SessionStats, SemanticSplitter,
                                  apply_translation_spec,
                                  digits_consistent, translate_by_sentence,
-                                 _boundary_overlap, _coverage_ok,
-                                 _flush_sentence_tail, _join_final_texts,
-                                 _merge_sentence_tail, _split_sentence_tail)
+                                 _boundary_overlap, _complete_sentences,
+                                 _coverage_ok, _flush_sentence_tail,
+                                 _join_final_texts, _merge_sentence_tail,
+                                 _split_sentence_tail, _trailing_mark)
 import asr_engine
 import realtime_transcribe
 import translate_m2m
@@ -1299,7 +1300,38 @@ def test_split_sentence_tail_holds_only_the_open_last_sentence():
     ) == "该模型还针对消费级gpu做了推理优化 block发布全双工语音模型，desa称其仅靠语音对话。"
 
 
-def _drain_one(text, was_flushed):
+def test_split_sentence_tail_handles_english_periods():
+    complete, tail = _split_sentence_tail("One. Two. Three.")
+    assert complete == "One. Two."
+    assert tail == "Three"
+
+    complete, tail = _split_sentence_tail("One. Two")
+    assert complete == "One."
+    assert tail == "Two"
+
+
+def test_english_sentence_period_guards():
+    # Native v2 output must not be cut at abbreviations, initials, decimals
+    # or version strings.
+    assert _complete_sentences("Mr. Smith arrived. He said 4.1 percent.") == [
+        "Mr. Smith arrived.", "He said 4.1 percent."]
+    assert _complete_sentences("The U.S. Senate voted. Next.") == [
+        "The U.S. Senate voted.", "Next."]
+    assert _complete_sentences("Version v4.1. Next.") == [
+        "Version v4.1.", "Next."]
+    assert _complete_sentences("One. Two.") == ["One.", "Two."]
+
+
+def test_english_trailing_mark_still_preserved():
+    assert _trailing_mark("One. Two.") == "."
+    assert _trailing_mark("One. Two?") == "?"
+
+
+def _drain_one(text, was_flushed, lang="zh", tier=None, text_source=None,
+               capture=None):
+    tier = tier or ("pz" if lang == "zh" else "v2")
+    text_source = text_source or tier
+
     class _Sink:
         def __init__(self):
             self.finals = []
@@ -1320,7 +1352,10 @@ def _drain_one(text, was_flushed):
 
     class _Asr:
         def transcribe(self, samples, sample_rate, **kwargs):
-            return {"text": text, "raw_text": text, "lang": "zh", "tier": "pz",
+            if capture is not None:
+                capture.append(len(samples))
+            return {"text": text, "raw_text": text, "lang": lang, "tier": tier,
+                    "text_source": text_source,
                     "lid_ms": 0, "decode_ms": 0, "probe_ms": 0}
 
     class _Vad:
@@ -1349,11 +1384,61 @@ def _drain_one(text, was_flushed):
     return printer.server, state
 
 
-def test_natural_vad_segment_publishes_all_sentences_without_tail():
+def test_natural_vad_segment_publishes_one_final():
     sink, state = _drain_one("第一句。第二句。", was_flushed=False)
-    assert sink.finals == ["第一句。", "第二句。"]
+    assert sink.finals == ["第一句。第二句。"]
     assert sink.partials == []
     assert state.tail == ""
+
+
+def test_english_natural_vad_segment_publishes_one_final():
+    sink, state = _drain_one("One. Two.", was_flushed=False, lang="en")
+    assert sink.finals == ["One. Two."]
+    assert sink.partials == []
+    assert state.tail == ""
+
+
+def test_english_semantic_flush_publishes_one_native_final():
+    sink, state = _drain_one("One. Two.", was_flushed=True, lang="en",
+                             tier="v2", text_source="v2")
+    assert sink.finals == ["One. Two."]
+    assert sink.partials == []
+    assert state.tail == ""
+
+
+def test_v3_semantic_flush_publishes_one_native_final():
+    sink, state = _drain_one("One. Two.", was_flushed=True, lang="en",
+                             tier="v3", text_source="v3")
+    assert sink.finals == ["One. Two."]
+    assert sink.partials == []
+    assert state.tail == ""
+
+
+def test_sensevoice_manual_zh_publishes_one_native_final():
+    sink, state = _drain_one("第一句。第二句。", was_flushed=True, lang="zh",
+                             tier="sv", text_source="sv")
+    assert sink.finals == ["第一句。第二句。"]
+    assert sink.partials == []
+    assert state.tail == ""
+
+
+def test_sensevoice_auto_fallback_uses_text_source_not_tier():
+    # Auto zh keeps tier=pz when Paraformer returned empty, but the actual
+    # text came from SenseVoice. It must not enter the CT/tail path.
+    sink, state = _drain_one("第一句。第二句。", was_flushed=True, lang="zh",
+                             tier="pz", text_source="sv")
+    assert sink.finals == ["第一句。第二句。"]
+    assert sink.partials == []
+    assert state.tail == ""
+
+
+def test_pz_semantic_flush_still_holds_last_sentence():
+    sink, state = _drain_one("第一句。第二句。", was_flushed=True, lang="zh",
+                             tier="pz", text_source="pz")
+    assert sink.finals == ["第一句。"]
+    assert state.tail == "第二句"
+    assert state.tail_mark == "。"
+    assert sink.partials == ["第二句。"]
 
 
 def test_semantic_flush_holds_last_sentence_and_shows_partial():
