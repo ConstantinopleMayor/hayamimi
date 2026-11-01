@@ -651,6 +651,39 @@ BOUNDARY_TAIL_MAX_CJK = 8
 BOUNDARY_TAIL_MAX_LATIN = 20
 SPLIT_END_TOLERANCE = 1    # VAD flush may end one sample past current_segment length
 
+_STRONG_END_CHARS = "？！?!"
+
+
+class BoundaryPolicy(NamedTuple):
+    """Per-source limits for a sentence-boundary candidate.
+
+    The max fields are inclusive: a fresh tail at the limit is still usable.
+    Native-punctuation sources still use semantic flush; they simply publish
+    one final and do not hold a text tail.
+    """
+
+    allow_live: bool
+    use_cjk: bool
+    max_cjk_period: int
+    max_cjk_strong: int
+    max_latin_period: int
+    max_latin_strong: int
+
+
+BOUNDARY_POLICY_PZ = BoundaryPolicy(
+    True, True,
+    BOUNDARY_TAIL_MAX_CJK, BOUNDARY_TAIL_MAX_CJK,
+    BOUNDARY_TAIL_MAX_LATIN, BOUNDARY_TAIL_MAX_LATIN,
+)
+BOUNDARY_POLICIES = {
+    "pz": BOUNDARY_POLICY_PZ,
+    "rz": BoundaryPolicy(True, True, 8, 12, 20, 24),
+    "sv": BoundaryPolicy(True, True, 8, 12, 20, 24),
+    "v2": BoundaryPolicy(True, False, 8, 12, 20, 24),
+    "v3": BoundaryPolicy(True, False, 8, 12, 20, 24),
+    "omni": BoundaryPolicy(False, True, 8, 8, 20, 20),
+}
+
 
 def _latin_letter(c: str) -> bool:
     """Alphanumeric check shared by the boundary pickers: a sentence-end mark
@@ -766,6 +799,7 @@ class SemanticSplitter:
             "calls": 0,
             "too_short": 0,
             "cooldown": 0,
+            "live_disabled": 0,
             "no_boundary": 0,
             "terminal_only": 0,
             "number_tail": 0,
@@ -788,8 +822,14 @@ class SemanticSplitter:
         self._pending_since = None
         self._pending_prefix = None
 
-    def should_flush(self, text: str, speech_s: float, audio_pos: float) -> bool:
+    def should_flush(self, text: str, speech_s: float, audio_pos: float,
+                     source: str | None = None) -> bool:
         self._count("calls")
+        policy = BOUNDARY_POLICIES.get(source or "pz", BOUNDARY_POLICY_PZ)
+        if not policy.allow_live:
+            self._count("live_disabled")
+            self._clear_pending()
+            return False
         if speech_s < FLUSH_MIN_SPEECH_S:
             self._count("too_short")
             self._clear_pending()
@@ -864,13 +904,22 @@ class SemanticSplitter:
             self._clear_pending()
             return False
         # a stale boundary (too much fresh speech behind it, see the
-        # BOUNDARY_TAIL_MAX_* constants) must not flush either: let the
-        # segment close the natural VAD way instead
-        tail_is_cjk = bool(_re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", tail))
+        # per-source BOUNDARY_POLICIES limits) must not flush either: let
+        # the segment close the natural VAD way instead
+        tail_is_cjk = (
+            policy.use_cjk
+            and bool(_re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", tail))
+        )
+        is_strong = text[cut] in _STRONG_END_CHARS
+        if tail_is_cjk:
+            max_tail = (policy.max_cjk_strong if is_strong
+                        else policy.max_cjk_period)
+        else:
+            max_tail = (policy.max_latin_strong if is_strong
+                        else policy.max_latin_period)
         max_key = "max_tail_cjk" if tail_is_cjk else "max_tail_latin"
         self.counters[max_key] = max(self.counters[max_key], len(tail))
-        if not same_candidate and len(tail) > (
-                BOUNDARY_TAIL_MAX_CJK if tail_is_cjk else BOUNDARY_TAIL_MAX_LATIN):
+        if not same_candidate and len(tail) > max_tail:
             self._count("stale_tail")
             self._count("stale_tail_cjk" if tail_is_cjk else "stale_tail_latin")
             self.counters["stale_tail_max"] = max(
@@ -1095,6 +1144,7 @@ _ACRONYM_RE = None
 # deliberately not loaded). pz/rz need the tail because their ASR output is
 # unpunctuated and gets re-punctuated as a merged sentence.
 _NATIVE_PUNCT_SOURCES = frozenset({"v2", "v3", "sv"})
+_NO_TAIL_SOURCES = _NATIVE_PUNCT_SOURCES | {"omni"}
 
 
 def _acronym_before(text: str, i: int) -> bool:
@@ -1339,11 +1389,11 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         segment_text = result["text"]
         segment_raw = result.get("raw_text") or _plain_for_ct(segment_text)
         text_source = result.get("text_source") or result.get("tier", "")
-        native_punct = text_source in _NATIVE_PUNCT_SOURCES
+        no_tail = text_source in _NO_TAIL_SOURCES
         display_text = segment_text
         state = sentence_state
         if state is not None and state.tail:
-            if native_punct or (state.tail_lang and state.tail_lang != result["lang"]):
+            if no_tail or (state.tail_lang and state.tail_lang != result["lang"]):
                 # Native-punctuation models never consume a held tail: a
                 # leftover tail came from an earlier pz/rz segment, so publish
                 # it first and start the current segment cleanly. Also keep
@@ -1358,7 +1408,7 @@ def drain_segments(vad, sample_rate: int, asr: RoutedASR, stats: SessionStats,
         if state is not None:
             state.tail = ""
 
-        if was_flushed and state is not None and not native_punct:
+        if was_flushed and state is not None and not no_tail:
             before_last, held = _split_sentence_tail(display_text)
             if before_last:
                 # Publish the completed earlier sentence now; the current
@@ -2268,6 +2318,7 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
             if printer.enabled and len(cur) >= sample_rate // 2:
                 partial_text = strip_draft_tail_marks(
                     asr.partial(cur, sample_rate, lang_hint=early_lang))
+                partial_source = getattr(asr, "last_partial_source", None)
                 display_partial = partial_text
                 if sentence_state.tail:
                     display_partial = _merge_sentence_tail(
@@ -2294,7 +2345,8 @@ def run_stream(chunks, vad, sample_rate: int, asr: RoutedASR, stats: SessionStat
                 # iteration emits the final; the open last sentence is kept
                 # as a text tail for the next segment's right context.
                 if partial_text.strip() and splitter.should_flush(
-                        partial_text, len(cur) / sample_rate, audio_pos):
+                        partial_text, len(cur) / sample_rate, audio_pos,
+                        source=partial_source):
                     splitter.arm(audio_pos, vad.current_segment.start + len(cur))
                     vad.flush()
 

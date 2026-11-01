@@ -379,6 +379,7 @@ def test_partial_forced_lang_routes_directly_without_lid_or_sv_probe():
     stub = _Stub()
     result = asr_engine.RoutedASR.partial(stub, np.zeros(1600, dtype=np.float32), 16000)
     assert result == "raw text"
+    assert stub.last_partial_source == "sv"
 
 
 class _MarkPunct:
@@ -1237,9 +1238,10 @@ def test_hot_translate_switch_rebinds_the_refiner(monkeypatch):
 
 # ---- sentence-boundary flush guard (SemanticSplitter) ----------------------
 
-def _flush(text, speech_s=3.0, audio_pos=10.0):
+def _flush(text, speech_s=3.0, audio_pos=10.0, source=None):
     # fresh splitter: cooldown 0, FLUSH_MIN_SPEECH_S satisfied
-    return SemanticSplitter().should_flush(text, speech_s, audio_pos)
+    return SemanticSplitter().should_flush(text, speech_s, audio_pos,
+                                           source=source)
 
 
 def test_flush_skips_pz_spaced_decimal_tear():
@@ -1607,6 +1609,26 @@ def test_flush_allows_fresh_boundary_within_tail_window():
     # number complete AND the tail still fresh: usable boundary (the stale
     # case lives in test_flush_refuses_stale_boundary_with_long_tail)
     assert _flush("上涨。涨到29.5了")
+
+
+def test_boundary_policy_is_source_aware():
+    assert not _flush("测试完成！" + "啊" * 12, source="pz")
+    assert _flush("测试完成！" + "啊" * 12, source="rz")
+    assert not _flush("测试完成！" + "啊" * 13, source="rz")
+    assert _flush("测试完成！" + "啊" * 12, source="sv")
+    assert not _flush("测试完成。" + "啊" * 9, source="rz")
+    assert _flush("测试完成。" + "啊" * 8, source="rz")
+
+    assert _flush("Done?" + " " + "x" * 24, source="v2")
+    assert _flush("Done?" + " " + "x" * 24, source="v3")
+    assert not _flush("Done?" + " " + "x" * 25, source="v2")
+    assert not _flush("Done?" + " " + "x" * 21, source="pz")
+    assert _flush("Done?" + " " + "x" * 20, source="pz")
+
+    splitter = SemanticSplitter()
+    assert not splitter.should_flush("测试完成。明天要开会", 3.0, 10.0,
+                                     source="omni")
+    assert splitter.counters["live_disabled"] == 1
 
 
 def test_build_stamp_names_dir_and_newest_mtime():

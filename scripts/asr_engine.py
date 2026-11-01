@@ -673,6 +673,7 @@ class RoutedASR:
         self._bg_lock = threading.Lock()  # guards _closed + _bg_threads
         self._fallback_warned: set[str] = set()  # once-per-tier degradation stderr
         self.last_lang = None  # sticky language from the most recent final
+        self.last_partial_source = None  # tier/source used by the latest draft
         self._unavailable: set[str] = set()  # models missing on disk (--minimal installs)
         self._pending_lang = None   # candidate new language awaiting confirmation
         self._pending_count = 0
@@ -1368,6 +1369,7 @@ class RoutedASR:
                 rec, tier = self._route(lang)
                 text = self._decode(rec, samples, sample_rate)
             text = self._replace(text, zh=lang == "zh")
+            self.last_partial_source = tier
             return self._draft_punct(text, lang, tier)
 
         if lang_hint is not None:
@@ -1375,12 +1377,14 @@ class RoutedASR:
             rec, tier = self._route(lang_hint)
             text = self._replace(self._decode(rec, samples, sample_rate),
                                  zh=lang_hint == "zh")
+            self.last_partial_source = tier
             return self._draft_punct(text, lang_hint, tier)
 
         sticky = self.last_lang
         if sticky in V3_LANGS and sticky != "en":
             # EU languages: SenseVoice can't probe these; trust the session
-            rec, _ = self._route(sticky)
+            rec, tier = self._route(sticky)
+            self.last_partial_source = tier
             return self._replace(self._decode(rec, samples, sample_rate),
                                  zh=sticky == "zh")
 
@@ -1393,14 +1397,17 @@ class RoutedASR:
             sv_text, sv_tag = self._decode_full(self._get("sv"), samples, sample_rate)
         except ModelUnavailable:
             rec = self._get_with_fallback("rz")[0]
+            self.last_partial_source = "rz"
             return self._replace(self._decode(rec, samples, sample_rate))
         if "ja" in sv_tag:
             try:
                 rz_text = self._decode(self._get("rz"), samples, sample_rate)
                 if rz_text.strip():
+                    self.last_partial_source = "rz"
                     return self._draft_punct(self._replace(rz_text), "ja", "rz")
             except ModelUnavailable:
                 pass
+        self.last_partial_source = "sv"
         return self._replace(sv_text, zh="zh" in (sv_tag or ""))
 
     def _replace(self, text: str, zh: bool = False) -> str:
